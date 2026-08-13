@@ -3,7 +3,7 @@
 AppGate SNMPv3 Configuration Script
 
 Automates SNMPv3 user configuration on AppGate appliances by:
-1. Prompting for SNMP credentials and AppGate IP
+1. Prompting for SNMP credentials, read-only user, and AppGate IP
 2. Authenticating to AppGate API to obtain token
 3. Retrieving the appliance's SNMP Engine ID via SSH
 4. Generating SNMPv3 password hashes via snmpv3-hashgen
@@ -392,6 +392,7 @@ class AppGateSNMPConfig:
         user: str,
         auth_hash: str,
         priv_hash: str,
+        rouser_line: str = "",
         enabled: bool = True,
     ) -> bool:
         """
@@ -419,13 +420,19 @@ class AppGateSNMPConfig:
             f"createUser {user} SHA -l 0x{auth_hash} AES -l 0x{priv_hash}"
         )
 
-        # Merge with existing snmpd.conf (avoid duplicate createUser lines)
+        # Merge with existing snmpd.conf (avoid duplicate lines)
         existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
         lines = existing_conf.splitlines() if existing_conf else []
         lines = [
             line for line in lines
             if not re.match(rf"^createUser\s+{re.escape(user)}\s", line)
         ]
+        if rouser_line:
+            lines = [
+                line for line in lines
+                if not re.match(rf"^rouser\s+{re.escape(user)}\s", line)
+            ]
+            lines.append(rouser_line)
         lines.append(create_user_line)
         new_conf = "\n".join(lines)
 
@@ -500,7 +507,7 @@ class AppGateSNMPConfig:
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
+            if result.returncode == 0 and "timeout" not in (result.stderr or "").lower() and "failed" not in (result.stderr or "").lower():
                 return True
 
             print(f"      SNMP walk failed (rc={result.returncode})", file=sys.stderr)
@@ -533,10 +540,11 @@ def prompt_snmp_inputs() -> Dict[str, str]:
         "snmp_auth": input("SNMP Auth: ").strip(),
         "snmp_priv": input("SNMP Priv: ").strip(),
         "agip":      input("AppGate IP Address: ").strip(),
+        "rouser":    input("SNMP Read-Only Username (rouser): ").strip(),
     }
 
-    if not all(inputs.values()):
-        raise ValueError("All input fields are required")
+    if not all(inputs[k] for k in ("snmp_user", "snmp_auth", "snmp_priv", "agip")):
+        raise ValueError("All required input fields are missing")
     return inputs
 
 
@@ -604,7 +612,15 @@ def main() -> None:
 
         # 5. Push to AppGate
         print("\n[5/6] Updating AppGate SNMP configuration...")
-        config.update_snmp_config(config.SNMPUser, config.SNMPAuthHash, config.SNMPPrivHash)
+        rouser_line = ""
+        if inputs.get("rouser"):
+            rouser_line = f"rouser {inputs['rouser']} priv"
+        config.update_snmp_config(
+            config.SNMPUser,
+            config.SNMPAuthHash,
+            config.SNMPPrivHash,
+            rouser_line,
+        )
         print("      SNMP configuration updated successfully")
 
         # 6. Validate
@@ -622,6 +638,8 @@ def main() -> None:
         print(f"Auth:           {config.SNMPAuth} / {config.SNMPAuthHash}")
         print(f"Priv:           {config.SNMPPriv} / {config.SNMPPrivHash}")
         print(f"Engine:         {config.EngineID}")
+        if rouser_line:
+            print(f"Read-Only:      {rouser_line}")
         print(
             f"ESXi USM String: "
             f"{config.SNMPUser}/{config.SNMPAuthHash}/{config.SNMPPrivHash}/priv"
