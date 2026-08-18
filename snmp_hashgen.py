@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shutil
@@ -27,6 +28,10 @@ HASH_HEX_LEN = {
     "sha512": 128,
 }
 
+# RFC 3414 password-to-key expansion length.
+_KDF_LEN = 1048576
+
+
 class SNMPHashGenerator:
     def generate_hashes(
         self,
@@ -36,7 +41,16 @@ class SNMPHashGenerator:
         engine_id: str,
         hash_algo: str = SNMP_HASH_ALGO,
     ) -> Dict[str, Any]:
-        """Run snmpv3-hashgen and return its JSON (localized auth/priv keys)."""
+        """Return localized SNMPv3 auth/priv keys.
+
+        Hashes in-process (no PATH). Optionally installs the upstream
+        generator so a later CLI fallback can work.
+        """
+        data = self._hash_inprocess(user, auth, priv, engine_id, hash_algo)
+        if data:
+            return self._check_lengths(data, hash_algo)
+
+        print("      In-process hash unavailable. Trying snmpv3-hashgen CLI...", file=sys.stderr)
         cmd, env = self._resolve_hashgen_command()
         cmd.extend([
             "--user", user,
@@ -47,7 +61,6 @@ class SNMPHashGenerator:
             "--mode", "priv",
             "--json",
         ])
-
         try:
             result = subprocess.run(
                 cmd,
@@ -66,19 +79,51 @@ class SNMPHashGenerator:
             ) from exc
         except FileNotFoundError as exc:
             raise RuntimeError(
-                f"snmpv3-hashgen executable not found: {cmd[0]}. "
-                "Ensure it is installed and in PATH."
+                f"snmpv3-hashgen executable not found: {cmd[0]}."
             ) from exc
+        return self._check_lengths(json.loads(result.stdout), hash_algo)
 
-        data = json.loads(result.stdout)
+    def _hash_inprocess(
+        self,
+        user: str,
+        auth: str,
+        priv: str,
+        engine_id: str,
+        hash_algo: str,
+    ) -> Optional[Dict[str, Any]]:
+        """RFC 3414 localize using hashlib. Does not need snmpv3-hashgen on PATH."""
+        if hash_algo not in HASH_HEX_LEN:
+            return None
+        try:
+            auth_hash = self._localize(auth, engine_id, hash_algo)
+            priv_hash = self._localize(priv, engine_id, hash_algo)
+        except ValueError as exc:
+            print(f"      In-process hash failed: {exc}", file=sys.stderr)
+            return None
+        print("      Hashed passwords in-process (no external tool).", file=sys.stderr)
+        return {
+            "user": user,
+            "engine": engine_id,
+            "hashes": {"auth": auth_hash, "priv": priv_hash},
+        }
 
+    @staticmethod
+    def _localize(passphrase: str, engine_id: str, hash_algo: str) -> str:
+        digest = getattr(hashlib, hash_algo)
+        expanded = (passphrase * ((_KDF_LEN // len(passphrase)) + 1))[:_KDF_LEN].encode("utf-8")
+        ku = digest(expanded).digest()
+        engine = bytes.fromhex(engine_id[2:] if engine_id.lower().startswith("0x") else engine_id)
+        return digest(ku + engine + ku).hexdigest()
+
+    @staticmethod
+    def _check_lengths(data: Dict[str, Any], hash_algo: str) -> Dict[str, Any]:
         expected_len = HASH_HEX_LEN.get(hash_algo)
         if expected_len:
             for key in ("auth", "priv"):
                 value = data.get("hashes", {}).get(key)
                 if value and len(value) != expected_len:
                     raise RuntimeError(
-                        f"snmpv3-hashgen returned {key} hash length {len(value)} "
+                        f"hash returned {key} length {len(value)} "
                         f"for {hash_algo} (expected {expected_len})."
                     )
         return data
@@ -88,12 +133,11 @@ class SNMPHashGenerator:
         if found:
             return found
 
-        print("      snmpv3-hashgen not found.", file=sys.stderr)
+        print("      snmpv3-hashgen CLI not found.", file=sys.stderr)
         answer = input("      Install SNMPv3-Hash-Generator now? [Y/n]: ").strip().lower()
         if answer not in ("", "y", "yes"):
             raise FileNotFoundError(
-                "snmpv3-hashgen is required. Install from "
-                "https://github.com/TheMysteriousX/SNMPv3-Hash-Generator and rerun."
+                "snmpv3-hashgen is required. Run python download_deps.py on a networked box."
             )
 
         if not self._install_hashgen():
@@ -101,25 +145,31 @@ class SNMPHashGenerator:
 
         found = self._find_hashgen()
         if not found:
-            raise FileNotFoundError("snmpv3-hashgen install finished but the tool is still missing.")
+            raise FileNotFoundError(
+                "snmpv3-hashgen files installed but the CLI is still not runnable. "
+                "In-process hashing should have been used instead."
+            )
         print("      snmpv3-hashgen installed.", file=sys.stderr)
         return found
 
     def _find_hashgen(self) -> Optional[Tuple[List[str], Optional[Dict[str, str]]]]:
         project_root = os.path.dirname(os.path.abspath(__file__))
-        bundled = os.path.join(
-            project_root, "SNMPv3-Hash-Generator", "scripts", "snmpv3_hashgen.py"
-        )
+        dest = os.path.join(project_root, "SNMPv3-Hash-Generator")
+        bundled = os.path.join(dest, "scripts", "snmpv3_hashgen.py")
         env = self._bundled_env(project_root)
-        if os.path.isfile(bundled) and self._probe([sys.executable, bundled], env):
-            return [sys.executable, bundled], env
 
-        if os.path.isfile(VENDOR_HASHGEN_ZIP):
-            dest = os.path.join(project_root, "SNMPv3-Hash-Generator")
+        if os.path.isfile(VENDOR_HASHGEN_ZIP) and not os.path.isfile(bundled):
             print("      Extracting snmpv3-hashgen from vendor/ ...", file=sys.stderr)
-            if self._extract_hashgen_zip(VENDOR_HASHGEN_ZIP, dest):
-                if os.path.isfile(bundled) and self._probe([sys.executable, bundled], env):
-                    return [sys.executable, bundled], env
+            self._extract_hashgen_zip(VENDOR_HASHGEN_ZIP, dest)
+
+        if os.path.isfile(bundled):
+            if self._probe([sys.executable, bundled], env):
+                return [sys.executable, bundled], env
+            print(
+                f"      Found {bundled} but --help failed (import/PATH). "
+                "Will hash in-process if possible.",
+                file=sys.stderr,
+            )
 
         for cmd in self._path_candidates():
             if self._probe(cmd, None):
@@ -139,30 +189,49 @@ class SNMPHashGenerator:
         names = ["snmpv3-hashgen", "snmpv3_hashgen"]
         if os.name == "nt":
             names.extend(["snmpv3-hashgen.exe", "snmpv3_hashgen.exe"])
-        scripts = os.path.join(os.path.dirname(sys.executable), "Scripts")
+        roots = [
+            os.path.join(os.path.dirname(sys.executable), "Scripts"),
+            os.path.join(sys.prefix, "Scripts"),
+            os.path.join(
+                os.environ.get("APPDATA", ""),
+                "Python",
+                f"Python{sys.version_info.major}{sys.version_info.minor}",
+                "Scripts",
+            ),
+        ]
         cmds = [[name] for name in names]
-        cmds.extend([os.path.join(scripts, name)] for name in names)
+        for root in roots:
+            if not root:
+                continue
+            cmds.extend([os.path.join(root, name)] for name in names)
         return cmds
 
     def _install_hashgen(self) -> bool:
         dest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SNMPv3-Hash-Generator")
-        print("      Installing SNMPv3-Hash-Generator...", file=sys.stderr)
+        script = os.path.join(dest, "scripts", "snmpv3_hashgen.py")
+        print("      Installing SNMPv3-Hash-Generator into the project folder...", file=sys.stderr)
         if os.path.isfile(VENDOR_HASHGEN_ZIP) and self._extract_hashgen_zip(VENDOR_HASHGEN_ZIP, dest):
-            return True
+            return os.path.isfile(script)
         if self._clone_hashgen(dest):
-            return True
+            return os.path.isfile(script)
         if self._download_hashgen(dest):
-            return True
-        return self._pip_install_hashgen()
+            return os.path.isfile(script)
+        if self._pip_install_hashgen():
+            return self._find_hashgen() is not None
+        return False
 
     def _clone_hashgen(self, dest: str) -> bool:
         if shutil.which("git") is None:
+            print("      git not on PATH; skipping clone.", file=sys.stderr)
             return False
         try:
             if os.path.isdir(dest) and not os.listdir(dest):
                 os.rmdir(dest)
+            if os.path.isfile(os.path.join(dest, "scripts", "snmpv3_hashgen.py")):
+                return True
             if os.path.exists(dest):
-                return os.path.isfile(os.path.join(dest, "scripts", "snmpv3_hashgen.py"))
+                print(f"      {dest} already exists and is incomplete; trying zip instead.", file=sys.stderr)
+                return False
             print(f"      Cloning {HASHGEN_REPO} ...", file=sys.stderr)
             subprocess.run(
                 ["git", "clone", "--depth", "1", HASHGEN_REPO, dest],
@@ -201,7 +270,10 @@ class SNMPHashGenerator:
                 if os.path.exists(dest):
                     shutil.rmtree(dest)
                 shutil.copytree(extracted, dest)
-            return os.path.isfile(os.path.join(dest, "scripts", "snmpv3_hashgen.py"))
+            ok = os.path.isfile(os.path.join(dest, "scripts", "snmpv3_hashgen.py"))
+            if ok:
+                print(f"      Extracted hashgen to {dest}", file=sys.stderr)
+            return ok
         except Exception as exc:
             print(f"      extract failed: {exc}", file=sys.stderr)
             return False
@@ -210,13 +282,7 @@ class SNMPHashGenerator:
         print("      Falling back to pip install from GitHub...", file=sys.stderr)
         try:
             subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "install",
-                    f"git+{HASHGEN_REPO}",
-                ],
+                [sys.executable, "-m", "pip", "install", f"git+{HASHGEN_REPO}"],
                 check=True,
                 timeout=PIP_INSTALL_TIMEOUT,
             )
@@ -227,16 +293,16 @@ class SNMPHashGenerator:
 
     @staticmethod
     def _probe(cmd: List[str], env: Optional[Dict[str, str]]) -> bool:
-        if cmd and os.path.isabs(cmd[0]) and not os.path.isfile(cmd[0]):
+        if cmd and (os.path.isabs(cmd[0]) or os.path.dirname(cmd[0])) and not os.path.isfile(cmd[0]):
             return False
         try:
-            subprocess.run(
+            result = subprocess.run(
                 cmd + ["--help"],
                 capture_output=True,
-                check=True,
+                text=True,
                 timeout=HASHGEN_DETECT_TIMEOUT,
                 env=env,
             )
-            return True
-        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
             return False
