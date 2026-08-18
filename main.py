@@ -86,8 +86,13 @@ def main() -> None:
         print(f"      Auth Hash: {auth_hash}")
         print(f"      Priv Hash: {priv_hash}")
 
-        # 5. Push to AppGate
-        print("\n[5/6] Updating AppGate SNMP configuration...")
+        # 5a. Delete existing user to clear stale credentials
+        print("\n[5a/6] Deleting existing SNMP user from appliance...")
+        config.delete_snmp_user(inputs["snmp_user"], engine_id=engine_id)
+        print("      Existing SNMP user deleted")
+
+        # 5b. Push new config (no deleteUser in final state)
+        print("\n[5b/6] Updating AppGate SNMP configuration...")
         rouser_line = ""
         if inputs.get("rouser"):
             rouser_line = f"rouser {inputs['rouser']} priv"

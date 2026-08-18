@@ -149,6 +149,57 @@ class AppGateClient:
                     return True
         return False
 
+    def delete_snmp_user(self, user: str, engine_id: Optional[str] = None) -> bool:
+        """Push a config that deletes the SNMP user from the appliance.
+
+        This is a separate first step to clear the user from the running
+        daemon before pushing the new createUser config, so that the final
+        snmpd.conf does not contain a deleteUser line.
+        """
+        if not self.appliance_id:
+            raise RuntimeError("Appliance ID is not set. Run find_appliance_by_ip first.")
+
+        response = requests.get(
+            f"{self.base_url}/appliances/{self.appliance_id}",
+            headers=self.headers,
+            verify=False,
+            timeout=30,
+        )
+        response.raise_for_status()
+        appliance = response.json()
+
+        existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
+        lines = existing_conf.splitlines() if existing_conf else []
+        lines = [line for line in lines if not re.match(rf"^createUser\s+{re.escape(user)}\b", line)]
+        lines = [line for line in lines if not re.match(rf"^rouser\s+{re.escape(user)}\b", line)]
+        lines = [line for line in lines if not re.match(rf"^deleteUser\s+{re.escape(user)}\b", line)]
+        lines = [line for line in lines if not re.match(r"^exactEngineID\s+", line)]
+        lines.append(f"deleteUser {user}")
+        if engine_id:
+            lines.append(f"exactEngineID 0x{engine_id}")
+        new_conf = "\n".join(lines)
+
+        appliance["snmpServer"] = {
+            "enabled": True,
+            "snmpd.conf": new_conf,
+            "tcpPort": self.DEFAULT_SNMP_PORT,
+            "udpPort": self.DEFAULT_SNMP_PORT,
+        }
+
+        put_response = requests.put(
+            f"{self.base_url}/appliances/{self.appliance_id}",
+            headers=self.headers,
+            json=appliance,
+            verify=False,
+            timeout=30,
+        )
+        if put_response.status_code != 200:
+            body_preview = (put_response.text or "")[:500]
+            raise RuntimeError(
+                f"Failed to delete SNMP user (HTTP {put_response.status_code}): {body_preview}"
+            )
+        return True
+
     def update_snmp_config(
         self,
         user: str,
@@ -158,7 +209,12 @@ class AppGateClient:
         enabled: bool = True,
         engine_id: Optional[str] = None,
     ) -> bool:
-        """Push the updated snmpd.conf to the AppGate appliance."""
+        """Push the updated snmpd.conf to the AppGate appliance.
+
+        Assumes the user has already been deleted (via delete_snmp_user)
+        so the final config contains only createUser, rouser, and
+        exactEngineID — no deleteUser line.
+        """
         if not self.appliance_id:
             raise RuntimeError("Appliance ID is not set. Run find_appliance_by_ip first.")
 
@@ -181,7 +237,6 @@ class AppGateClient:
         lines = [line for line in lines if not re.match(r"^exactEngineID\s+", line)]
         if rouser_line:
             lines.append(rouser_line)
-        lines.append(f"deleteUser {user}")
         lines.append(create_user_line)
         if engine_id:
             lines.append(f"exactEngineID 0x{engine_id}")
