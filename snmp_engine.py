@@ -42,10 +42,10 @@ class SNMPEngineFetcher:
                 hostname=ip,
                 username=self.ssh_user,
                 password=self.ssh_password,
-                timeout=15,
+                timeout=10,
                 allow_agent=False,
                 look_for_keys=False,
-                auth_timeout=15,
+                auth_timeout=10,
             )
 
             commands = [
@@ -118,10 +118,10 @@ class SNMPEngineFetcher:
             client.connect(
                 hostname=ip,
                 username=self.ssh_user,
-                timeout=15,
+                timeout=10,
                 allow_agent=False,
                 look_for_keys=False,
-                auth_timeout=15,
+                auth_timeout=10,
                 password=self.ssh_password,
             )
             stdin, stdout, stderr = client.exec_command(

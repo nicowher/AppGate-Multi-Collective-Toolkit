@@ -28,7 +28,7 @@ class SNMPHashGenerator:
         ])
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=15)
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 f"snmpv3-hashgen failed (rc={exc.returncode}). "
@@ -68,7 +68,7 @@ class SNMPHashGenerator:
                         [sys.executable, candidate, "--help"],
                         capture_output=True,
                         check=True,
-                        timeout=5,
+                        timeout=3,
                     )
                     return candidate
                 subprocess.run(

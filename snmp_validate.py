@@ -11,8 +11,8 @@ from typing import Optional, Tuple
 
 class SNMPValidator:
     DEFAULT_SNMP_PORT = 161
-    VALIDATION_RETRIES = 3
-    VALIDATION_RETRY_DELAY = 2
+    VALIDATION_RETRIES = 2
+    VALIDATION_RETRY_DELAY = 1
 
     def validate_snmp_walk(self, ip: str, user: str, auth: str, priv: str) -> bool:
         """Run an SNMP walk to verify the new SNMPv3 credentials."""
@@ -60,7 +60,7 @@ class SNMPValidator:
                     "-ap:SHA256", f"-aw:{auth}",
                     "-pp:AES256", f"-pw:{priv}",
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
                 if result.returncode != 0:
                     last_error = (
                         f"      SNMP walk failed (rc={result.returncode}): "
@@ -89,7 +89,7 @@ class SNMPValidator:
                 ip,
             ]
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
             if result.returncode != 0:
                 last_error = (
                     f"      SNMP walk failed (rc={result.returncode}): "
@@ -112,7 +112,7 @@ class SNMPValidator:
                 continue
             try:
                 probe = subprocess.run(
-                    [candidate], capture_output=True, text=True, timeout=2
+                    [candidate], capture_output=True, text=True, timeout=1
                 )
                 output = (probe.stdout or "") + (probe.stderr or "")
                 if "SnmpSoft" in output:
@@ -125,7 +125,7 @@ class SNMPValidator:
                 continue
             try:
                 probe = subprocess.run(
-                    [candidate, "--help"], capture_output=True, text=True, timeout=5
+                    [candidate, "--help"], capture_output=True, text=True, timeout=3
                 )
                 output = (probe.stdout or "") + (probe.stderr or "")
                 if "NET-SNMP" in output or "snmpwalk" in output.lower():
@@ -297,7 +297,7 @@ class SNMPValidator:
                         authProtocol=usmHMAC192SHA256AuthProtocol,
                         privProtocol=usmAesCfb256Protocol,
                     ),
-                    UdpTransportTarget((ip, self.DEFAULT_SNMP_PORT), timeout=10, retries=2),
+                     UdpTransportTarget((ip, self.DEFAULT_SNMP_PORT), timeout=5, retries=1),
                     ContextData(),
                     ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
                 ):
@@ -315,7 +315,7 @@ class SNMPValidator:
 
         async def _async_walk():
             transport = await UdpTransportTarget.create(
-                (ip, self.DEFAULT_SNMP_PORT), timeout=10, retries=2
+                (ip, self.DEFAULT_SNMP_PORT), timeout=5, retries=1
             )
             async for (errorIndication, errorStatus, errorIndex, varBinds) in walk_cmd(
                 SnmpEngine(),

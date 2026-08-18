@@ -47,7 +47,7 @@ class AppGateClient:
             headers=self.headers,
             json=payload,
             verify=False,
-            timeout=30,
+            timeout=15,
         )
         if response.status_code != 200:
             self._handle_login_error(response, username, provider_name)
@@ -112,7 +112,7 @@ class AppGateClient:
             f"{self.base_url}/appliances",
             headers=self.headers,
             verify=False,
-            timeout=30,
+            timeout=15,
         )
         response.raise_for_status()
         data = response.json()
@@ -163,7 +163,7 @@ class AppGateClient:
             f"{self.base_url}/appliances/{self.appliance_id}",
             headers=self.headers,
             verify=False,
-            timeout=30,
+            timeout=15,
         )
         response.raise_for_status()
         appliance = response.json()
@@ -191,7 +191,7 @@ class AppGateClient:
             headers=self.headers,
             json=appliance,
             verify=False,
-            timeout=30,
+            timeout=15,
         )
         if put_response.status_code != 200:
             body_preview = (put_response.text or "")[:500]
@@ -222,7 +222,7 @@ class AppGateClient:
             f"{self.base_url}/appliances/{self.appliance_id}",
             headers=self.headers,
             verify=False,
-            timeout=30,
+            timeout=15,
         )
         response.raise_for_status()
         appliance = response.json()
@@ -254,7 +254,7 @@ class AppGateClient:
             headers=self.headers,
             json=appliance,
             verify=False,
-            timeout=30,
+            timeout=15,
         )
         if put_response.status_code != 200:
             body_preview = (put_response.text or "")[:500]
