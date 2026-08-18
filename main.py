@@ -120,8 +120,8 @@ def main() -> None:
         print("Configuration Summary")
         print("=" * 60)
         print(f"User:           {inputs['snmp_user']}")
-        print(f"Auth:           {inputs['snmp_auth']} / {auth_hash}")
-        print(f"Priv:           {inputs['snmp_priv']} / {priv_hash}")
+        print(f"Auth Hash:      {auth_hash}")
+        print(f"Priv Hash:      {priv_hash}")
         print(f"Engine:         {engine_id}")
         if rouser_line:
             print(f"Read-Only:      {rouser_line}")
