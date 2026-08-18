@@ -115,7 +115,9 @@ class AppGateClient:
             rf"^createUser\s+{re.escape(user)}\b",
             rf"^rouser\s+{re.escape(user)}\b",
             rf"^deleteUser\s+{re.escape(user)}\b",
-            r"^exactEngineID\s+",
+            r"(?i)^exactEngineID\s+",
+            r"(?i)^engineIDType\s+",
+            r"(?i)^engineID\s+",
         )
         return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
 
@@ -172,8 +174,9 @@ class AppGateClient:
         appliance = self._get_appliance()
         lines = self._snmpd_lines_without_user(appliance, user)
         lines.append(f"deleteUser {user}")
-        if engine_id:
-            lines.append(f"exactEngineID 0x{engine_id}")
+        # Do not pin exactEngineID — AppGate/cz-configd truncates it (16 hex)
+        # and that breaks RFC 3411 type-3 (11-byte) IDs. Type 3 + oldEngineID is enough.
+        lines.append("engineIDType 3")
         self._put_snmpd_conf(appliance, "\n".join(lines), enabled=True)
         return True
 
@@ -189,8 +192,7 @@ class AppGateClient:
         """Push the updated snmpd.conf to the AppGate appliance.
 
         Assumes the user has already been deleted (via delete_snmp_user)
-        so the final config contains only createUser, rouser, and
-        exactEngineID — no deleteUser line.
+        so the final config contains createUser, rouser, and engineIDType 3.
         """
         # createUser algorithms must match snmpv3-hashgen (see config.py).
         create_user_line = (
@@ -203,8 +205,7 @@ class AppGateClient:
         if rouser_line:
             lines.append(rouser_line)
         lines.append(create_user_line)
-        if engine_id:
-            lines.append(f"exactEngineID 0x{engine_id}")
+        lines.append("engineIDType 3")
         self._put_snmpd_conf(appliance, "\n".join(lines), enabled=enabled)
         return True
 

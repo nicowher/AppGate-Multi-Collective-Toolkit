@@ -72,8 +72,9 @@ def main() -> None:
         print(f"      Auth Hash: {auth_hash}")
         print(f"      Priv Hash: {priv_hash}")
 
-        # Two-step replace: delete first so the final snmpd.conf has no deleteUser line.
+        # API deleteUser does not clear /var/lib/snmp/snmpd.conf usmUser rows.
         print("\n[5a/6] Deleting existing SNMP user from appliance...")
+        engine_fetcher.purge_persistent_user(inputs["agip"], inputs["snmp_user"])
         client.delete_snmp_user(inputs["snmp_user"], engine_id=engine_id)
         print("      Existing SNMP user deleted")
 
@@ -92,7 +93,11 @@ def main() -> None:
         print("      Waiting for SNMP daemon to reload...", file=sys.stderr)
         time.sleep(SNMP_RELOAD_DELAY)
         ok = validator.validate_snmp_walk(
-            inputs["agip"], inputs["snmp_user"], inputs["snmp_auth"], inputs["snmp_priv"]
+            inputs["agip"],
+            inputs["snmp_user"],
+            inputs["snmp_auth"],
+            inputs["snmp_priv"],
+            engine_id=engine_id,
         )
         print("      SNMP walk validation " + ("PASSED" if ok else "FAILED"))
 

@@ -8,7 +8,7 @@ Generates localized SNMPv3 hashes and pushes them to an AppGate appliance.
 
 1. Logs in to the AppGate admin API
 2. Finds the appliance that owns the given IP
-3. SSHes in and reads the SNMP Engine ID
+3. SSHes in, sets `engineIDType 3`, restarts snmpd, reads `oldEngineID`, and checks it against the eth0 MAC (RFC 3411)
 4. Hashes the auth/priv passwords with `snmpv3-hashgen` (bundled)
 5. Deletes the old SNMPv3 user, then writes the new `createUser` / `rouser` lines
 6. Walks the appliance to confirm the new credentials work
@@ -99,7 +99,7 @@ Older appliances that only speak SHA-1 / AES-128 will fail validation with `Wron
 | --- | --- |
 | 401 login failed | API user, MFA exemption, `providerName` (`local` / `saml` / `oidc`) |
 | 403 Forbidden | Admin role can edit appliances |
-| Engine ID not found | SSH, sudo, `/var/lib/snmp/snmpd.conf` |
+| Engine ID not found | SSH, sudo, `engineIDType 3` in `/etc/snmp/snmpd.conf`, `oldEngineID` after `systemctl restart snmpd`, eth0 MAC |
 | Hash generation failed | Run `python download_deps.py` or keep `vendor/SNMPv3-Hash-Generator.zip` |
 | Walk failed / digest error | Daemon reload wait, algorithm mismatch, install Net-SNMP |
 | Unknown ssh-rsa host key warning | Expected on first connect with `WarningPolicy` |

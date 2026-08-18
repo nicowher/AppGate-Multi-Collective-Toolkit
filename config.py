@@ -95,15 +95,15 @@ SNMPWALK_HELP_TIMEOUT = 3
 # ============================================================================
 # The appliance SNMP daemon needs time to reload after config push.
 # A brief delay + retry tolerance handles this without being excessive.
-VALIDATION_RETRIES = 2
-VALIDATION_RETRY_DELAY = 1
+VALIDATION_RETRIES = 3
+VALIDATION_RETRY_DELAY = 3
 
 # ============================================================================
 # SNMP Daemon Reload Wait (seconds)
 # ============================================================================
 # After pushing config, wait this long before validating.
 # The appliance's cz-configd must regenerate the running config.
-SNMP_RELOAD_DELAY = 2
+SNMP_RELOAD_DELAY = 5
 
 # ============================================================================
 # Package Install Timeouts (seconds)

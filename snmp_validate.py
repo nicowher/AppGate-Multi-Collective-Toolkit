@@ -30,7 +30,9 @@ class SNMPValidator:
     Walks use plaintext passwords — hashes live only on the appliance.
     """
 
-    def validate_snmp_walk(self, ip: str, user: str, auth: str, priv: str) -> bool:
+    def validate_snmp_walk(
+        self, ip: str, user: str, auth: str, priv: str, engine_id: Optional[str] = None
+    ) -> bool:
         tool_type, executable = self._detect_snmpwalk()
         if tool_type is None:
             print("      SNMP walk tool not found. Installing...", file=sys.stderr)
@@ -58,7 +60,7 @@ class SNMPValidator:
             try:
                 if tool_type == "pysnmp":
                     print("      Using pysnmp for SNMP walk validation...", file=sys.stderr)
-                    if self._validate_snmp_walk_pysnmp(ip, user, auth, priv):
+                    if self._validate_snmp_walk_pysnmp(ip, user, auth, priv, engine_id):
                         return True
                     continue
 
@@ -210,7 +212,23 @@ class SNMPValidator:
             return False
         return self._detect_snmpwalk()[0] is not None
 
-    def _validate_snmp_walk_pysnmp(self, ip: str, user: str, auth: str, priv: str) -> bool:
+    def _usm(self, user: str, auth: str, priv: str, engine_id: Optional[str] = None):
+        kwargs = {
+            "authProtocol": get_auth_protocol(),
+            "privProtocol": get_priv_protocol(),
+        }
+        if engine_id:
+            hex_id = engine_id[2:] if engine_id.lower().startswith("0x") else engine_id
+            try:
+                from pysnmp.proto.rfc1902 import OctetString
+                kwargs["securityEngineId"] = OctetString(hexValue=hex_id)
+            except Exception:
+                pass
+        return kwargs
+
+    def _validate_snmp_walk_pysnmp(
+        self, ip: str, user: str, auth: str, priv: str, engine_id: Optional[str] = None
+    ) -> bool:
         try:
             from pysnmp.hlapi.v3arch.asyncio import (
                 ContextData,
@@ -237,13 +255,7 @@ class SNMPValidator:
                 return False
             for (errorIndication, errorStatus, errorIndex, varBinds) in nextCmd(
                 SnmpEngine(),
-                UsmUserData(
-                    user,
-                    auth,
-                    priv,
-                    authProtocol=get_auth_protocol(),
-                    privProtocol=get_priv_protocol(),
-                ),
+                UsmUserData(user, auth, priv, **self._usm(user, auth, priv, engine_id)),
                 UdpTransportTarget((ip, DEFAULT_SNMP_PORT), timeout=5, retries=1),
                 ContextData(),
                 ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
@@ -263,13 +275,7 @@ class SNMPValidator:
             )
             async for (errorIndication, errorStatus, errorIndex, varBinds) in walk_cmd(
                 SnmpEngine(),
-                UsmUserData(
-                    user,
-                    auth,
-                    priv,
-                    authProtocol=get_auth_protocol(),
-                    privProtocol=get_priv_protocol(),
-                ),
+                UsmUserData(user, auth, priv, **self._usm(user, auth, priv, engine_id)),
                 transport,
                 ContextData(),
                 ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
