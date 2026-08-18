@@ -6,5 +6,6 @@ where py >nul 2>&1 && (
 ) || (
   python "app\snmp_walk_test.py" %*
 )
-if errorlevel 1 pause
+echo.
+pause
 endlocal

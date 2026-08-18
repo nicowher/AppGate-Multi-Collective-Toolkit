@@ -6,5 +6,6 @@ where py >nul 2>&1 && (
 ) || (
   python "app\main.py" %*
 )
-if errorlevel 1 pause
+echo.
+pause
 endlocal

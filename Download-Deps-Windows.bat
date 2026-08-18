@@ -6,5 +6,6 @@ where py >nul 2>&1 && (
 ) || (
   python "app\download_deps.py" %*
 )
-if errorlevel 1 pause
+echo.
+pause
 endlocal

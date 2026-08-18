@@ -1,10 +1,11 @@
+"""Interactive AppGate SNMPv3 configure-and-validate workflow."""
 import os
 import sys
 import time
 from getpass import getpass
 
 from appgate import AppGateClient
-from config import CREDENTIALS_FILENAME, SNMP_RELOAD_DELAY
+from config import CREDENTIALS_FILENAME, SNMP_MIN_PASSPHRASE_LEN, SNMP_RELOAD_DELAY
 from snmp_engine import SNMPEngineFetcher
 from snmp_hashgen import SNMPHashGenerator
 from snmp_validate import SNMPValidator
@@ -44,6 +45,11 @@ def main() -> None:
         ssh_pass = require("ssh_password", "SSH Password", sensitive=True)
         if not all((admin_user, admin_pass, ssh_user, ssh_pass)):
             raise ValueError("admin_username, admin_password, ssh_username, and ssh_password are required")
+        for label, secret in (("snmp_auth", inputs["snmp_auth"]), ("snmp_priv", inputs["snmp_priv"])):
+            if len(secret) < SNMP_MIN_PASSPHRASE_LEN:
+                raise ValueError(
+                    f"{label} must be at least {SNMP_MIN_PASSPHRASE_LEN} characters (DISA / CNSA guidance)"
+                )
 
         client = AppGateClient(inputs["agip"])
         engine_fetcher = SNMPEngineFetcher(ssh_user, ssh_pass)

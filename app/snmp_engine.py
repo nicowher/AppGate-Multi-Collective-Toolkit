@@ -1,3 +1,4 @@
+"""SSH: apply engineIDType, read oldEngineID, purge persistent USM users."""
 from utils import ensure_package
 
 try:
@@ -18,6 +19,8 @@ from config import (
     SNMP_PERSISTENT_CONF_ALT,
     SNMP_RELOAD_DELAY,
     SSH_AUTH_TIMEOUT,
+    SSH_PORT,
+    SSH_STRICT_HOST_KEY,
     SSH_TIMEOUT,
 )
 
@@ -79,12 +82,21 @@ class SNMPEngineFetcher:
             raise RuntimeError(f"Could not purge persistent SNMP user '{user}' via SSH")
         time.sleep(SNMP_RELOAD_DELAY)
 
+    def _apply_host_key_policy(self, client: paramiko.SSHClient) -> None:
+        try:
+            client.load_system_host_keys()
+        except Exception:
+            pass
+        policy = paramiko.RejectPolicy() if SSH_STRICT_HOST_KEY else paramiko.WarningPolicy()
+        client.set_missing_host_key_policy(policy)
+
     def _with_ssh(self, ip: str, fn):
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.WarningPolicy())
+        self._apply_host_key_policy(client)
         try:
             client.connect(
                 hostname=ip,
+                port=SSH_PORT,
                 username=self.ssh_user,
                 password=self.ssh_password,
                 timeout=SSH_TIMEOUT,
@@ -123,9 +135,9 @@ class SNMPEngineFetcher:
 
         transport = None
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.WarningPolicy())
+        self._apply_host_key_policy(client)
         try:
-            transport = paramiko.Transport((ip, 22))
+            transport = paramiko.Transport((ip, SSH_PORT))
             transport.banner_timeout = SSH_TIMEOUT
             transport.auth_timeout = SSH_AUTH_TIMEOUT
             transport.start_client(timeout=SSH_TIMEOUT)
@@ -230,12 +242,17 @@ class SNMPEngineFetcher:
     ) -> str:
         stdin, stdout, stderr = client.exec_command(command)
         stdout.channel.settimeout(SSH_TIMEOUT)
+        stderr.channel.settimeout(SSH_TIMEOUT)
         if sudo:
             stdin.write(self.ssh_password + "\n")
             stdin.flush()
-        output = stdout.read().decode("utf-8", errors="replace")
-        err_output = stderr.read().decode("utf-8", errors="replace")
-        exit_status = stdout.channel.recv_exit_status()
+        try:
+            output = stdout.read().decode("utf-8", errors="replace")
+            err_output = stderr.read().decode("utf-8", errors="replace")
+            exit_status = stdout.channel.recv_exit_status()
+        except Exception as exc:
+            print(f"      SSH command timed out or failed: {exc}", file=sys.stderr)
+            return ""
         if check and exit_status not in (0, 1):
             print(
                 f"      SSH command failed (exit {exit_status}): {err_output.strip()[:300]}",

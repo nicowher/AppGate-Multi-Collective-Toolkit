@@ -1,21 +1,35 @@
 # AppGate SNMPv3 Passwordinator
 
-Generates localized SNMPv3 hashes and pushes them to an AppGate appliance.
+Generates localized SNMPv3 USM keys and pushes them to an AppGate SDP appliance. Designed for lab and production use, including air-gapped networks.
 
 ## What it does
 
 Double-click a launcher (or run it from a terminal). It reads `credentials.json`, prompts for any missing fields, then:
 
-1. Logs in to the AppGate admin API
+1. Logs in to the AppGate admin API (`https://<agip>:8443/admin`)
 2. Finds the appliance that owns the given IP
-3. Pushes `engineIDType 3` via the API, SSHes in, restarts snmpd, reads `oldEngineID`, and checks it against the configured interface MAC (RFC 3411)
-4. Localizes the auth/priv passwords in-process (RFC 3414 / SHA-256)
-5. Purges leftover `usmUser` rows over SSH, then pushes `createUser` / `rouser` / `engineIDType 3` (no `exactEngineID`)
-6. Walks the appliance to confirm the new credentials work
+3. Pushes `engineIDType 3` via the API (cz-configd owns `/etc/snmp/snmpd.conf`), waits, SSHes in, restarts snmpd, reads `oldEngineID`, and checks it against the interface MAC (RFC 3411 type 3)
+4. Localizes auth/priv passphrases in-process (RFC 3414, SHA-256)
+5. Purges leftover `usmUser` rows from net-snmp persistent storage over SSH, then pushes `createUser` / `rouser` / `engineIDType 3`. It does **not** push `exactEngineID` (cz-configd truncates it and breaks type-3 IDs). SNMPv1/v2c community strings are stripped from the pushed config
+6. Walks the appliance with authPriv. A failed walk exits with status 1 (no success summary)
 
-`SNMP-Walk` only does step 6 — useful after a previous run.
+`SNMP-Walk-<OS>` only does step 6.
 
-Missing tools are installed on prompt. Local files in `app/vendor/` are used first (air-gapped).
+Missing Python packages install from `app/vendor/wheels` first (air-gapped), then offer online pip if you allow it.
+
+## Launchers
+
+Keep `README.md`, credentials files, and launchers in this folder. Python lives in `app/`.
+
+| OS | Configure appliance | Walk only | Prefetch wheels |
+| --- | --- | --- | --- |
+| Windows | `Passwordinator-Windows.bat` | `SNMP-Walk-Windows.bat` | `Download-Deps-Windows.bat` |
+| Linux | `./Passwordinator-Linux.sh` | `./SNMP-Walk-Linux.sh` | `./Download-Deps-Linux.sh` |
+| macOS | `Passwordinator-macOS.command` | `SNMP-Walk-macOS.command` | `Download-Deps-macOS.command` |
+
+On Linux/macOS: `chmod +x *.sh *.command` once. On macOS, right-click → Open the first time.
+
+Required fields: `snmp_user`, `snmp_auth`, `snmp_priv`, `agip`, `admin_username`, `admin_password`, `ssh_username`, `ssh_password`. `rouser` is optional. Passphrases must be at least `SNMP_MIN_PASSPHRASE_LEN` (default 8).
 
 ## Prerequisites
 
@@ -24,41 +38,16 @@ Missing tools are installed on prompt. Local files in `app/vendor/` are used fir
 - AppGate admin API access (MFA-exempt local user recommended)
 
 ```bash
-# Windows
-Download-Deps-Windows.bat
-
-# Linux
-chmod +x *.sh
-./Download-Deps-Linux.sh
-
-# macOS
-chmod +x *.command
-open Download-Deps-macOS.command
+Download-Deps-Windows.bat          # Windows
+./Download-Deps-Linux.sh           # Linux
+open Download-Deps-macOS.command   # macOS
 ```
 
-Optional but more reliable for validation:
-
-- Linux: `snmp` / `net-snmp-utils`
-- macOS: `brew install net-snmp`
-- Windows: Net-SNMP in PATH, or rely on the `pysnmp` fallback
-
-## Usage
-
-Keep `README.md`, credentials files, and the OS launchers in this folder. Python sources and `vendor/` live in `app/`.
-
-| OS | Configure appliance | Walk only | Offline cache |
-| --- | --- | --- | --- |
-| Windows | `Passwordinator-Windows.bat` | `SNMP-Walk-Windows.bat` | `Download-Deps-Windows.bat` |
-| Linux | `./Passwordinator-Linux.sh` | `./SNMP-Walk-Linux.sh` | `./Download-Deps-Linux.sh` |
-| macOS | `Passwordinator-macOS.command` | `SNMP-Walk-macOS.command` | `Download-Deps-macOS.command` |
-
-On macOS, double-click the `.command` file (or right-click → Open the first time).
-
-Required fields: `snmp_user`, `snmp_auth`, `snmp_priv`, `agip`, plus admin and SSH credentials. `rouser` is optional.
+Optional walk backend: Linux `snmp` / `net-snmp-utils`, macOS `brew install net-snmp`, or Windows Net-SNMP. Otherwise validation uses `pysnmp`.
 
 ## credentials.json (optional, gitignored)
 
-Copy `credentials.example.json` to `credentials.json` in this folder (next to the launchers), then fill in your values. Any missing key is prompted interactively. Sensitive prompts use `getpass`.
+Copy `credentials.example.json` to `credentials.json` next to the launchers. Missing keys are prompted. Secrets use `getpass`. Do not commit this file.
 
 ```json
 {
@@ -74,55 +63,87 @@ Copy `credentials.example.json` to `credentials.json` in this folder (next to th
 }
 ```
 
-Do not commit this file.
+## Air-gapped install
 
-## Air-gapped / offline install
-
-On a networked machine with the same OS and Python version:
+On a **networked machine with the same OS and Python version**:
 
 ```bash
 ./Download-Deps-Linux.sh
 ```
 
-That fills `app/vendor/wheels/` (`requests`, `paramiko`, `pysnmp` and their deps). Copy the whole project folder to the air-gapped host. The launcher installs those wheels from `app/vendor/` before touching the network. Password hashing does not need a separate hashgen tool.
+That fills `app/vendor/wheels/` (`requests`, `paramiko`, `pysnmp` and their dependencies). Copy the whole project folder to the air-gapped host. Launchers install from `app/vendor/` before any network pip.
 
-Net-SNMP is optional; validation falls back to the vendored `pysnmp` wheel.
+Wheels are gitignored. A GitHub ZIP has no wheels until you run Download-Deps. This repo’s cache (if you copy it) is only valid for that OS/Python.
 
-## Algorithms
+Hashing is in-process. No `snmpv3-hashgen` binary is required.
 
-Algorithms, timeouts, API port, `ETH_IFACE`, and file paths live in `app/config.py`. Auth/priv settings must stay in sync:
+## Standards (NSA / DISA / RFC)
 
-- Hash: SHA-256
-- Auth: SHA256
-- Priv: AES-256
+| Area | What this tool does |
+| --- | --- |
+| RFC 3411 | Engine ID type 3 = 4-byte enterprise (MSB set) + `0x03` + 6-byte MAC. Validated against `ETH_IFACE`. |
+| RFC 3414 | Password-to-key: expand passphrase to 1 MiB, `Ku = H(expanded)`, `Kul = H(Ku \|\| engineID \|\| Ku)`. |
+| RFC 7630 / 7860 | Auth HMAC-SHA-256 (`usmHMAC192SHA256AuthProtocol`). |
+| RFC 3826 family | Privacy AES-256 CFB (`AES256` / `usmAesCfb256Protocol`). |
+| CNSA 2.0 (NSA) | Default SHA-256 + AES-256. MD5 and SHA-1 are rejected. |
+| DISA SNMP STIG | authPriv only; v1/v2c communities stripped from pushed config; min passphrase length; no default `public` community written by this tool. |
+| Timeouts | Every SSH, HTTPS, pip, and walk call has a timeout so the tool cannot hang on a dead socket. |
 
-Older appliances that only speak SHA-1 / AES-128 will fail validation with `Wrong SNMP PDU digest`. Change the three values in `app/config.py` together if you must match an older box.
+**Known deviations (set in `app/config.py`):**
+
+- `TLS_VERIFY = False` — appliances usually have a self-signed cert. Set `True` when you trust the CA (DISA prefers this).
+- `SSH_STRICT_HOST_KEY = False` — unknown host keys warn, then connect. Set `True` after pinning the appliance in `known_hosts`.
+- AppGate `createUser` stores a vendor priv OID (`.1.3.6.1.4.1.14832.1.4`) that is still AES-256 CFB; walks use pysnmp’s AES-256 protocol object.
+
+## Tunables (`app/config.py`)
+
+| Variable | Meaning |
+| --- | --- |
+| `SNMP_HASH_ALGO` / `SNMP_AUTH_PROTOCOL` / `SNMP_PRIV_PROTOCOL` | Must stay in sync |
+| `ALLOWED_HASH_ALGOS` | CNSA-allowed localization hashes |
+| `SNMP_MIN_PASSPHRASE_LEN` | Raise to 15 for stricter sites |
+| `ENGINE_ID_TYPE` / `ETH_IFACE` | Type 3 + MAC source |
+| `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` / `SSH_PORT` | Transport hardening |
+| `APPGATE_*` | API version, port, provider, machineId |
+| `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
+| Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention and cz-configd wait |
+
+Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algorithms is a policy exception, not the default.
 
 ## Security notes
 
-- `TLS_VERIFY` is `False` because appliances usually have a self-signed cert. Set it `True` if you trust the CA.
-- SSH uses `WarningPolicy` (unknown host keys warn, then connect). Pin the host key when you can.
-- API tokens and SNMP passwords are not printed. Failed walk commands omit passphrases.
-- Windows does **not** download a Net-SNMP installer. Use a local install or `pysnmp`.
-- Engine ID is `engineIDType 3` (MAC). Persistent USM users are edited over SSH; the script does not `find /` as root.
+- API tokens and walk passphrases are not printed.
+- Localized hashes in the summary are USM keys for ESXi, not the original passwords.
+- Windows never downloads a Net-SNMP installer.
+- Persistent USM edits stay under `/var/lib/snmp` and `/var/net-snmp` (no `find /`).
+- `credentials.json` is gitignored.
 
 ## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
-| 401 login failed | API user, MFA exemption, `providerName` (`local` / `saml` / `oidc`) |
+| 401 login failed | API user, MFA exemption, `APPGATE_PROVIDER` (`local` / `saml` / `oidc`) |
 | 403 Forbidden | Admin role can edit appliances |
-| Engine ID not found | API `engineIDType 3`, SSH/sudo, `oldEngineID` after snmpd restart, MAC on `ETH_IFACE` (`eth0` by default) |
-| Hash generation failed | Rare — hashing is in-process; check the engine ID is valid hex |
-| Walk failed / digest error | Leftover `usmUser` in `/var/lib/snmp/snmpd.conf`, truncated `exactEngineID`, algorithm mismatch, short reload wait |
-| Unknown ssh-rsa host key warning | Expected on first connect with `WarningPolicy` |
+| Engine ID not found | API `engineIDType 3`, SSH/sudo, `oldEngineID` after restart, MAC on `ETH_IFACE` |
+| Passphrase too short | Increase length or lower `SNMP_MIN_PASSPHRASE_LEN` |
+| Walk / digest error | Leftover `usmUser` in persistent conf, algorithm mismatch, short reload wait |
+| Unknown ssh-rsa host key | Expected when `SSH_STRICT_HOST_KEY` is False |
+| Vendor install failed | Wheels built for another OS/Python — rerun Download-Deps on a matching host |
 
 ## Layout
 
-| File | Role |
+| Path | Role |
 | --- | --- |
-| `Passwordinator-<OS>.*` | Configure appliance |
-| `SNMP-Walk-<OS>.*` | Walk-only check |
-| `Download-Deps-<OS>.*` | Prefetch `app/vendor/` |
-| `credentials.example.json` | Empty credentials template |
-| `app/` | Python sources and optional `vendor/` wheel cache |
+| `Passwordinator-<OS>.*` | Full configure + validate |
+| `SNMP-Walk-<OS>.*` | Walk only |
+| `Download-Deps-<OS>.*` | Prefetch `app/vendor/wheels` |
+| `credentials.example.json` | Empty template |
+| `app/main.py` | Workflow |
+| `app/config.py` | Algorithms, timeouts, paths |
+| `app/appgate.py` | Admin API |
+| `app/snmp_engine.py` | SSH engine ID + USM purge |
+| `app/snmp_hashgen.py` | RFC 3414 localization |
+| `app/snmp_validate.py` | Walk + optional tool install |
+| `app/snmp_walk_test.py` | Standalone walk |
+| `app/utils.py` | Vendor pip + credentials load |
+| `app/vendor/` | Offline wheel cache (not committed) |

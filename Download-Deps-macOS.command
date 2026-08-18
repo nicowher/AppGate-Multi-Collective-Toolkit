@@ -1,7 +1,10 @@
 #!/bin/sh
-set -e
 cd "$(dirname "$0")"
 if command -v python3 >/dev/null 2>&1; then
-  exec python3 app/download_deps.py "$@"
+  python3 app/download_deps.py "$@"
+else
+  python app/download_deps.py "$@"
 fi
-exec python app/download_deps.py "$@"
+echo
+printf "Press Enter to close..."
+read -r _

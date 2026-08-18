@@ -20,6 +20,13 @@ import warnings
 SNMP_HASH_ALGO = "sha256"
 SNMP_AUTH_PROTOCOL = "SHA256"
 SNMP_PRIV_PROTOCOL = "AES256"
+# CNSA 2.0 / DISA: do not localize with MD5 or SHA-1.
+ALLOWED_HASH_ALGOS = ("sha256", "sha384", "sha512")
+SNMP_MIN_PASSPHRASE_LEN = 8
+# RFC 3414 password-to-key expansion (1 MiB).
+RFC3414_KDF_LEN = 1048576
+# DISA: do not leave SNMPv1/v2c community strings in the pushed config.
+STRIP_V1V2_COMMUNITIES = True
 
 # ============================================================================
 # pysnmp Protocol Objects
@@ -70,6 +77,9 @@ warnings.filterwarnings(
 # you vulnerable to MITM attacks. Only do this on trusted networks.
 # ============================================================================
 TLS_VERIFY = False
+# Reject unknown SSH host keys (DISA). False = warn and continue (lab/self-signed).
+SSH_STRICT_HOST_KEY = False
+SSH_PORT = 22
 
 # ============================================================================
 # SNMP Defaults
@@ -82,7 +92,6 @@ SNMPWALK_PROBE_TIMEOUT = 5
 SNMPWALK_RETRIES = 1
 CREDENTIALS_FILENAME = "credentials.json"
 
-NET_SNMP_CONF = "/etc/snmp/snmpd.conf"
 SNMP_PERSISTENT_CONF = "/var/lib/snmp/snmpd.conf"
 SNMP_PERSISTENT_CONF_ALT = "/var/net-snmp/snmpd.conf"
 

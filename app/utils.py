@@ -1,3 +1,4 @@
+"""Vendor wheel install and credentials.json loader."""
 import importlib.util
 import json
 import os

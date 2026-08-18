@@ -1,3 +1,4 @@
+"""AppGate admin API: login, appliance lookup, snmpd.conf push."""
 from utils import ensure_package
 
 try:
@@ -17,6 +18,7 @@ from config import (
     DEFAULT_SNMP_PORT,
     SNMP_AUTH_PROTOCOL,
     SNMP_PRIV_PROTOCOL,
+    STRIP_V1V2_COMMUNITIES,
     TLS_VERIFY,
 )
 import re
@@ -75,7 +77,7 @@ class AppGateClient:
         self.headers["Authorization"] = f"Bearer {token}"
         return token
 
-    def _handle_login_error(self, response: requests.Response, username: str, provider: str) -> None:
+    def _handle_login_error(self, response: requests.Response, _username: str, provider: str) -> None:
         """Provide actionable guidance for common 401/403 responses."""
         try:
             body = response.json()
@@ -128,21 +130,33 @@ class AppGateClient:
             rf"^createUser\s+{re.escape(user)}\b",
             rf"^rouser\s+{re.escape(user)}\b",
             rf"^deleteUser\s+{re.escape(user)}\b",
+            *AppGateClient._engine_pin_patterns(),
+            *AppGateClient._community_patterns(),
+        )
+        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
+
+    @staticmethod
+    def _engine_pin_patterns() -> tuple:
+        return (
             r"(?i)^exactEngineID\s+",
             r"(?i)^engineIDType\s+",
             r"(?i)^engineID\s+",
         )
-        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
+
+    @staticmethod
+    def _community_patterns() -> tuple:
+        if not STRIP_V1V2_COMMUNITIES:
+            return ()
+        return (
+            r"(?i)^rocommunity6?\b",
+            r"(?i)^rwcommunity6?\b",
+        )
 
     @staticmethod
     def _snmpd_lines_without_engine_pins(appliance: Dict[str, Any]) -> list:
         existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
         lines = existing_conf.splitlines() if existing_conf else []
-        drop = (
-            r"(?i)^exactEngineID\s+",
-            r"(?i)^engineIDType\s+",
-            r"(?i)^engineID\s+",
-        )
+        drop = AppGateClient._engine_pin_patterns() + AppGateClient._community_patterns()
         return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
 
     def ensure_engine_id_type3(self) -> None:
