@@ -6,6 +6,7 @@ import sys
 import time
 from typing import Optional, Tuple
 
+from utils import install_from_vendor
 from config import (
     DEFAULT_SNMP_PORT,
     PIP_INSTALL_TIMEOUT,
@@ -190,6 +191,8 @@ class SNMPValidator:
         return self._detect_snmpwalk()[0] is not None
 
     def _install_pysnmp(self) -> bool:
+        if install_from_vendor("pysnmp"):
+            return self._detect_snmpwalk()[0] is not None
         try:
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "pysnmp"],

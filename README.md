@@ -15,7 +15,7 @@ Generates localized SNMPv3 hashes and pushes them to an AppGate appliance.
 
 `python snmp_walk_test.py` only does step 6 — useful after a previous run.
 
-Missing Python packages (`requests`, `paramiko`) and walk tools (`pysnmp`, Linux/macOS Net-SNMP) are installed automatically when needed.
+Missing tools are installed on prompt: `requests`, `paramiko`, `pysnmp`, Linux/macOS Net-SNMP, and `snmpv3-hashgen`. Local files in `vendor/` are used first (air-gapped).
 
 ## Prerequisites
 
@@ -24,6 +24,7 @@ Missing Python packages (`requests`, `paramiko`) and walk tools (`pysnmp`, Linux
 - AppGate admin API access (MFA-exempt local user recommended)
 
 ```bash
+python download_deps.py
 pip install requests paramiko
 ```
 
@@ -62,6 +63,18 @@ Copy `credentials.example.json` and rename it to `credentials.json` next to `mai
 
 Do not commit this file.
 
+## Air-gapped / offline install
+
+On a networked machine with the same OS and Python version:
+
+```bash
+python download_deps.py
+```
+
+That fills `vendor/wheels/` (requests, paramiko, pysnmp + deps) and `vendor/SNMPv3-Hash-Generator.zip`. Copy the whole project folder to the air-gapped host. `main.py` installs from `vendor/` before touching the network.
+
+Net-SNMP is optional; validation falls back to the vendored `pysnmp` wheel.
+
 ## Algorithms
 
 Defaults live in `config.py` and must stay in sync:
@@ -87,7 +100,7 @@ Older appliances that only speak SHA-1 / AES-128 will fail validation with `Wron
 | 401 login failed | API user, MFA exemption, `providerName` (`local` / `saml` / `oidc`) |
 | 403 Forbidden | Admin role can edit appliances |
 | Engine ID not found | SSH, sudo, `/var/lib/snmp/snmpd.conf` |
-| Hash generation failed | Bundled `SNMPv3-Hash-Generator/` still present |
+| Hash generation failed | Run `python download_deps.py` or keep `vendor/SNMPv3-Hash-Generator.zip` |
 | Walk failed / digest error | Daemon reload wait, algorithm mismatch, install Net-SNMP |
 | Unknown ssh-rsa host key warning | Expected on first connect with `WarningPolicy` |
 
@@ -102,4 +115,6 @@ Older appliances that only speak SHA-1 / AES-128 will fail validation with `Wron
 | `snmp_engine.py` | SSH Engine ID |
 | `snmp_hashgen.py` | Localized hashes |
 | `snmp_validate.py` | Walk + tool install |
-| `utils.py` | credentials.json + pip helper |
+| `utils.py` | credentials.json + vendor/pip helper |
+| `download_deps.py` | Prefetch wheels + hashgen zip into `vendor/` |
+| `vendor/` | Offline install cache (not committed) |

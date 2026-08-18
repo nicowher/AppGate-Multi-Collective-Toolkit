@@ -110,3 +110,13 @@ SNMP_RELOAD_DELAY = 2
 # ============================================================================
 PIP_INSTALL_TIMEOUT = 120
 PKG_INSTALL_TIMEOUT = 300
+
+# ============================================================================
+# Offline vendor cache (relative to this repo)
+# ============================================================================
+# python download_deps.py  — run on a networked box, then copy vendor/ over.
+VENDOR_PACKAGES = ("requests", "paramiko", "pysnmp")
+HASHGEN_REPO = "https://github.com/TheMysteriousX/SNMPv3-Hash-Generator.git"
+HASHGEN_ZIP_URL = (
+    "https://github.com/TheMysteriousX/SNMPv3-Hash-Generator/archive/refs/heads/master.zip"
+)
