@@ -11,8 +11,8 @@ from pysnmp.hlapi.v3arch.asyncio import (
     ObjectType,
     ObjectIdentity,
     walk_cmd,
-    usmHMACSHAAuthProtocol,
-    usmAesCfb128Protocol,
+    usmHMAC192SHA256AuthProtocol,
+    usmAesCfb256Protocol,
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,8 +41,8 @@ async def snmp_walk(ip: str, user: str, auth: str, priv: str) -> bool:
             user,
             auth,
             priv,
-            authProtocol=usmHMACSHAAuthProtocol,
-            privProtocol=usmAesCfb128Protocol,
+                    authProtocol=usmHMAC192SHA256AuthProtocol,
+                    privProtocol=usmAesCfb256Protocol,
         ),
         transport,
         ContextData(),
