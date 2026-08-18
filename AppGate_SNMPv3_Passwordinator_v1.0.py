@@ -11,6 +11,7 @@ Automates SNMPv3 user configuration on AppGate appliances by:
 6. Validating configuration with an SNMP walk
 """
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -717,20 +718,20 @@ class AppGateSNMPConfig:
     ) -> bool:
         """Perform an SNMP walk using the pysnmp Python library."""
         try:
-            from pysnmp.hlapi import (
+            from pysnmp.hlapi.v3arch.asyncio import (
                 SnmpEngine,
                 UsmUserData,
                 UdpTransportTarget,
                 ContextData,
-                nextCmd,
                 ObjectType,
                 ObjectIdentity,
+                walk_cmd,
                 usmHMACSHAAuthProtocol,
                 usmAesCfb128Protocol,
             )
         except ImportError:
             try:
-                from pysnmp.hlapi.v1arch import (
+                from pysnmp.hlapi import (
                     SnmpEngine,
                     UsmUserData,
                     UdpTransportTarget,
@@ -744,9 +745,38 @@ class AppGateSNMPConfig:
             except ImportError:
                 print("      pysnmp library not available.", file=sys.stderr)
                 return False
+            else:
+                # Legacy synchronous API (pysnmp 4.x / 5.x / 6.x)
+                for (errorIndication, errorStatus, errorIndex, varBinds) in nextCmd(
+                    SnmpEngine(),
+                    UsmUserData(
+                        user,
+                        auth,
+                        priv,
+                        authProtocol=usmHMACSHAAuthProtocol,
+                        privProtocol=usmAesCfb128Protocol,
+                    ),
+                    UdpTransportTarget((ip, self.DEFAULT_SNMP_PORT), timeout=5, retries=1),
+                    ContextData(),
+                    ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
+                ):
+                    if errorIndication:
+                        print(f"      SNMP walk (pysnmp): {errorIndication}", file=sys.stderr)
+                        return False
+                    if errorStatus:
+                        print(
+                            f"      SNMP walk (pysnmp): {errorStatus.prettyPrint()}",
+                            file=sys.stderr,
+                        )
+                        return False
+                    return True
+                return False
 
-        try:
-            for (errorIndication, errorStatus, errorIndex, varBinds) in nextCmd(
+        async def _async_walk():
+            transport = await UdpTransportTarget.create(
+                (ip, self.DEFAULT_SNMP_PORT), timeout=5, retries=1
+            )
+            async for (errorIndication, errorStatus, errorIndex, varBinds) in walk_cmd(
                 SnmpEngine(),
                 UsmUserData(
                     user,
@@ -755,7 +785,7 @@ class AppGateSNMPConfig:
                     authProtocol=usmHMACSHAAuthProtocol,
                     privProtocol=usmAesCfb128Protocol,
                 ),
-                UdpTransportTarget((ip, self.DEFAULT_SNMP_PORT)),
+                transport,
                 ContextData(),
                 ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
             ):
@@ -770,6 +800,9 @@ class AppGateSNMPConfig:
                     return False
                 return True
             return False
+
+        try:
+            return asyncio.run(_async_walk())
         except Exception as exc:
             print(f"      SNMP walk (pysnmp) encountered an error: {exc}", file=sys.stderr)
             return False
