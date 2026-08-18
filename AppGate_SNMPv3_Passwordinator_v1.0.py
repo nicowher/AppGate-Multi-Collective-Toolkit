@@ -11,6 +11,7 @@ Automates SNMPv3 user configuration on AppGate appliances by:
 6. Validating configuration with an SNMP walk
 """
 
+import importlib.util
 import json
 import os
 import re
@@ -20,21 +21,39 @@ import uuid
 from getpass import getpass
 from typing import Any, Dict, Optional, Tuple
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
+
+
+def ensure_package(package: str, import_name: str) -> None:
+    module = importlib.util.find_spec(import_name)
+    spec = module.find_spec(import_name)
+    if spec is not None:
+        return
+    print(f"Missing required package: {package}", file=sys.stderr)
+    answer = input(f"Install {package} now via pip? [Y/n]: ").strip().lower()
+    if answer in ("", "y", "yes"):
+        subprocess.run([sys.executable, "-m", "pip", "install", package], check=True)
+        return
+    print(f"Please install {package} manually and rerun.", file=sys.stderr)
+    sys.exit(1)
+
+
 try:
     import requests
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
     requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 except ImportError:
-    print("Error: 'requests' library is required. Install with: pip install requests", file=sys.stderr)
-    sys.exit(1)
+    ensure_package("requests", "requests")
+    import requests
+    from requests.packages.urllib3.exceptions import InsecureRequestWarning
+    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 try:
     import paramiko
 except ImportError:
-    paramiko = None
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
+    ensure_package("paramiko", "paramiko")
+    import paramiko
 
 
 def load_credentials() -> Dict[str, str]:
@@ -45,8 +64,9 @@ def load_credentials() -> Dict[str, str]:
             data = json.load(fh)
         if not isinstance(data, dict):
             return {}
-        return {k: str(v) for k, v in data.items() if v}
-    except Exception:
+        return {k: str(v) for k, v in data.items()}
+    except Exception as exc:
+        print(f"Warning: Could not load credentials from {CREDENTIALS_PATH}: {exc}", file=sys.stderr)
         return {}
 
 
@@ -67,7 +87,7 @@ class AppGateSNMPConfig:
 
         self.headers: Dict[str, str] = {
             "Accept": f"application/vnd.appgate.peer-v{self.api_version}+json",
-            "Content-Type": "application/JSON",
+            "Content-Type": "application/json",
         }
 
         # State variables (equivalent to the {{...}} placeholders)
@@ -109,7 +129,11 @@ class AppGateSNMPConfig:
         data = response.json()
         self.AGAPIKey = data.get("token")
         if not self.AGAPIKey:
-            raise ValueError("Login response did not contain an API token")
+            body_preview = (response.text or "")[:300]
+            raise ValueError(
+                f"Login response did not contain an API token. "
+                f"HTTP {response.status_code}. Response body: {body_preview}"
+            )
 
         self.headers["Authorization"] = f"Bearer {self.AGAPIKey}"
         return self.AGAPIKey
@@ -170,7 +194,13 @@ class AppGateSNMPConfig:
             timeout=30,
         )
         response.raise_for_status()
-        return response.json().get("data", [])
+        data = response.json()
+        if "data" not in data:
+            raise ValueError(
+                f"Unexpected appliances response format. "
+                f"HTTP {response.status_code}. Body preview: {(response.text or '')[:300]}"
+            )
+        return data.get("data", [])
 
     def find_appliance_by_ip(self, ip: str) -> Dict[str, Any]:
         """Locate the appliance object whose interface matches *ip*."""
@@ -247,10 +277,10 @@ class AppGateSNMPConfig:
             ]
 
             for cmd in commands:
-                stdin, stdout, stderr = client.exec_command(cmd, timeout=15)
+                stdin, stdout, stderr = client.exec_command(cmd)
+                stdout.channel.settimeout(15)
                 stdin.write(self.ssh_password + "\n")
                 stdin.flush()
-                stdin.channel.shutdown_write()
 
                 output = stdout.read().decode("utf-8", errors="replace")
                 err_output = stderr.read().decode("utf-8", errors="replace")
@@ -266,8 +296,9 @@ class AppGateSNMPConfig:
                         return match.group(1)
 
             print(
-                "      No engine ID found in /var/lib/snmp/snmpd.conf. "
-                "Check permissions or file path.",
+                "      No engine ID found. Tried commands:\n"
+                + "\n".join(f"        - {cmd}" for cmd in commands)
+                + "\n      Check SSH access, sudo permissions, and snmpd.conf location.",
                 file=sys.stderr,
             )
         except paramiko.AuthenticationException as exc:
@@ -315,13 +346,28 @@ class AppGateSNMPConfig:
                 password=self.ssh_password,
             )
             stdin, stdout, stderr = client.exec_command(
-                "grep -E 'usmUser' /var/lib/snmp/snmpd.conf | head -n 1",
-                timeout=15,
+                "sudo -S grep -E 'usmUser' /var/lib/snmp/snmpd.conf | head -n 1",
             )
+            stdout.channel.settimeout(15)
+            stdin.write(self.ssh_password + "\n")
+            stdin.flush()
+
             output = stdout.read().decode("utf-8", errors="replace")
-            match = re.search(r"0x([0-9a-fA-F]{32,})", output)
-            if match:
-                return match.group(1)
+            err_output = stderr.read().decode("utf-8", errors="replace")
+            exit_status = stdout.channel.recv_exit_status()
+
+            if exit_status not in (0, 1) or err_output.strip():
+                print(
+                    f"      Keyboard-interactive SSH command failed (exit {exit_status}): "
+                    f"{err_output.strip()}",
+                    file=sys.stderr,
+                )
+
+            if output.strip():
+                print(f"      Keyboard-interactive SSH command succeeded", file=sys.stderr)
+                match = re.search(r"0x([0-9a-fA-F]{32,})", output)
+                if match:
+                    return match.group(1)
         except Exception as exc:
             print(f"      Keyboard-interactive SSH also failed: {exc}", file=sys.stderr)
         finally:
@@ -357,7 +403,18 @@ class AppGateSNMPConfig:
             "--json",
         ])
 
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"snmpv3-hashgen failed (rc={exc.returncode}). "
+                f"stderr: {exc.stderr.strip()[:500]}"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"snmpv3-hashgen executable not found: {cmd[0]}. "
+                "Ensure it is installed and in PATH."
+            ) from exc
         data = json.loads(result.stdout)
 
         self.SNMPUser = data["user"]
@@ -397,7 +454,8 @@ class AppGateSNMPConfig:
                 continue
 
         raise FileNotFoundError(
-            "snmpv3-hashgen tool not found. Ensure it is installed and in PATH."
+            f"snmpv3-hashgen tool not found. Checked: {candidates}. "
+            "Ensure it is installed and in PATH."
         )
 
     # ------------------------------------------------------------------
@@ -471,7 +529,11 @@ class AppGateSNMPConfig:
             verify=False,
             timeout=30,
         )
-        put_response.raise_for_status()
+        if put_response.status_code != 200:
+            body_preview = (put_response.text or "")[:500]
+            raise RuntimeError(
+                f"Failed to update SNMP config (HTTP {put_response.status_code}): {body_preview}"
+            )
         return True
 
     # ------------------------------------------------------------------
@@ -496,52 +558,46 @@ class AppGateSNMPConfig:
                         "-pp:AES128", f"-pw:{priv}",
                     ]
                     break
-            except (FileNotFoundError, subprocess.CalledProcessError):
+            except FileNotFoundError:
                 continue
 
         if cmd is None:
             for candidate in candidates:
                 try:
-                    subprocess.run([candidate, "--help"], capture_output=True, check=True, timeout=5)
-                    cmd = [
-                        candidate,
-                        "-v3",
-                        "-u", user,
-                        "-l", "authPriv",
-                        "-a", "SHA", "-A", auth,
-                        "-x", "AES", "-X", priv,
-                        ip,
-                    ]
-                    break
+                    probe = subprocess.run([candidate, "--help"], capture_output=True, text=True, timeout=5)
+                    output = (probe.stdout or "") + (probe.stderr or "")
+                    if "NET-SNMP" in output or "snmpwalk" in output.lower():
+                        cmd = [
+                            candidate,
+                            "-v3",
+                            "-u", user,
+                            "-l", "authPriv",
+                            "-a", "SHA", "-A", auth,
+                            "-x", "AES", "-X", priv,
+                            ip,
+                        ]
+                        break
                 except (FileNotFoundError, subprocess.CalledProcessError):
                     continue
 
         if cmd is None:
             print(
-                "      SNMP validation skipped: snmpwalk/SnmpWalk is not installed or not in PATH. "
+                "      SNMP validation skipped: no snmpwalk/SnmpWalk executable found in PATH. "
+                "Checked: " + ", ".join(candidates) + ". "
                 "Install Net-SNMP to enable automatic validation.",
                 file=sys.stderr,
             )
             return False
 
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0 and "timeout" not in (result.stderr or "").lower() and "failed" not in (result.stderr or "").lower():
-                return True
-
-            print(f"      SNMP walk failed (rc={result.returncode})", file=sys.stderr)
-            if result.stdout.strip():
-                print(f"      stdout: {result.stdout.strip()[:500]}", file=sys.stderr)
-            if result.stderr.strip():
-                print(f"      stderr: {result.stderr.strip()[:500]}", file=sys.stderr)
-            print(f"      cmd: {' '.join(cmd)}", file=sys.stderr)
-            return False
-        except FileNotFoundError:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            stderr_lower = (result.stderr or "").lower()
             print(
-                "      SNMP validation skipped: snmpwalk is not installed or not in PATH. "
-                "Install Net-SNMP to enable automatic validation.",
+                f"      SNMP walk failed (rc={result.returncode}): "
+                f"{result.stderr.strip()[:500] or result.stdout.strip()[:500]}",
                 file=sys.stderr,
             )
+            print(f"      cmd: {' '.join(cmd)}", file=sys.stderr)
             return False
 
 
@@ -595,9 +651,31 @@ def prompt_ssh_credentials(creds: Dict[str, str]) -> Tuple[str, str]:
 def main() -> None:
     try:
         creds = load_credentials()
-        inputs = prompt_snmp_inputs(creds)
-        admin_user, admin_pass = prompt_admin_credentials(creds)
-        ssh_user, ssh_pass = prompt_ssh_credentials(creds)
+
+        def require(field: str, prompt: str, sensitive: bool = False) -> str:
+            value = creds.get(field, "")
+            if not value:
+                if sensitive:
+                    value = getpass(f"{prompt}: ").strip()
+                else:
+                    value = input(f"{prompt}: ").strip()
+            return value
+
+        inputs = {
+            "snmp_user": require("snmp_user", "SNMP User"),
+            "snmp_auth": require("snmp_auth", "SNMP Auth", sensitive=True),
+            "snmp_priv": require("snmp_priv", "SNMP Priv", sensitive=True),
+            "agip":      require("agip", "AppGate IP Address"),
+            "rouser":    require("rouser", "SNMP Read-Only Username (rouser)"),
+        }
+
+        if not all(inputs[k] for k in ("snmp_user", "snmp_auth", "snmp_priv", "agip")):
+            raise ValueError("All required input fields are missing")
+
+        admin_user = require("admin_username", "AppGate Admin Username")
+        admin_pass = require("admin_password", "AppGate Admin Password", sensitive=True)
+        ssh_user   = require("ssh_username", "SSH Username")
+        ssh_pass   = require("ssh_password", "SSH Password", sensitive=True)
 
         config = AppGateSNMPConfig(inputs["agip"])
         config.SNMPUser = inputs["snmp_user"]
@@ -661,7 +739,7 @@ def main() -> None:
         if rouser_line:
             print(f"Read-Only:      {rouser_line}")
         print(
-            f"ESXi USM String: "AGA
+            f"ESXi USM String: "
             f"{config.SNMPUser}/{config.SNMPAuthHash}/{config.SNMPPrivHash}/priv"
         )
         print("=" * 60)
