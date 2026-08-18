@@ -25,7 +25,7 @@ This script automates SNMPv3 user configuration on AppGate appliances by:
 Run the script directly with Python:
 
 ```bash
-python AppGate_SNMPv3_Passwordinator_v1.0.py
+python main.py
 ```
 
 The script will interactively prompt for:

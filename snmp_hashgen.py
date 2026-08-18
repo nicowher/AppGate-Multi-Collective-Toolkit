@@ -1,0 +1,76 @@
+import json
+import os
+import subprocess
+import sys
+from typing import Any, Dict
+
+
+class SNMPHashGenerator:
+    def generate_hashes(self, user: str, auth: str, priv: str, engine_id: str) -> Dict[str, Any]:
+        """Execute snmpv3-hashgen and return the parsed JSON output."""
+        script_path = self._resolve_hashgen_script()
+
+        if script_path.endswith(".py"):
+            cmd = [sys.executable, script_path]
+        else:
+            cmd = [script_path]
+
+        cmd.extend([
+            "--user", user,
+            "--auth", auth,
+            "--priv", priv,
+            "--engine", engine_id,
+            "--hash", "sha1",
+            "--mode", "priv",
+            "--json",
+        ])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"snmpv3-hashgen failed (rc={exc.returncode}). "
+                f"stderr: {exc.stderr.strip()[:500]}"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"snmpv3-hashgen executable not found: {cmd[0]}. "
+                "Ensure it is installed and in PATH."
+            ) from exc
+        data = json.loads(result.stdout)
+        return data
+
+    @staticmethod
+    def _resolve_hashgen_script() -> str:
+        """Locate the snmpv3-hashgen CLI script."""
+        workspace_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidates = [
+            "snmpv3-hashgen",
+            "snmpv3_hashgen",
+            os.path.join(workspace_root, "SNMPv3-Hash-Generator", "scripts", "snmpv3_hashgen.py"),
+        ]
+
+        for candidate in candidates:
+            try:
+                if candidate.endswith(".py"):
+                    subprocess.run(
+                        [sys.executable, candidate, "--help"],
+                        capture_output=True,
+                        check=True,
+                        timeout=5,
+                    )
+                    return candidate
+                subprocess.run(
+                    [candidate, "--help"],
+                    capture_output=True,
+                    check=True,
+                    timeout=5,
+                )
+                return candidate
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                continue
+
+        raise FileNotFoundError(
+            f"snmpv3-hashgen tool not found. Checked: {candidates}. "
+            "Ensure it is installed and in PATH."
+        )

@@ -5,7 +5,7 @@ REM Usage: run_AppGate_SNMPv3_Passwordinator_v1.0.bat
 setlocal enabledelayedexpansion
 
 set "SCRIPT_DIR=%~dp0"
-set "PYTHON_SCRIPT=%SCRIPT_DIR%AppGate_SNMPv3_Passwordinator_v1.0.py"
+set "PYTHON_SCRIPT=%SCRIPT_DIR%main.py"
 
 if not exist "%PYTHON_SCRIPT%" (
     echo ERROR: Python script not found at: %PYTHON_SCRIPT%

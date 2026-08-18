@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PythonScript = Join-Path $ScriptDir "AppGate_SNMPv3_Passwordinator_v1.0.py"
+$PythonScript = Join-Path $ScriptDir "main.py"
 
 if (-not (Test-Path $PythonScript)) {
     Write-Error "Python script not found at: $PythonScript"
