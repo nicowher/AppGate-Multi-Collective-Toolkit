@@ -49,6 +49,20 @@ The script will interactively prompt for:
 5. **Update Configuration** - Pushes the updated `snmpd.conf` (with new user, hashes, and Engine ID) to the AppGate API.
 6. **Validate** - Attempts an SNMP walk against the appliance to verify the new credentials work.
 
+## Manual SNMP Walk Validation
+
+A standalone test script is included for manual SNMP walk validation:
+
+```bash
+python snmp_walk_test.py
+```
+
+This script reads credentials from `credentials.json` and runs a pysnmp SNMP walk against the appliance using the plaintext passwords. It requires:
+
+- `pysnmp` installed (`pip install pysnmp`)
+- `credentials.json` populated with `agip`, `snmp_user`, `snmp_auth`, and `snmp_priv`
+- UDP port 161 accessible from this machine to the appliance
+
 ## Credentials File (Optional)
 
 You can pre-populate inputs in a `credentials.json` file in the same directory as the script to skip interactive prompts:
