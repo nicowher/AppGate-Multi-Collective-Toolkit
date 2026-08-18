@@ -14,7 +14,9 @@ Automates SNMPv3 user configuration on AppGate appliances by:
 import importlib.util
 import json
 import os
+import platform
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -539,59 +541,182 @@ class AppGateSNMPConfig:
     # ------------------------------------------------------------------
     # Validation
     # ------------------------------------------------------------------
-    def validate_snmp_walk(self, ip: str, user: str, auth: str, priv: str) -> bool:
-        """Run ``snmpwalk`` to verify the new SNMPv3 credentials."""
+    def _detect_snmpwalk(self) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Detect an available snmpwalk executable.
+
+        Returns ``(tool_type, executable_path)`` where *tool_type* is
+        ``"netsnmp"`` (Net-SNMP on Linux/macOS/Windows) or ``"snmpsoft"``
+        (SnmpSoft SnmpWalk on Windows).  Returns ``(None, None)`` when no
+        suitable executable is found.
+        """
         candidates = ["snmpwalk", "snmpwalk.exe", "SnmpWalk.exe", "SnmpWalk"]
-        cmd = None
 
         for candidate in candidates:
+            if shutil.which(candidate) is None:
+                continue
             try:
-                probe = subprocess.run([candidate], capture_output=True, text=True, timeout=2)
+                probe = subprocess.run(
+                    [candidate], capture_output=True, text=True, timeout=2
+                )
                 output = (probe.stdout or "") + (probe.stderr or "")
                 if "SnmpSoft" in output:
-                    cmd = [
-                        candidate,
-                        f"-r:{ip}",
-                        "-v:3",
-                        f"-sn:{user}",
-                        "-ap:SHA", f"-aw:{auth}",
-                        "-pp:AES128", f"-pw:{priv}",
-                    ]
-                    break
-            except FileNotFoundError:
+                    return ("snmpsoft", candidate)
+            except Exception:
+                pass
+
+        for candidate in candidates:
+            if shutil.which(candidate) is None:
                 continue
+            try:
+                probe = subprocess.run(
+                    [candidate, "--help"], capture_output=True, text=True, timeout=5
+                )
+                output = (probe.stdout or "") + (probe.stderr or "")
+                if "NET-SNMP" in output or "snmpwalk" in output.lower():
+                    return ("netsnmp", candidate)
+            except Exception:
+                pass
 
-        if cmd is None:
-            for candidate in candidates:
-                try:
-                    probe = subprocess.run([candidate, "--help"], capture_output=True, text=True, timeout=5)
-                    output = (probe.stdout or "") + (probe.stderr or "")
-                    if "NET-SNMP" in output or "snmpwalk" in output.lower():
-                        cmd = [
-                            candidate,
-                            "-v3",
-                            "-u", user,
-                            "-l", "authPriv",
-                            "-a", "SHA", "-A", auth,
-                            "-x", "AES", "-X", priv,
-                            ip,
-                        ]
-                        break
-                except (FileNotFoundError, subprocess.CalledProcessError):
-                    continue
+        return (None, None)
 
-        if cmd is None:
+    def _install_snmpwalk(self) -> bool:
+        """
+        Attempt to install Net-SNMP via the system package manager.
+
+        After installation the ``PATH`` is refreshed so that a subsequent
+        ``_detect_snmpwalk`` call can find the freshly installed binary.
+
+        Returns ``True`` if ``snmpwalk`` is available afterwards.
+        """
+        system = platform.system()
+        print("      Attempting to install Net-SNMP...", file=sys.stderr)
+
+        try:
+            if system == "Linux":
+                if shutil.which("apt-get"):
+                    print("      Detected Debian/Ubuntu. Installing via apt-get...", file=sys.stderr)
+                    subprocess.run(
+                        ["sudo", "apt-get", "update", "-qq"], check=False, timeout=120
+                    )
+                    subprocess.run(
+                        ["sudo", "apt-get", "install", "-y", "snmp"],
+                        check=True,
+                        timeout=300,
+                    )
+                elif shutil.which("dnf"):
+                    print("      Detected Fedora/RHEL. Installing via dnf...", file=sys.stderr)
+                    subprocess.run(
+                        ["sudo", "dnf", "install", "-y", "net-snmp-utils"],
+                        check=True,
+                        timeout=300,
+                    )
+                elif shutil.which("yum"):
+                    print("      Detected RHEL/CentOS. Installing via yum...", file=sys.stderr)
+                    subprocess.run(
+                        ["sudo", "yum", "install", "-y", "net-snmp-utils"],
+                        check=True,
+                        timeout=300,
+                    )
+                else:
+                    print("      No supported package manager found (apt-get/dnf/yum).", file=sys.stderr)
+                    return False
+            elif system == "Darwin":
+                print("      Detected macOS. Installing via Homebrew...", file=sys.stderr)
+                subprocess.run(["brew", "install", "net-snmp"], check=True, timeout=300)
+            elif system == "Windows":
+                print("      Detected Windows. Installing Net-SNMP...", file=sys.stderr)
+                if shutil.which("choco"):
+                    subprocess.run(
+                        ["choco", "install", "-y", "netsnmp"], check=True, timeout=300
+                    )
+                else:
+                    print(
+                        "      Chocolatey not found. Please install Net-SNMP manually:\n"
+                        "      https://sourceforge.net/projects/net-snmp/files/net-snmp%20win32/\n"
+                        "      Or download SnmpWalk.exe from https://www.snmpsoft.com/",
+                        file=sys.stderr,
+                    )
+                    return False
+            else:
+                print(f"      Unsupported platform: {system}", file=sys.stderr)
+                return False
+        except subprocess.CalledProcessError as exc:
+            print(f"      Package installation failed: {exc}", file=sys.stderr)
+            return False
+        except FileNotFoundError as exc:
+            print(f"      Package manager not available: {exc}", file=sys.stderr)
+            return False
+        except subprocess.TimeoutExpired:
+            print("      Package installation timed out.", file=sys.stderr)
+            return False
+
+        if system == "Windows":
+            win_bindir = os.path.join(os.environ.get("SystemDrive", "C:"), "usr", "bin")
+            net_snmp_bindir = os.path.join(
+                os.environ.get("SystemDrive", "C:"), "net-snmp", "bin"
+            )
+            for path in (win_bindir, net_snmp_bindir):
+                if os.path.isdir(path) and path not in os.environ.get("PATH", ""):
+                    os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
+
+        return self._detect_snmpwalk()[0] is not None
+
+    def validate_snmp_walk(self, ip: str, user: str, auth: str, priv: str) -> bool:
+        """Run ``snmpwalk`` to verify the new SNMPv3 credentials.
+
+        If ``snmpwalk`` is not found in ``PATH``, an attempt is made to
+        install Net-SNMP automatically and the walk is retried.
+        """
+        candidates = ["snmpwalk", "snmpwalk.exe", "SnmpWalk.exe", "SnmpWalk"]
+
+        tool_type, executable = self._detect_snmpwalk()
+
+        if tool_type is None:
             print(
-                "      SNMP validation skipped: no snmpwalk/SnmpWalk executable found in PATH. "
-                "Checked: " + ", ".join(candidates) + ". "
-                "Install Net-SNMP to enable automatic validation.",
+                "      snmpwalk not found in PATH. Attempting auto-install...",
                 file=sys.stderr,
             )
-            return False
+            if self._install_snmpwalk():
+                tool_type, executable = self._detect_snmpwalk()
+                if tool_type is not None:
+                    print("      snmpwalk installed successfully. Retrying validation...", file=sys.stderr)
+                else:
+                    print(
+                        "      Auto-install completed but snmpwalk still not found in PATH.",
+                        file=sys.stderr,
+                    )
+                    return False
+            else:
+                print(
+                    "      Could not auto-install snmpwalk. Install Net-SNMP or "
+                    "SnmpWalk manually. Checked: " + ", ".join(candidates) + ".",
+                    file=sys.stderr,
+                )
+                return False
+
+        if tool_type == "snmpsoft":
+            cmd = [
+                executable,
+                f"-r:{ip}",
+                "-v:3",
+                f"-sn:{user}",
+                "-ap:SHA", f"-aw:{auth}",
+                "-pp:AES128", f"-pw:{priv}",
+            ]
+        else:
+            cmd = [
+                executable,
+                "-v3",
+                "-u", user,
+                "-l", "authPriv",
+                "-a", "SHA", "-A", auth,
+                "-x", "AES", "-X", priv,
+                ip,
+            ]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            stderr_lower = (result.stderr or "").lower()
             print(
                 f"      SNMP walk failed (rc={result.returncode}): "
                 f"{result.stderr.strip()[:500] or result.stdout.strip()[:500]}",
@@ -599,6 +724,7 @@ class AppGateSNMPConfig:
             )
             print(f"      cmd: {' '.join(cmd)}", file=sys.stderr)
             return False
+        return True
 
 
 # ----------------------------------------------------------------------
