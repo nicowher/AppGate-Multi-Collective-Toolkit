@@ -10,6 +10,8 @@ import re
 import sys
 from typing import Optional
 
+from config import SSH_AUTH_TIMEOUT, SSH_TIMEOUT
+
 
 class SNMPEngineFetcher:
     def __init__(self, ssh_user: str, ssh_password: str) -> None:
@@ -42,6 +44,11 @@ class SNMPEngineFetcher:
                 auth_timeout=10,
             )
 
+            # ====================================================================
+            # Try multiple grep strategies to find the engine ID.
+            # Different AppGate versions / net-snmp versions store it in different
+            # locations. Fall back to a broader search if the specific path fails.
+            # ====================================================================
             commands = [
                 "sudo -S grep -E 'usmUser' /var/lib/snmp/snmpd.conf | head -n 1",
                 "sudo -S grep -E 'oldEngineID' /var/lib/snmp/snmpd.conf | head -n 1",
@@ -51,7 +58,9 @@ class SNMPEngineFetcher:
 
             for cmd in commands:
                 stdin, stdout, stderr = client.exec_command(cmd)
-                stdout.channel.settimeout(15)
+                # Set a per-channel timeout so a stalled remote command doesn't
+                # block forever.
+                stdout.channel.settimeout(SSH_TIMEOUT)
                 stdin.write(self.ssh_password + "\n")
                 stdin.flush()
 
@@ -93,10 +102,17 @@ class SNMPEngineFetcher:
         return None
 
     def _ssh_query_engine_id_keyboard_interactive(self, ip: str) -> Optional[str]:
-        """Fallback SSH using keyboard-interactive authentication."""
+        """Fallback SSH using keyboard-interactive authentication.
+
+        Some appliances (or PAM configs) don't accept password auth via the
+        normal path but do accept it through keyboard-interactive prompts.
+        """
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.WarningPolicy())
         try:
+            # Keyboard-interactive handler: paramiko calls this when the
+            # server sends interactive prompts. We only respond to password
+            # prompts; all others get an empty string.
             def handler(title, instructions, prompt_list):
                 responses = []
                 for prompt in prompt_list:
@@ -109,11 +125,12 @@ class SNMPEngineFetcher:
             client.connect(
                 hostname=ip,
                 username=self.ssh_user,
-                timeout=10,
+                timeout=SSH_TIMEOUT,
                 allow_agent=False,
                 look_for_keys=False,
-                auth_timeout=10,
-                password=self.ssh_password,
+                auth_timeout=SSH_AUTH_TIMEOUT,
+                # Note: we don't pass password here — the handler above
+                # supplies it interactively.
             )
             stdin, stdout, stderr = client.exec_command(
                 "sudo -S grep -E 'usmUser' /var/lib/snmp/snmpd.conf | head -n 1",

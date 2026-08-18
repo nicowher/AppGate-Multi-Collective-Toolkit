@@ -34,13 +34,13 @@ class SNMPValidator:
     def validate_snmp_walk(self, ip: str, user: str, auth: str, priv: str) -> bool:
         """Run an SNMP walk to verify the new SNMPv3 credentials."""
         last_error = ""
-        for attempt in range(1, self.VALIDATION_RETRIES + 1):
+        for attempt in range(1, VALIDATION_RETRIES + 1):
             if attempt > 1:
                 print(
-                    f"      Retrying SNMP walk validation (attempt {attempt}/{self.VALIDATION_RETRIES})...",
+                    f"      Retrying SNMP walk validation (attempt {attempt}/{VALIDATION_RETRIES})...",
                     file=sys.stderr,
                 )
-                time.sleep(self.VALIDATION_RETRY_DELAY)
+                time.sleep(VALIDATION_RETRY_DELAY)
 
             tool_type, executable = self._detect_snmpwalk()
 
@@ -117,7 +117,7 @@ class SNMPValidator:
                 continue
             return True
 
-        print(f"      SNMP walk validation failed after {self.VALIDATION_RETRIES} attempts", file=sys.stderr)
+        print(f"      SNMP walk validation failed after {VALIDATION_RETRIES} attempts", file=sys.stderr)
         return False
 
     def _detect_snmpwalk(self) -> Tuple[Optional[str], Optional[str]]:
@@ -307,7 +307,7 @@ class SNMPValidator:
                         authProtocol=get_auth_protocol(),
                         privProtocol=get_priv_protocol(),
                     ),
-                     UdpTransportTarget((ip, self.DEFAULT_SNMP_PORT), timeout=5, retries=1),
+                     UdpTransportTarget((ip, DEFAULT_SNMP_PORT), timeout=5, retries=1),
                     ContextData(),
                     ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
                 ):
@@ -325,7 +325,7 @@ class SNMPValidator:
 
         async def _async_walk():
             transport = await UdpTransportTarget.create(
-                (ip, self.DEFAULT_SNMP_PORT), timeout=5, retries=1
+                (ip, DEFAULT_SNMP_PORT), timeout=5, retries=1
             )
             async for (errorIndication, errorStatus, errorIndex, varBinds) in walk_cmd(
                 SnmpEngine(),

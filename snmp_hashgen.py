@@ -24,9 +24,19 @@ class SNMPHashGenerator:
     FIPS_HASH_ALGOS = ("sha224", "sha256", "sha384", "sha512")
 
     def generate_hashes(self, user: str, auth: str, priv: str, engine_id: str, hash_algo: str = "sha256") -> Dict[str, Any]:
-        """Execute snmpv3-hashgen and return the parsed JSON output."""
+        """Execute snmpv3-hashgen and return the parsed JSON output.
+
+        Args:
+            user: SNMPv3 username
+            auth: Authentication passphrase (plaintext)
+            priv: Privacy passphrase (plaintext)
+            engine_id: Hex engine ID string (with or without 0x prefix)
+            hash_algo: Hash algorithm — must match SNMP_HASH_ALGO in config.py
+        """
         script_path = self._resolve_hashgen_script()
 
+        # If the resolved tool is a Python script, invoke it with the current
+        # interpreter so the correct venv is used.
         if script_path.endswith(".py"):
             cmd = [sys.executable, script_path]
         else:
@@ -54,7 +64,14 @@ class SNMPHashGenerator:
                 f"snmpv3-hashgen executable not found: {cmd[0]}. "
                 "Ensure it is installed and in PATH."
             ) from exc
+
         data = json.loads(result.stdout)
+
+        # ====================================================================
+        # Sanity check: verify hash length matches the requested algorithm.
+        # This catches installed hash generators that silently fall back to
+        # a different algorithm (e.g., sha1 instead of sha256).
+        # ====================================================================
         expected_len = {"md5": 32, "sha1": 40, "sha224": 56, "sha256": 64, "sha384": 96, "sha512": 128}.get(hash_algo)
         if expected_len:
             for key in ("auth", "priv"):
