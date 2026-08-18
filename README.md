@@ -1,57 +1,50 @@
 # AppGate SNMPv3 Passwordinator
 
-Tool to generate and push hashed SNMPv3 credentials to AppGate Appliances.
+Generates localized SNMPv3 hashes and pushes them to an AppGate appliance.
 
-## Overview
+## What it does
 
-This script automates SNMPv3 user configuration on AppGate appliances by:
-1. Prompting for SNMP credentials, read-only user, and AppGate IP
-2. Authenticating to the AppGate API to obtain a token
-3. Retrieving the appliance's SNMP Engine ID via SSH
-4. Generating SNMPv3 password hashes via `snmpv3-hashgen`
-5. Pushing the updated `snmpd.conf` to the AppGate API
-6. Validating the configuration with an SNMP walk
+`python main.py` reads `credentials.json`, prompts for any missing fields, then:
+
+1. Logs in to the AppGate admin API
+2. Finds the appliance that owns the given IP
+3. SSHes in and reads the SNMP Engine ID
+4. Hashes the auth/priv passwords with `snmpv3-hashgen` (bundled)
+5. Deletes the old SNMPv3 user, then writes the new `createUser` / `rouser` lines
+6. Walks the appliance to confirm the new credentials work
+
+`python snmp_walk_test.py` only does step 6 — useful after a previous run.
+
+Missing Python packages (`requests`, `paramiko`) and walk tools (`pysnmp`, Linux/macOS Net-SNMP) are installed automatically when needed.
 
 ## Prerequisites
 
 - Python 3.7+
-- `pip install requests paramiko`
-- `snmpv3-hashgen` tool installed and available in PATH (see `SNMPv3-Hash-Generator/`)
-- (Optional) `snmpwalk` or `SnmpWalk.exe` installed for automatic validation
-- SSH access to the AppGate appliance with sudo permissions
+- SSH to the appliance with sudo
+- AppGate admin API access (MFA-exempt local user recommended)
+
+```bash
+pip install requests paramiko
+```
+
+Optional but more reliable for validation:
+
+- Linux: `snmp` / `net-snmp-utils`
+- macOS: `brew install net-snmp`
+- Windows: Net-SNMP in PATH, or rely on the `pysnmp` fallback
 
 ## Usage
 
-Run the script directly with Python:
-
 ```bash
 python main.py
+python snmp_walk_test.py
 ```
 
-The script will interactively prompt for:
+Required fields: `snmp_user`, `snmp_auth`, `snmp_priv`, `agip`, plus admin and SSH credentials. `rouser` is optional.
 
-1. **SNMP User** - The SNMPv3 username to configure
-2. **SNMP Auth** - The SNMPv3 authentication password
-3. **SNMP Priv** - The SNMPv3 privacy password
-4. **AppGate IP Address** - The IP address of the target AppGate appliance
-5. **SNMP Read-Only Username (rouser)** - Optional read-only user
-6. **AppGate Admin Username** - Admin username for API authentication
-7. **AppGate Admin Password** - Admin password for API authentication
-8. **SSH Username** - SSH username for appliance access
-9. **SSH Password** - SSH password for appliance access
+## credentials.json (optional, gitignored)
 
-## Workflow Steps
-
-1. **Authenticate to AppGate API** - Logs in using the provided admin credentials and stores the bearer token.
-2. **Locate Appliance** - Finds the appliance matching the provided IP address via the API.
-3. **Retrieve Engine ID** - Connects to the appliance via SSH and extracts the SNMP Engine ID from `snmpd.conf`.
-4. **Generate Hashes** - Runs `snmpv3-hashgen` with the provided credentials and Engine ID to generate auth and priv hashes.
-5. **Update Configuration** - Pushes the updated `snmpd.conf` (with new user, hashes, and Engine ID) to the AppGate API.
-6. **Validate** - Attempts an SNMP walk against the appliance to verify the new credentials work.
-
-## Credentials File (Optional)
-
-You can pre-populate inputs in a `credentials.json` file in the same directory as the script to skip interactive prompts:
+Put this next to `main.py`. Any missing key is prompted interactively. Sensitive prompts use `getpass`.
 
 ```json
 {
@@ -67,17 +60,46 @@ You can pre-populate inputs in a `credentials.json` file in the same directory a
 }
 ```
 
-## Output
+Do not commit this file.
 
-Upon successful completion, the script prints:
-- The generated auth and priv hashes
-- The Engine ID
-- An ESXi USM string in the format: `user/auth_hash/priv_hash/priv`
+## Algorithms
+
+Defaults live in `config.py` and must stay in sync:
+
+- Hash: SHA-256
+- Auth: SHA256
+- Priv: AES-256
+
+Older appliances that only speak SHA-1 / AES-128 will fail validation with `Wrong SNMP PDU digest`. Change the three values in `config.py` together if you must match an older box.
+
+## Security notes
+
+- `TLS_VERIFY` is `False` because appliances usually have a self-signed cert. Set it `True` if you trust the CA.
+- SSH uses `WarningPolicy` (unknown host keys warn, then connect). Pin the host key when you can.
+- API tokens and SNMP passwords are not printed. Failed walk commands omit passphrases.
+- Windows does **not** download a Net-SNMP installer. Use a local install or `pysnmp`.
+- Engine ID lookup greps SNMP directories only — it does not `find /` as root.
 
 ## Troubleshooting
 
-- **401 Login Failed**: Ensure the admin account has API access, is exempt from Admin MFA, and the `providerName` is correct (e.g., `local`, `saml`, `oidc`).
-- **403 Forbidden**: Ensure the API user has the required admin role privileges.
-- **Engine ID Not Found**: Verify SSH access, sudo permissions, and that `snmpd.conf` exists on the appliance.
-- **Hash Generation Failed**: Ensure `snmpv3-hashgen` is installed and in PATH.
-- **SNMP Walk Skipped**: Install Net-SNMP or SnmpWalk to enable automatic validation.
+| Symptom | What to check |
+| --- | --- |
+| 401 login failed | API user, MFA exemption, `providerName` (`local` / `saml` / `oidc`) |
+| 403 Forbidden | Admin role can edit appliances |
+| Engine ID not found | SSH, sudo, `/var/lib/snmp/snmpd.conf` |
+| Hash generation failed | Bundled `SNMPv3-Hash-Generator/` still present |
+| Walk failed / digest error | Daemon reload wait, algorithm mismatch, install Net-SNMP |
+| Unknown ssh-rsa host key warning | Expected on first connect with `WarningPolicy` |
+
+## Layout
+
+| File | Role |
+| --- | --- |
+| `main.py` | Interactive workflow |
+| `snmp_walk_test.py` | Walk-only check |
+| `config.py` | Algorithms, timeouts, TLS |
+| `appgate.py` | Admin API |
+| `snmp_engine.py` | SSH Engine ID |
+| `snmp_hashgen.py` | Localized hashes |
+| `snmp_validate.py` | Walk + tool install |
+| `utils.py` | credentials.json + pip helper |

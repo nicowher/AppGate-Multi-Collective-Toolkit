@@ -110,4 +110,3 @@ SNMP_RELOAD_DELAY = 2
 # ============================================================================
 PIP_INSTALL_TIMEOUT = 120
 PKG_INSTALL_TIMEOUT = 300
-WINDOWS_INSTALLER_TIMEOUT = 120
