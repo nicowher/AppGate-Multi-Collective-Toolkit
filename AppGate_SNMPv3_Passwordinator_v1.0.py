@@ -33,11 +33,27 @@ try:
 except ImportError:
     paramiko = None
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
+
+
+def load_credentials() -> Dict[str, str]:
+    if not os.path.isfile(CREDENTIALS_PATH):
+        return {}
+    try:
+        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return {}
+        return {k: str(v) for k, v in data.items() if v}
+    except Exception:
+        return {}
+
 
 class AppGateSNMPConfig:
     """Encapsulates AppGate SNMPv3 configuration workflow."""
 
-    DEFAULT_API_VERSION = "23"
+    DEFAULT_API_VERSION = "24"
     DEFAULT_PROVIDER = "local"
     DEFAULT_SNMP_PORT = 161
     MACHINE_ID = "f0031c00-0522-43b3-a642-ae23cfd1bc22"
@@ -427,13 +443,16 @@ class AppGateSNMPConfig:
             line for line in lines
             if not re.match(rf"^createUser\s+{re.escape(user)}\s", line)
         ]
+        lines = [
+            line for line in lines
+            if not re.match(rf"^(rouser|deleteUser)\s+{re.escape(user)}\s", line)
+        ]
         if rouser_line:
-            lines = [
-                line for line in lines
-                if not re.match(rf"^rouser\s+{re.escape(user)}\s", line)
-            ]
             lines.append(rouser_line)
+        lines.append(f"deleteUser {user}")
         lines.append(create_user_line)
+        if self.EngineID:
+            lines.append(f"exactEngineID 0x{self.EngineID}")
         new_conf = "\n".join(lines)
 
         # Update the snmpServer block
@@ -529,18 +548,18 @@ class AppGateSNMPConfig:
 # ----------------------------------------------------------------------
 # Interactive prompts
 # ----------------------------------------------------------------------
-def prompt_snmp_inputs() -> Dict[str, str]:
+def prompt_snmp_inputs(creds: Dict[str, str]) -> Dict[str, str]:
     """Collect SNMP and AppGate IP from the operator."""
     print("=" * 60)
     print("AppGate SNMPv3 Configuration Script")
     print("=" * 60)
 
     inputs = {
-        "snmp_user": input("SNMP User: ").strip(),
-        "snmp_auth": input("SNMP Auth: ").strip(),
-        "snmp_priv": input("SNMP Priv: ").strip(),
-        "agip":      input("AppGate IP Address: ").strip(),
-        "rouser":    input("SNMP Read-Only Username (rouser): ").strip(),
+        "snmp_user": input(f"SNMP User [{creds.get('snmp_user', '')}]: ").strip() or creds.get("snmp_user", ""),
+        "snmp_auth": input(f"SNMP Auth [{creds.get('snmp_auth', '')}]: ").strip() or creds.get("snmp_auth", ""),
+        "snmp_priv": input(f"SNMP Priv [{creds.get('snmp_priv', '')}]: ").strip() or creds.get("snmp_priv", ""),
+        "agip":      input(f"AppGate IP Address [{creds.get('agip', '')}]: ").strip() or creds.get("agip", ""),
+        "rouser":    input(f"SNMP Read-Only Username (rouser) [{creds.get('rouser', '')}]: ").strip() or creds.get("rouser", ""),
     }
 
     if not all(inputs[k] for k in ("snmp_user", "snmp_auth", "snmp_priv", "agip")):
@@ -548,22 +567,22 @@ def prompt_snmp_inputs() -> Dict[str, str]:
     return inputs
 
 
-def prompt_admin_credentials() -> Tuple[str, str]:
+def prompt_admin_credentials(creds: Dict[str, str]) -> Tuple[str, str]:
     """Collect AppGate API admin credentials."""
     print("\nAppGate API Authentication")
-    username = input("AppGate Admin Username: ").strip()
-    password = getpass("AppGate Admin Password: ").strip()
+    username = input(f"AppGate Admin Username [{creds.get('admin_username', '')}]: ").strip() or creds.get("admin_username", "")
+    password = getpass(f"AppGate Admin Password [{creds.get('admin_password', '')}]: ").strip() or creds.get("admin_password", "")
 
     if not username or not password:
         raise ValueError("Admin credentials are required")
     return username, password
 
 
-def prompt_ssh_credentials() -> Tuple[str, str]:
+def prompt_ssh_credentials(creds: Dict[str, str]) -> Tuple[str, str]:
     """Collect SSH credentials for the AppGate appliance."""
     print("\nAppliance SSH Authentication")
-    username = input("SSH Username: ").strip()
-    password = getpass("SSH Password: ").strip()
+    username = input(f"SSH Username [{creds.get('ssh_username', '')}]: ").strip() or creds.get("ssh_username", "")
+    password = getpass(f"SSH Password [{creds.get('ssh_password', '')}]: ").strip() or creds.get("ssh_password", "")
 
     if not username or not password:
         raise ValueError("SSH credentials are required")
@@ -575,9 +594,10 @@ def prompt_ssh_credentials() -> Tuple[str, str]:
 # ----------------------------------------------------------------------
 def main() -> None:
     try:
-        inputs = prompt_snmp_inputs()
-        admin_user, admin_pass = prompt_admin_credentials()
-        ssh_user, ssh_pass = prompt_ssh_credentials()
+        creds = load_credentials()
+        inputs = prompt_snmp_inputs(creds)
+        admin_user, admin_pass = prompt_admin_credentials(creds)
+        ssh_user, ssh_pass = prompt_ssh_credentials(creds)
 
         config = AppGateSNMPConfig(inputs["agip"])
         config.SNMPUser = inputs["snmp_user"]
@@ -641,7 +661,7 @@ def main() -> None:
         if rouser_line:
             print(f"Read-Only:      {rouser_line}")
         print(
-            f"ESXi USM String: "
+            f"ESXi USM String: "AGA
             f"{config.SNMPUser}/{config.SNMPAuthHash}/{config.SNMPPrivHash}/priv"
         )
         print("=" * 60)
