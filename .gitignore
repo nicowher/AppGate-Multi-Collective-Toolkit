@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 vendor/wheels/
 vendor/*.zip
+app/vendor/wheels/
+app/vendor/*.zip

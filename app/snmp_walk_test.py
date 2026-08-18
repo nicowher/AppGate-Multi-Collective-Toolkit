@@ -4,8 +4,16 @@ import os
 import sys
 from getpass import getpass
 
-from config import DEFAULT_SNMP_PORT, get_auth_protocol, get_priv_protocol
-from utils import ensure_package, load_credentials
+from config import (
+    CREDENTIALS_FILENAME,
+    DEFAULT_SNMP_PORT,
+    SNMPWALK_PROBE_TIMEOUT,
+    SNMPWALK_RETRIES,
+    SNMP_WALK_OID,
+    get_auth_protocol,
+    get_priv_protocol,
+)
+from utils import REPO_ROOT, ensure_package, load_credentials
 
 try:
     from pysnmp.hlapi.v3arch.asyncio import (
@@ -29,12 +37,15 @@ except ImportError:
         walk_cmd,
     )
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
+CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
 
 
 async def snmp_walk(ip: str, user: str, auth: str, priv: str) -> bool:
-    transport = await UdpTransportTarget.create((ip, DEFAULT_SNMP_PORT), timeout=5, retries=1)
+    transport = await UdpTransportTarget.create(
+        (ip, DEFAULT_SNMP_PORT),
+        timeout=SNMPWALK_PROBE_TIMEOUT,
+        retries=SNMPWALK_RETRIES,
+    )
     async for (errorIndication, errorStatus, errorIndex, varBinds) in walk_cmd(
         SnmpEngine(),
         UsmUserData(
@@ -46,7 +57,7 @@ async def snmp_walk(ip: str, user: str, auth: str, priv: str) -> bool:
         ),
         transport,
         ContextData(),
-        ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
+        ObjectType(ObjectIdentity(SNMP_WALK_OID)),
     ):
         if errorIndication:
             print(f"SNMP walk error: {errorIndication}", file=sys.stderr)

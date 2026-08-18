@@ -6,7 +6,19 @@ except ImportError:
     ensure_package("requests", "requests")
     import requests
 
-from config import API_TIMEOUT, DEFAULT_SNMP_PORT, SNMP_AUTH_PROTOCOL, SNMP_PRIV_PROTOCOL, TLS_VERIFY
+from config import (
+    API_TIMEOUT,
+    APPGATE_ADMIN_PORT,
+    APPGATE_ADMIN_PREFIX,
+    APPGATE_API_VERSION,
+    APPGATE_MACHINE_ID,
+    APPGATE_PROVIDER,
+    ENGINE_ID_TYPE,
+    DEFAULT_SNMP_PORT,
+    SNMP_AUTH_PROTOCOL,
+    SNMP_PRIV_PROTOCOL,
+    TLS_VERIFY,
+)
 import re
 import sys
 from typing import Any, Dict, Optional
@@ -17,16 +29,17 @@ if not TLS_VERIFY:
 
 
 class AppGateClient:
-    DEFAULT_API_VERSION = "24"
-    DEFAULT_PROVIDER = "local"
-    MACHINE_ID = "f0031c00-0522-43b3-a642-ae23cfd1bc22"
-
-    def __init__(self, agip: str, api_version: Optional[str] = None, provider: str = DEFAULT_PROVIDER) -> None:
+    def __init__(
+        self,
+        agip: str,
+        api_version: Optional[str] = None,
+        provider: str = APPGATE_PROVIDER,
+    ) -> None:
         self.agip = agip
-        self.api_version = api_version or self.DEFAULT_API_VERSION
+        self.api_version = api_version or APPGATE_API_VERSION
         self.provider = provider
-        self.base_url = f"https://{agip}:8443/admin"
-        self.machine_id = self.MACHINE_ID
+        self.base_url = f"https://{agip}:{APPGATE_ADMIN_PORT}{APPGATE_ADMIN_PREFIX}"
+        self.machine_id = APPGATE_MACHINE_ID
         self.headers: Dict[str, str] = {
             "Accept": f"application/vnd.appgate.peer-v{self.api_version}+json",
             "Content-Type": "application/json",
@@ -108,7 +121,7 @@ class AppGateClient:
 
     @staticmethod
     def _snmpd_lines_without_user(appliance: Dict[str, Any], user: str) -> list:
-        """Return snmpd.conf lines with this user's entries and exactEngineID removed."""
+        """Return snmpd.conf lines with this user's entries and engine-ID pins removed."""
         existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
         lines = existing_conf.splitlines() if existing_conf else []
         drop = (
@@ -120,6 +133,24 @@ class AppGateClient:
             r"(?i)^engineID\s+",
         )
         return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
+
+    @staticmethod
+    def _snmpd_lines_without_engine_pins(appliance: Dict[str, Any]) -> list:
+        existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
+        lines = existing_conf.splitlines() if existing_conf else []
+        drop = (
+            r"(?i)^exactEngineID\s+",
+            r"(?i)^engineIDType\s+",
+            r"(?i)^engineID\s+",
+        )
+        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
+
+    def ensure_engine_id_type3(self) -> None:
+        """Persist engineIDType 3 via the API (cz-configd owns /etc/snmp/snmpd.conf)."""
+        appliance = self._get_appliance()
+        lines = self._snmpd_lines_without_engine_pins(appliance)
+        lines.append(f"engineIDType {ENGINE_ID_TYPE}")
+        self._put_snmpd_conf(appliance, "\n".join(lines), enabled=True)
 
     def get_appliances(self) -> list:
         """Return all appliances visible to the current API user."""
@@ -164,7 +195,7 @@ class AppGateClient:
                     return True
         return False
 
-    def delete_snmp_user(self, user: str, engine_id: Optional[str] = None) -> bool:
+    def delete_snmp_user(self, user: str) -> bool:
         """Push a config that deletes the SNMP user from the appliance.
 
         This is a separate first step to clear the user from the running
@@ -176,7 +207,7 @@ class AppGateClient:
         lines.append(f"deleteUser {user}")
         # Do not pin exactEngineID — AppGate/cz-configd truncates it (16 hex)
         # and that breaks RFC 3411 type-3 (11-byte) IDs. Type 3 + oldEngineID is enough.
-        lines.append("engineIDType 3")
+        lines.append(f"engineIDType {ENGINE_ID_TYPE}")
         self._put_snmpd_conf(appliance, "\n".join(lines), enabled=True)
         return True
 
@@ -187,14 +218,13 @@ class AppGateClient:
         priv_hash: str,
         rouser_line: str = "",
         enabled: bool = True,
-        engine_id: Optional[str] = None,
     ) -> bool:
         """Push the updated snmpd.conf to the AppGate appliance.
 
         Assumes the user has already been deleted (via delete_snmp_user)
         so the final config contains createUser, rouser, and engineIDType 3.
         """
-        # createUser algorithms must match snmpv3-hashgen (see config.py).
+        # createUser algorithms must match in-process localization (config.py).
         create_user_line = (
             f"createUser {user} {SNMP_AUTH_PROTOCOL} -l 0x{auth_hash} "
             f"{SNMP_PRIV_PROTOCOL} -l 0x{priv_hash}"
@@ -205,7 +235,7 @@ class AppGateClient:
         if rouser_line:
             lines.append(rouser_line)
         lines.append(create_user_line)
-        lines.append("engineIDType 3")
+        lines.append(f"engineIDType {ENGINE_ID_TYPE}")
         self._put_snmpd_conf(appliance, "\n".join(lines), enabled=enabled)
         return True
 
@@ -222,11 +252,15 @@ class AppGateClient:
         return response.json()
 
     def _put_snmpd_conf(self, appliance: Dict[str, Any], new_conf: str, enabled: bool) -> None:
+        existing = appliance.get("snmpServer")
+        if not isinstance(existing, dict):
+            existing = {}
         appliance["snmpServer"] = {
+            **existing,
             "enabled": enabled,
             "snmpd.conf": new_conf,
-            "tcpPort": DEFAULT_SNMP_PORT,
-            "udpPort": DEFAULT_SNMP_PORT,
+            "tcpPort": existing.get("tcpPort", DEFAULT_SNMP_PORT),
+            "udpPort": existing.get("udpPort", DEFAULT_SNMP_PORT),
         }
         put_response = requests.put(
             f"{self.base_url}/appliances/{self.appliance_id}",

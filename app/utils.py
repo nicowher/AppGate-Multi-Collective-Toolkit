@@ -7,10 +7,10 @@ from typing import Any, Dict
 
 from config import PIP_INSTALL_TIMEOUT, VENDOR_PACKAGES
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-VENDOR_DIR = os.path.join(PROJECT_ROOT, "vendor")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(APP_DIR)
+VENDOR_DIR = os.path.join(APP_DIR, "vendor")
 VENDOR_WHEELS = os.path.join(VENDOR_DIR, "wheels")
-VENDOR_HASHGEN_ZIP = os.path.join(VENDOR_DIR, "SNMPv3-Hash-Generator.zip")
 
 
 def vendor_has_wheels() -> bool:
@@ -81,7 +81,7 @@ def ensure_package(package: str, import_name: str) -> None:
         )
         return
     print(
-        f"Please install {package} (or run: python download_deps.py) and rerun.",
+        f"Please install {package} (or run Download-Deps) and rerun.",
         file=sys.stderr,
     )
     sys.exit(1)

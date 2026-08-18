@@ -9,7 +9,7 @@ import warnings
 #
 # These must match between:
 #   1. The createUser line pushed to the appliance (appgate.py)
-#   2. The snmpv3-hashgen invocation (snmp_hashgen.py)
+#   2. In-process RFC 3414 localization (snmp_hashgen.py)
 #   3. The SNMP walk validation tools (snmp_validate.py, snmp_walk_test.py)
 #
 # NOTE: Some older AppGate appliance versions only support SHA-1/AES-128.
@@ -75,6 +75,23 @@ TLS_VERIFY = False
 # SNMP Defaults
 # ============================================================================
 DEFAULT_SNMP_PORT = 161
+ETH_IFACE = "eth0"
+ENGINE_ID_TYPE = 3
+SNMP_WALK_OID = "1.3.6.1.2.1.1"
+SNMPWALK_PROBE_TIMEOUT = 5
+SNMPWALK_RETRIES = 1
+CREDENTIALS_FILENAME = "credentials.json"
+
+NET_SNMP_CONF = "/etc/snmp/snmpd.conf"
+SNMP_PERSISTENT_CONF = "/var/lib/snmp/snmpd.conf"
+SNMP_PERSISTENT_CONF_ALT = "/var/net-snmp/snmpd.conf"
+
+# AppGate admin API
+APPGATE_API_VERSION = "24"
+APPGATE_ADMIN_PORT = 8443
+APPGATE_ADMIN_PREFIX = "/admin"
+APPGATE_PROVIDER = "local"
+APPGATE_MACHINE_ID = "f0031c00-0522-43b3-a642-ae23cfd1bc22"
 
 # ============================================================================
 # Timeouts (seconds)
@@ -84,8 +101,6 @@ DEFAULT_SNMP_PORT = 161
 SSH_TIMEOUT = 10
 SSH_AUTH_TIMEOUT = 10
 API_TIMEOUT = 15
-HASHGEN_TIMEOUT = 15
-HASHGEN_DETECT_TIMEOUT = 3
 SNMPWALK_TIMEOUT = 15
 SNMPWALK_DETECT_TIMEOUT = 1
 SNMPWALK_HELP_TIMEOUT = 3
@@ -114,9 +129,5 @@ PKG_INSTALL_TIMEOUT = 300
 # ============================================================================
 # Offline vendor cache (relative to this repo)
 # ============================================================================
-# python download_deps.py  — run on a networked box, then copy vendor/ over.
+# Download-Deps-<OS> — run on a networked box, then copy app/vendor/ over.
 VENDOR_PACKAGES = ("requests", "paramiko", "pysnmp")
-HASHGEN_REPO = "https://github.com/TheMysteriousX/SNMPv3-Hash-Generator.git"
-HASHGEN_ZIP_URL = (
-    "https://github.com/TheMysteriousX/SNMPv3-Hash-Generator/archive/refs/heads/master.zip"
-)

@@ -4,14 +4,13 @@ import time
 from getpass import getpass
 
 from appgate import AppGateClient
-from config import SNMP_RELOAD_DELAY
+from config import CREDENTIALS_FILENAME, SNMP_RELOAD_DELAY
 from snmp_engine import SNMPEngineFetcher
 from snmp_hashgen import SNMPHashGenerator
 from snmp_validate import SNMPValidator
-from utils import load_credentials
+from utils import REPO_ROOT, load_credentials
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
+CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
 
 
 def main() -> None:
@@ -43,6 +42,8 @@ def main() -> None:
         admin_pass = require("admin_password", "AppGate Admin Password", sensitive=True)
         ssh_user = require("ssh_username", "SSH Username")
         ssh_pass = require("ssh_password", "SSH Password", sensitive=True)
+        if not all((admin_user, admin_pass, ssh_user, ssh_pass)):
+            raise ValueError("admin_username, admin_password, ssh_username, and ssh_password are required")
 
         client = AppGateClient(inputs["agip"])
         engine_fetcher = SNMPEngineFetcher(ssh_user, ssh_pass)
@@ -58,6 +59,9 @@ def main() -> None:
         print(f"      Found: {appliance.get('name', 'N/A')} ({client.appliance_id})")
 
         print("\n[3/6] Retrieving Engine ID via SSH...")
+        print("      Pushing engineIDType via API (cz-configd owns snmpd.conf)...", file=sys.stderr)
+        client.ensure_engine_id_type3()
+        time.sleep(SNMP_RELOAD_DELAY)
         engine_id = engine_fetcher.get_engine_id(inputs["agip"])
         if engine_id.lower().startswith("0x"):
             engine_id = engine_id[2:]
@@ -75,7 +79,8 @@ def main() -> None:
         # API deleteUser does not clear /var/lib/snmp/snmpd.conf usmUser rows.
         print("\n[5a/6] Deleting existing SNMP user from appliance...")
         engine_fetcher.purge_persistent_user(inputs["agip"], inputs["snmp_user"])
-        client.delete_snmp_user(inputs["snmp_user"], engine_id=engine_id)
+        client.delete_snmp_user(inputs["snmp_user"])
+        time.sleep(SNMP_RELOAD_DELAY)
         print("      Existing SNMP user deleted")
 
         print("\n[5b/6] Updating AppGate SNMP configuration...")
@@ -85,7 +90,6 @@ def main() -> None:
             auth_hash,
             priv_hash,
             rouser_line,
-            engine_id=engine_id,
         )
         print("      SNMP configuration updated successfully")
 
@@ -100,6 +104,8 @@ def main() -> None:
             engine_id=engine_id,
         )
         print("      SNMP walk validation " + ("PASSED" if ok else "FAILED"))
+        if not ok:
+            sys.exit(1)
 
         print("\n" + "=" * 60)
         print("Configuration Summary")

@@ -11,13 +11,15 @@ import sys
 import time
 from typing import Optional
 
-from config import SNMP_RELOAD_DELAY, SSH_AUTH_TIMEOUT, SSH_TIMEOUT
-
-# RFC 3411 SnmpEngineID: octet 5 == 3 means the following 6 octets are a MAC.
-ENGINE_ID_TYPE_MAC = 3
-NET_SNMP_CONF = "/etc/snmp/snmpd.conf"
-PERSISTENT_CONF = "/var/lib/snmp/snmpd.conf"
-ETH_IFACE = "eth0"
+from config import (
+    ENGINE_ID_TYPE,
+    ETH_IFACE,
+    SNMP_PERSISTENT_CONF,
+    SNMP_PERSISTENT_CONF_ALT,
+    SNMP_RELOAD_DELAY,
+    SSH_AUTH_TIMEOUT,
+    SSH_TIMEOUT,
+)
 
 OLD_ENGINE_RE = re.compile(r"oldEngineID\s+(?:0x)?([0-9a-fA-F]+)", re.IGNORECASE)
 MAC_RE = re.compile(r"link/ether\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})")
@@ -29,7 +31,7 @@ class SNMPEngineFetcher:
         self.ssh_password = ssh_password
 
     def get_engine_id(self, ip: str) -> str:
-        """Force engineIDType 3, restart snmpd, read oldEngineID, check vs eth0 MAC."""
+        """Restart snmpd, read oldEngineID, check it against the interface MAC."""
         if not self.ssh_user or not self.ssh_password:
             raise ValueError("SSH credentials are required to retrieve the Engine ID")
 
@@ -49,7 +51,7 @@ class SNMPEngineFetcher:
             raise ValueError(f"Unsafe SNMP username for remote edit: {user!r}")
 
         def _purge(client: paramiko.SSHClient) -> bool:
-            paths = (PERSISTENT_CONF, "/var/net-snmp/snmpd.conf", NET_SNMP_CONF)
+            paths = (SNMP_PERSISTENT_CONF, SNMP_PERSISTENT_CONF_ALT)
             for path in paths:
                 self._sudo(
                     client,
@@ -63,8 +65,8 @@ class SNMPEngineFetcher:
                 )
             leftover = self._sudo(
                 client,
-                f"grep -h 'usmUser.*\"{user}\"' {PERSISTENT_CONF} "
-                f"/var/net-snmp/snmpd.conf 2>/dev/null || true",
+                f"grep -h 'usmUser.*\"{user}\"' {SNMP_PERSISTENT_CONF} "
+                f"{SNMP_PERSISTENT_CONF_ALT} 2>/dev/null || true",
                 check=False,
             )
             if leftover.strip():
@@ -148,20 +150,17 @@ class SNMPEngineFetcher:
         return self._with_ssh(ip, self._configure_and_read_engine_id)
 
     def _configure_and_read_engine_id(self, client: paramiko.SSHClient) -> Optional[str]:
-        print("      Setting engineIDType 3 (RFC 3411 MAC format)...", file=sys.stderr)
-        self._ensure_engine_id_type3(client)
-
-        print("      Restarting snmpd so it regenerates oldEngineID...", file=sys.stderr)
+        print(f"      Restarting snmpd so it applies engineIDType {ENGINE_ID_TYPE}...", file=sys.stderr)
         if not self._restart_snmpd(client):
             print("      snmpd restart failed.", file=sys.stderr)
             return None
         time.sleep(SNMP_RELOAD_DELAY)
 
-        raw = self._sudo(client, f"grep -E '^oldEngineID' {PERSISTENT_CONF} | tail -n 1")
+        raw = self._sudo(client, f"grep -E '^oldEngineID' {SNMP_PERSISTENT_CONF} | tail -n 1")
         match = OLD_ENGINE_RE.search(raw or "")
         if not match:
             print(
-                f"      No oldEngineID in {PERSISTENT_CONF} after restart. "
+                f"      No oldEngineID in {SNMP_PERSISTENT_CONF} after restart. "
                 f"Output: {(raw or '').strip()[:200]}",
                 file=sys.stderr,
             )
@@ -169,7 +168,7 @@ class SNMPEngineFetcher:
         engine_id = match.group(1).lower()
         print(f"      oldEngineID: {engine_id}", file=sys.stderr)
 
-        mac = self._read_eth0_mac(client)
+        mac = self._read_iface_mac(client)
         if not mac:
             print(f"      Could not read {ETH_IFACE} MAC via ip addr.", file=sys.stderr)
             return None
@@ -183,40 +182,21 @@ class SNMPEngineFetcher:
                 file=sys.stderr,
             )
             return None
-        print("      Engine ID matches eth0 MAC (engineIDType 3).", file=sys.stderr)
+        print(f"      Engine ID matches {ETH_IFACE} MAC (engineIDType {ENGINE_ID_TYPE}).", file=sys.stderr)
         return engine_id
-
-    def _ensure_engine_id_type3(self, client: paramiko.SSHClient) -> None:
-        # exactEngineID / engineID would pin a random ID and block type-3 generation.
-        self._sudo(
-            client,
-            f"sed -i -E '/^[[:space:]]*(exactEngineID|engineID)[[:space:]]/d' {NET_SNMP_CONF}",
-        )
-        current = self._sudo(
-            client,
-            f"grep -iE '^[[:space:]]*engineIDType[[:space:]]+' {NET_SNMP_CONF} || true",
-        )
-        if re.search(r"engineIDType\s+3\b", current or "", re.IGNORECASE):
-            print(f"      {NET_SNMP_CONF} already has engineIDType 3.", file=sys.stderr)
-            return
-        self._sudo(
-            client,
-            f"sed -i -E '/^[[:space:]]*engineIDType[[:space:]]/d' {NET_SNMP_CONF}",
-        )
-        self._sudo(client, f"sh -c 'printf \"%s\\n\" \"engineIDType 3\" >> {NET_SNMP_CONF}'")
-        print(f"      Wrote engineIDType 3 to {NET_SNMP_CONF}.", file=sys.stderr)
 
     def _restart_snmpd(self, client: paramiko.SSHClient) -> bool:
         out = self._sudo(client, "systemctl restart snmpd", check=False)
-        status = self._sudo(client, "systemctl is-active snmpd || true")
-        if "active" in (status or ""):
+        status = (self._sudo(client, "systemctl is-active snmpd || true") or "").strip()
+        if status == "active":
             return True
-        print(f"      systemctl restart snmpd: {(out or '').strip()[:200]}", file=sys.stderr)
+        print(f"      systemctl restart snmpd: {out.strip()[:200]}", file=sys.stderr)
         self._sudo(client, "service snmpd restart", check=False)
-        status = self._sudo(client, "systemctl is-active snmpd || service snmpd status || true")
-        return "active" in (status or "") or "running" in (status or "").lower()
+        status = (self._sudo(client, "systemctl is-active snmpd || true") or "").strip()
+        fallback = (self._sudo(client, "service snmpd status || true") or "").lower()
+        return status == "active" or "is running" in fallback or "active (running)" in fallback
 
-    def _read_eth0_mac(self, client: paramiko.SSHClient) -> Optional[str]:
+    def _read_iface_mac(self, client: paramiko.SSHClient) -> Optional[str]:
         output = self._run(client, f"ip -o link show {ETH_IFACE}")
         match = MAC_RE.search(output or "")
         if match:
@@ -234,16 +214,9 @@ class SNMPEngineFetcher:
             return False
         if len(raw) < 11:
             return False
-        if raw[4] != ENGINE_ID_TYPE_MAC:
+        if raw[4] != ENGINE_ID_TYPE:
             return False
         return raw[5:11].hex() == mac_hex
-
-    @staticmethod
-    def expected_engine_id(mac: str, enterprise: int = 8072) -> str:
-        """Build a net-snmp-style type-3 engine ID from a MAC (enterprise 8072)."""
-        mac_hex = mac.replace(":", "").replace("-", "").lower()
-        enterprise_bytes = (enterprise | 0x80000000).to_bytes(4, "big")
-        return (enterprise_bytes + bytes([ENGINE_ID_TYPE_MAC]) + bytes.fromhex(mac_hex)).hex()
 
     def _sudo(self, client: paramiko.SSHClient, command: str, check: bool = True) -> str:
         return self._run(client, f"sudo -S {command}", sudo=True, check=check)

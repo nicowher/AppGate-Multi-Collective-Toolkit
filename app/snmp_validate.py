@@ -16,6 +16,9 @@ from config import (
     SNMPWALK_DETECT_TIMEOUT,
     SNMPWALK_HELP_TIMEOUT,
     SNMPWALK_TIMEOUT,
+    SNMPWALK_PROBE_TIMEOUT,
+    SNMPWALK_RETRIES,
+    SNMP_WALK_OID,
     VALIDATION_RETRIES,
     VALIDATION_RETRY_DELAY,
     get_auth_protocol,
@@ -148,13 +151,20 @@ class SNMPValidator:
 
     def _install_snmpwalk(self) -> bool:
         system = platform.system()
-        print("      Attempting to install Net-SNMP...", file=sys.stderr)
         native_ok = False
         try:
-            if system == "Linux":
-                native_ok = self._install_snmpwalk_linux()
-            elif system == "Darwin":
-                native_ok = self._install_snmpwalk_macos()
+            if system in ("Linux", "Darwin"):
+                answer = input(
+                    "      Install Net-SNMP via the system package manager? [Y/n]: "
+                ).strip().lower()
+                if answer in ("", "y", "yes"):
+                    print("      Attempting to install Net-SNMP...", file=sys.stderr)
+                    if system == "Linux":
+                        native_ok = self._install_snmpwalk_linux()
+                    else:
+                        native_ok = self._install_snmpwalk_macos()
+                else:
+                    print("      Skipping native Net-SNMP install.", file=sys.stderr)
             elif system == "Windows":
                 print(
                     "      Windows: no safe automatic Net-SNMP installer. "
@@ -212,7 +222,7 @@ class SNMPValidator:
             return False
         return self._detect_snmpwalk()[0] is not None
 
-    def _usm(self, user: str, auth: str, priv: str, engine_id: Optional[str] = None):
+    def _usm(self, engine_id: Optional[str] = None):
         kwargs = {
             "authProtocol": get_auth_protocol(),
             "privProtocol": get_priv_protocol(),
@@ -255,10 +265,14 @@ class SNMPValidator:
                 return False
             for (errorIndication, errorStatus, errorIndex, varBinds) in nextCmd(
                 SnmpEngine(),
-                UsmUserData(user, auth, priv, **self._usm(user, auth, priv, engine_id)),
-                UdpTransportTarget((ip, DEFAULT_SNMP_PORT), timeout=5, retries=1),
+                UsmUserData(user, auth, priv, **self._usm(engine_id)),
+                UdpTransportTarget(
+                    (ip, DEFAULT_SNMP_PORT),
+                    timeout=SNMPWALK_PROBE_TIMEOUT,
+                    retries=SNMPWALK_RETRIES,
+                ),
                 ContextData(),
-                ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
+                ObjectType(ObjectIdentity(SNMP_WALK_OID)),
             ):
                 if errorIndication:
                     print(f"      SNMP walk (pysnmp): {errorIndication}", file=sys.stderr)
@@ -271,14 +285,16 @@ class SNMPValidator:
 
         async def _async_walk():
             transport = await UdpTransportTarget.create(
-                (ip, DEFAULT_SNMP_PORT), timeout=5, retries=1
+                (ip, DEFAULT_SNMP_PORT),
+                timeout=SNMPWALK_PROBE_TIMEOUT,
+                retries=SNMPWALK_RETRIES,
             )
             async for (errorIndication, errorStatus, errorIndex, varBinds) in walk_cmd(
                 SnmpEngine(),
-                UsmUserData(user, auth, priv, **self._usm(user, auth, priv, engine_id)),
+                UsmUserData(user, auth, priv, **self._usm(engine_id)),
                 transport,
                 ContextData(),
-                ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
+                ObjectType(ObjectIdentity(SNMP_WALK_OID)),
             ):
                 if errorIndication:
                     print(f"      SNMP walk (pysnmp): {errorIndication}", file=sys.stderr)
