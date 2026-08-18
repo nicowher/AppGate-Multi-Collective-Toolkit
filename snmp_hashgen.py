@@ -6,7 +6,9 @@ from typing import Any, Dict
 
 
 class SNMPHashGenerator:
-    def generate_hashes(self, user: str, auth: str, priv: str, engine_id: str) -> Dict[str, Any]:
+    FIPS_HASH_ALGOS = ("sha224", "sha256", "sha384", "sha512")
+
+    def generate_hashes(self, user: str, auth: str, priv: str, engine_id: str, hash_algo: str = "sha256") -> Dict[str, Any]:
         """Execute snmpv3-hashgen and return the parsed JSON output."""
         script_path = self._resolve_hashgen_script()
 
@@ -20,7 +22,7 @@ class SNMPHashGenerator:
             "--auth", auth,
             "--priv", priv,
             "--engine", engine_id,
-            "--hash", "sha1",
+            "--hash", hash_algo,
             "--mode", "priv",
             "--json",
         ])
@@ -38,6 +40,15 @@ class SNMPHashGenerator:
                 "Ensure it is installed and in PATH."
             ) from exc
         data = json.loads(result.stdout)
+        expected_len = {"md5": 32, "sha1": 40, "sha224": 56, "sha256": 64, "sha384": 96, "sha512": 128}.get(hash_algo)
+        if expected_len:
+            for key in ("auth", "priv"):
+                if data.get("hashes", {}).get(key) and len(data["hashes"][key]) != expected_len:
+                    raise RuntimeError(
+                        f"snmpv3-hashgen returned {key} hash with unexpected length "
+                        f"{len(data['hashes'][key])} for {hash_algo} (expected {expected_len}). "
+                        f"The installed hash generator may not support {hash_algo}."
+                    )
         return data
 
     @staticmethod
