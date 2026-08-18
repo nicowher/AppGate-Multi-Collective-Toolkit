@@ -8,11 +8,28 @@ import time
 import urllib.request
 from typing import Optional, Tuple
 
+from config import DEFAULT_SNMP_PORT, VALIDATION_RETRIES, VALIDATION_RETRY_DELAY, get_auth_protocol, get_priv_protocol
+
 
 class SNMPValidator:
-    DEFAULT_SNMP_PORT = 161
-    VALIDATION_RETRIES = 2
-    VALIDATION_RETRY_DELAY = 1
+    # ========================================================================
+    # SNMP Walk Validator
+    # ========================================================================
+    # Validates the pushed SNMPv3 config by performing an actual SNMP walk.
+    #
+    # Three backends (in order of preference):
+    #   1. Net-SNMP snmpwalk (Linux/macOS/Windows) - most reliable
+    #   2. SnmpSoft SnmpWalk.exe (Windows)
+    #   3. pysnmp Python library (cross-platform fallback)
+    #
+    # IMPORTANT: The SNMP walk uses PLAINTEXT passwords, not hashes.
+    # SNMPv3 derives the HMAC locally from password + engine_id.
+    # The hashes are only stored in the appliance's createUser line.
+    #
+    # pysnmp caveat: pysnmp's key derivation may not match all appliances.
+    # If pysnmp fails with "Wrong SNMP PDU digest", install snmpwalk
+    # so the script uses the native Net-SNMP backend instead.
+    # ========================================================================
 
     def validate_snmp_walk(self, ip: str, user: str, auth: str, priv: str) -> bool:
         """Run an SNMP walk to verify the new SNMPv3 credentials."""
@@ -264,8 +281,6 @@ class SNMPValidator:
                 ObjectType,
                 ObjectIdentity,
                 walk_cmd,
-                usmHMAC192SHA256AuthProtocol,
-                usmAesCfb256Protocol,
             )
         except ImportError:
             try:
@@ -278,12 +293,7 @@ class SNMPValidator:
                     ObjectType,
                     ObjectIdentity,
                     ObjectIdentity,
-                    usmAesCfb256Protocol,
                 )
-                try:
-                    from pysnmp.hlapi import usmHMAC192SHA256AuthProtocol
-                except ImportError:
-                    usmHMAC192SHA256AuthProtocol = (1, 3, 6, 1, 6, 3, 10, 1, 1, 5)
             except ImportError:
                 print("      pysnmp library not available.", file=sys.stderr)
                 return False
@@ -294,8 +304,8 @@ class SNMPValidator:
                         user,
                         auth,
                         priv,
-                        authProtocol=usmHMAC192SHA256AuthProtocol,
-                        privProtocol=usmAesCfb256Protocol,
+                        authProtocol=get_auth_protocol(),
+                        privProtocol=get_priv_protocol(),
                     ),
                      UdpTransportTarget((ip, self.DEFAULT_SNMP_PORT), timeout=5, retries=1),
                     ContextData(),
@@ -323,8 +333,8 @@ class SNMPValidator:
                     user,
                     auth,
                     priv,
-                    authProtocol=usmHMAC192SHA256AuthProtocol,
-                    privProtocol=usmAesCfb256Protocol,
+                    authProtocol=get_auth_protocol(),
+                    privProtocol=get_priv_protocol(),
                 ),
                 transport,
                 ContextData(),

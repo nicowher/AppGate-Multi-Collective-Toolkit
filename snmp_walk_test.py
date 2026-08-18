@@ -3,6 +3,7 @@ import json
 import os
 import sys
 
+from config import get_auth_protocol, get_priv_protocol
 from pysnmp.hlapi.v3arch.asyncio import (
     SnmpEngine,
     UsmUserData,
@@ -11,8 +12,6 @@ from pysnmp.hlapi.v3arch.asyncio import (
     ObjectType,
     ObjectIdentity,
     walk_cmd,
-    usmHMAC192SHA256AuthProtocol,
-    usmAesCfb256Protocol,
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,8 +40,8 @@ async def snmp_walk(ip: str, user: str, auth: str, priv: str) -> bool:
             user,
             auth,
             priv,
-                    authProtocol=usmHMAC192SHA256AuthProtocol,
-                    privProtocol=usmAesCfb256Protocol,
+                    authProtocol=get_auth_protocol(),
+                    privProtocol=get_priv_protocol(),
         ),
         transport,
         ContextData(),

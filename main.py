@@ -10,6 +10,13 @@ from snmp_engine import SNMPEngineFetcher
 from snmp_hashgen import SNMPHashGenerator
 from snmp_validate import SNMPValidator
 
+# ============================================================================
+# Credentials File
+# ============================================================================
+# credentials.json is git-ignored for security. It contains plaintext
+# passwords and should never be committed. The script loads it to pre-populate
+# prompts, but still asks for missing values interactively.
+# ============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
 

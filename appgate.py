@@ -10,15 +10,21 @@ except ImportError:
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
     requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
+from config import DEFAULT_SNMP_PORT, API_TIMEOUT, SNMP_AUTH_PROTOCOL, SNMP_PRIV_PROTOCOL
 import re
 import sys
 from typing import Any, Dict, Optional
 
 
 class AppGateClient:
+    # ========================================================================
+    # AppGate API Configuration
+    # ========================================================================
+    # These defaults are safe to change only if you know the target appliance
+    # runs a different API version or provider scheme.
+    # ========================================================================
     DEFAULT_API_VERSION = "24"
     DEFAULT_PROVIDER = "local"
-    DEFAULT_SNMP_PORT = 161
     MACHINE_ID = "f0031c00-0522-43b3-a642-ae23cfd1bc22"
 
     def __init__(self, agip: str, api_version: Optional[str] = None, provider: str = DEFAULT_PROVIDER) -> None:
@@ -227,7 +233,15 @@ class AppGateClient:
         response.raise_for_status()
         appliance = response.json()
 
-        create_user_line = f"createUser {user} SHA256 -l 0x{auth_hash} AES256 -l 0x{priv_hash}"
+        # ====================================================================
+        # Build createUser line
+        # ====================================================================
+        # Uses SNMP_AUTH_PROTOCOL and SNMP_PRIV_PROTOCOL from config.py.
+        # These must match the hash algorithm passed to snmpv3-hashgen.
+        # Changing these without updating snmp_hashgen.py will cause
+        # "Wrong SNMP PDU digest" errors during validation.
+        # ====================================================================
+        create_user_line = f"createUser {user} {SNMP_AUTH_PROTOCOL} -l 0x{auth_hash} {SNMP_PRIV_PROTOCOL} -l 0x{priv_hash}"
 
         existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
         lines = existing_conf.splitlines() if existing_conf else []

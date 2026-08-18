@@ -6,6 +6,21 @@ from typing import Any, Dict
 
 
 class SNMPHashGenerator:
+    # ========================================================================
+    # FIPS 140-3 / CNSA 2.0 Approved Hash Algorithms
+    # ========================================================================
+    # SNMPv3-usuable hash algorithms for USM key derivation:
+    #   md5    -> 32 hex chars  (deprecated, not CNSA 2.0)
+    #   sha1   -> 40 hex chars  (deprecated, not CNSA 2.0)
+    #   sha224 -> 56 hex chars  (CNSA 2.0)
+    #   sha256 -> 64 hex chars  (CNSA 2.0, preferred)
+    #   sha384 -> 96 hex chars  (CNSA 2.0)
+    #   sha512 -> 128 hex chars (CNSA 2.0)
+    #
+    # Default is sha256 (lowest CNSA 2.0-approved algorithm with widest
+    # appliance support). The hash algorithm MUST match the createUser line
+    # in appgate.py and the SNMP walk validation protocols.
+    # ========================================================================
     FIPS_HASH_ALGOS = ("sha224", "sha256", "sha384", "sha512")
 
     def generate_hashes(self, user: str, auth: str, priv: str, engine_id: str, hash_algo: str = "sha256") -> Dict[str, Any]:
