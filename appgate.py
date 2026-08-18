@@ -227,7 +227,7 @@ class AppGateClient:
         response.raise_for_status()
         appliance = response.json()
 
-        create_user_line = f"createUser {user} SHA -l 0x{auth_hash} AES -l 0x{priv_hash}"
+        create_user_line = f"createUser {user} SHA256 -l 0x{auth_hash} AES256 -l 0x{priv_hash}"
 
         existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
         lines = existing_conf.splitlines() if existing_conf else []

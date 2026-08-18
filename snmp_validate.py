@@ -57,8 +57,8 @@ class SNMPValidator:
                     f"-r:{ip}",
                     "-v:3",
                     f"-sn:{user}",
-                    "-ap:SHA", f"-aw:{auth}",
-                    "-pp:AES128", f"-pw:{priv}",
+                    "-ap:SHA256", f"-aw:{auth}",
+                    "-pp:AES256", f"-pw:{priv}",
                 ]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if result.returncode != 0:
@@ -84,8 +84,8 @@ class SNMPValidator:
                 "-v3",
                 "-u", user,
                 "-l", "authPriv",
-                "-a", "SHA", "-A", auth,
-                "-x", "AES", "-X", priv,
+                "-a", "SHA256", "-A", auth,
+                "-x", "AES256", "-X", priv,
                 ip,
             ]
 
@@ -265,7 +265,7 @@ class SNMPValidator:
                 ObjectIdentity,
                 walk_cmd,
                 usmHMACSHAAuthProtocol,
-                usmAesCfb128Protocol,
+                usmAesCfb256Protocol,
             )
         except ImportError:
             try:
@@ -278,7 +278,7 @@ class SNMPValidator:
                     ObjectType,
                     ObjectIdentity,
                     usmHMACSHAAuthProtocol,
-                    usmAesCfb128Protocol,
+                    usmAesCfb256Protocol,
                 )
             except ImportError:
                 print("      pysnmp library not available.", file=sys.stderr)
