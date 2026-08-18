@@ -2,23 +2,23 @@ from utils import ensure_package
 
 try:
     import requests
-    from requests.packages.urllib3.exceptions import InsecureRequestWarning
-    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 except ImportError:
     ensure_package("requests", "requests")
     import requests
-    from requests.packages.urllib3.exceptions import InsecureRequestWarning
-    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
+from config import API_TIMEOUT, DEFAULT_SNMP_PORT, SNMP_AUTH_PROTOCOL, SNMP_PRIV_PROTOCOL, TLS_VERIFY
 import re
 import sys
 from typing import Any, Dict, Optional
+
+if not TLS_VERIFY:
+    from requests.packages.urllib3.exceptions import InsecureRequestWarning
+    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 
 class AppGateClient:
     DEFAULT_API_VERSION = "24"
     DEFAULT_PROVIDER = "local"
-    DEFAULT_SNMP_PORT = 161
     MACHINE_ID = "f0031c00-0522-43b3-a642-ae23cfd1bc22"
 
     def __init__(self, agip: str, api_version: Optional[str] = None, provider: str = DEFAULT_PROVIDER) -> None:
@@ -46,8 +46,8 @@ class AppGateClient:
             f"{self.base_url}/login",
             headers=self.headers,
             json=payload,
-            verify=False,
-            timeout=15,
+            verify=TLS_VERIFY,
+            timeout=API_TIMEOUT,
         )
         if response.status_code != 200:
             self._handle_login_error(response, username, provider_name)
@@ -106,13 +106,26 @@ class AppGateClient:
 
         raise SystemExit(1)
 
+    @staticmethod
+    def _snmpd_lines_without_user(appliance: Dict[str, Any], user: str) -> list:
+        """Return snmpd.conf lines with this user's entries and exactEngineID removed."""
+        existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
+        lines = existing_conf.splitlines() if existing_conf else []
+        drop = (
+            rf"^createUser\s+{re.escape(user)}\b",
+            rf"^rouser\s+{re.escape(user)}\b",
+            rf"^deleteUser\s+{re.escape(user)}\b",
+            r"^exactEngineID\s+",
+        )
+        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
+
     def get_appliances(self) -> list:
         """Return all appliances visible to the current API user."""
         response = requests.get(
             f"{self.base_url}/appliances",
             headers=self.headers,
-            verify=False,
-            timeout=15,
+            verify=TLS_VERIFY,
+            timeout=API_TIMEOUT,
         )
         response.raise_for_status()
         data = response.json()
@@ -156,48 +169,12 @@ class AppGateClient:
         daemon before pushing the new createUser config, so that the final
         snmpd.conf does not contain a deleteUser line.
         """
-        if not self.appliance_id:
-            raise RuntimeError("Appliance ID is not set. Run find_appliance_by_ip first.")
-
-        response = requests.get(
-            f"{self.base_url}/appliances/{self.appliance_id}",
-            headers=self.headers,
-            verify=False,
-            timeout=15,
-        )
-        response.raise_for_status()
-        appliance = response.json()
-
-        existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
-        lines = existing_conf.splitlines() if existing_conf else []
-        lines = [line for line in lines if not re.match(rf"^createUser\s+{re.escape(user)}\b", line)]
-        lines = [line for line in lines if not re.match(rf"^rouser\s+{re.escape(user)}\b", line)]
-        lines = [line for line in lines if not re.match(rf"^deleteUser\s+{re.escape(user)}\b", line)]
-        lines = [line for line in lines if not re.match(r"^exactEngineID\s+", line)]
+        appliance = self._get_appliance()
+        lines = self._snmpd_lines_without_user(appliance, user)
         lines.append(f"deleteUser {user}")
         if engine_id:
             lines.append(f"exactEngineID 0x{engine_id}")
-        new_conf = "\n".join(lines)
-
-        appliance["snmpServer"] = {
-            "enabled": True,
-            "snmpd.conf": new_conf,
-            "tcpPort": self.DEFAULT_SNMP_PORT,
-            "udpPort": self.DEFAULT_SNMP_PORT,
-        }
-
-        put_response = requests.put(
-            f"{self.base_url}/appliances/{self.appliance_id}",
-            headers=self.headers,
-            json=appliance,
-            verify=False,
-            timeout=15,
-        )
-        if put_response.status_code != 200:
-            body_preview = (put_response.text or "")[:500]
-            raise RuntimeError(
-                f"Failed to delete SNMP user (HTTP {put_response.status_code}): {body_preview}"
-            )
+        self._put_snmpd_conf(appliance, "\n".join(lines), enabled=True)
         return True
 
     def update_snmp_config(
@@ -215,50 +192,50 @@ class AppGateClient:
         so the final config contains only createUser, rouser, and
         exactEngineID — no deleteUser line.
         """
-        if not self.appliance_id:
-            raise RuntimeError("Appliance ID is not set. Run find_appliance_by_ip first.")
-
-        response = requests.get(
-            f"{self.base_url}/appliances/{self.appliance_id}",
-            headers=self.headers,
-            verify=False,
-            timeout=15,
+        # createUser algorithms must match snmpv3-hashgen (see config.py).
+        create_user_line = (
+            f"createUser {user} {SNMP_AUTH_PROTOCOL} -l 0x{auth_hash} "
+            f"{SNMP_PRIV_PROTOCOL} -l 0x{priv_hash}"
         )
-        response.raise_for_status()
-        appliance = response.json()
 
-        create_user_line = f"createUser {user} SHA256 -l 0x{auth_hash} AES256 -l 0x{priv_hash}"
-
-        existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
-        lines = existing_conf.splitlines() if existing_conf else []
-        lines = [line for line in lines if not re.match(rf"^createUser\s+{re.escape(user)}\b", line)]
-        lines = [line for line in lines if not re.match(rf"^rouser\s+{re.escape(user)}\b", line)]
-        lines = [line for line in lines if not re.match(rf"^deleteUser\s+{re.escape(user)}\b", line)]
-        lines = [line for line in lines if not re.match(r"^exactEngineID\s+", line)]
+        appliance = self._get_appliance()
+        lines = self._snmpd_lines_without_user(appliance, user)
         if rouser_line:
             lines.append(rouser_line)
         lines.append(create_user_line)
         if engine_id:
             lines.append(f"exactEngineID 0x{engine_id}")
-        new_conf = "\n".join(lines)
+        self._put_snmpd_conf(appliance, "\n".join(lines), enabled=enabled)
+        return True
 
+    def _get_appliance(self) -> Dict[str, Any]:
+        if not self.appliance_id:
+            raise RuntimeError("Appliance ID is not set. Run find_appliance_by_ip first.")
+        response = requests.get(
+            f"{self.base_url}/appliances/{self.appliance_id}",
+            headers=self.headers,
+            verify=TLS_VERIFY,
+            timeout=API_TIMEOUT,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def _put_snmpd_conf(self, appliance: Dict[str, Any], new_conf: str, enabled: bool) -> None:
         appliance["snmpServer"] = {
             "enabled": enabled,
             "snmpd.conf": new_conf,
-            "tcpPort": self.DEFAULT_SNMP_PORT,
-            "udpPort": self.DEFAULT_SNMP_PORT,
+            "tcpPort": DEFAULT_SNMP_PORT,
+            "udpPort": DEFAULT_SNMP_PORT,
         }
-
         put_response = requests.put(
             f"{self.base_url}/appliances/{self.appliance_id}",
             headers=self.headers,
             json=appliance,
-            verify=False,
-            timeout=15,
+            verify=TLS_VERIFY,
+            timeout=API_TIMEOUT,
         )
         if put_response.status_code != 200:
             body_preview = (put_response.text or "")[:500]
             raise RuntimeError(
                 f"Failed to update SNMP config (HTTP {put_response.status_code}): {body_preview}"
             )
-        return True
