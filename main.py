@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 from getpass import getpass
 from typing import Dict
 
@@ -107,6 +108,8 @@ def main() -> None:
 
         # 6. Validate
         print("\n[6/6] Validating SNMP walk...")
+        print("      Waiting for SNMP daemon to reload...", file=sys.stderr)
+        time.sleep(3)
         ok = validator.validate_snmp_walk(
             inputs["agip"], inputs["snmp_user"], inputs["snmp_auth"], inputs["snmp_priv"]
         )

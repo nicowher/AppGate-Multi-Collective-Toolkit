@@ -4,85 +4,104 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from typing import Optional, Tuple
 
 
 class SNMPValidator:
     DEFAULT_SNMP_PORT = 161
+    VALIDATION_RETRIES = 3
+    VALIDATION_RETRY_DELAY = 2
 
     def validate_snmp_walk(self, ip: str, user: str, auth: str, priv: str) -> bool:
         """Run an SNMP walk to verify the new SNMPv3 credentials."""
-        tool_type, executable = self._detect_snmpwalk()
+        last_error = ""
+        for attempt in range(1, self.VALIDATION_RETRIES + 1):
+            if attempt > 1:
+                print(
+                    f"      Retrying SNMP walk validation (attempt {attempt}/{self.VALIDATION_RETRIES})...",
+                    file=sys.stderr,
+                )
+                time.sleep(self.VALIDATION_RETRY_DELAY)
 
-        if tool_type is None:
-            print(
-                "      SNMP walk tool not found. Attempting auto-install...",
-                file=sys.stderr,
-            )
-            if self._install_snmpwalk():
-                tool_type, executable = self._detect_snmpwalk()
-                if tool_type is not None:
-                    print("      SNMP walk tool installed. Retrying validation...", file=sys.stderr)
+            tool_type, executable = self._detect_snmpwalk()
+
+            if tool_type is None:
+                print(
+                    "      SNMP walk tool not found. Attempting auto-install...",
+                    file=sys.stderr,
+                )
+                if self._install_snmpwalk():
+                    tool_type, executable = self._detect_snmpwalk()
+                    if tool_type is not None:
+                        print("      SNMP walk tool installed. Retrying validation...", file=sys.stderr)
+                    else:
+                        print(
+                            "      Auto-install completed but no SNMP walk tool "
+                            "is still available.",
+                            file=sys.stderr,
+                        )
+                        return False
                 else:
                     print(
-                        "      Auto-install completed but no SNMP walk tool "
-                        "is still available.",
+                        "      Could not auto-install any SNMP walk tool. "
+                        "Install Net-SNMP, SnmpWalk, or run 'pip install pysnmp' manually.",
                         file=sys.stderr,
                     )
                     return False
-            else:
-                print(
-                    "      Could not auto-install any SNMP walk tool. "
-                    "Install Net-SNMP, SnmpWalk, or run 'pip install pysnmp' manually.",
-                    file=sys.stderr,
-                )
-                return False
 
-        if tool_type == "snmpsoft":
+            if tool_type == "snmpsoft":
+                cmd = [
+                    executable,
+                    f"-r:{ip}",
+                    "-v:3",
+                    f"-sn:{user}",
+                    "-ap:SHA", f"-aw:{auth}",
+                    "-pp:AES128", f"-pw:{priv}",
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if result.returncode != 0:
+                    last_error = (
+                        f"      SNMP walk failed (rc={result.returncode}): "
+                        f"{result.stderr.strip()[:500] or result.stdout.strip()[:500]}"
+                    )
+                    print(last_error, file=sys.stderr)
+                    print(f"      cmd: {' '.join(cmd)}", file=sys.stderr)
+                    continue
+                return True
+
+            if tool_type == "pysnmp":
+                print("      Using pysnmp for SNMP walk validation...", file=sys.stderr)
+                ok = self._validate_snmp_walk_pysnmp(ip, user, auth, priv)
+                if not ok:
+                    last_error = "      SNMP walk (pysnmp) failed"
+                    continue
+                return True
+
             cmd = [
                 executable,
-                f"-r:{ip}",
-                "-v:3",
-                f"-sn:{user}",
-                "-ap:SHA", f"-aw:{auth}",
-                "-pp:AES128", f"-pw:{priv}",
+                "-v3",
+                "-u", user,
+                "-l", "authPriv",
+                "-a", "SHA", "-A", auth,
+                "-x", "AES", "-X", priv,
+                ip,
             ]
+
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if result.returncode != 0:
-                print(
+                last_error = (
                     f"      SNMP walk failed (rc={result.returncode}): "
-                    f"{result.stderr.strip()[:500] or result.stdout.strip()[:500]}",
-                    file=sys.stderr,
+                    f"{result.stderr.strip()[:500] or result.stdout.strip()[:500]}"
                 )
+                print(last_error, file=sys.stderr)
                 print(f"      cmd: {' '.join(cmd)}", file=sys.stderr)
-                return False
+                continue
             return True
 
-        if tool_type == "pysnmp":
-            print("      Using pysnmp for SNMP walk validation...", file=sys.stderr)
-            return self._validate_snmp_walk_pysnmp(ip, user, auth, priv)
-
-        cmd = [
-            executable,
-            "-v3",
-            "-u", user,
-            "-l", "authPriv",
-            "-a", "SHA", "-A", auth,
-            "-x", "AES", "-X", priv,
-            ip,
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode != 0:
-            print(
-                f"      SNMP walk failed (rc={result.returncode}): "
-                f"{result.stderr.strip()[:500] or result.stdout.strip()[:500]}",
-                file=sys.stderr,
-            )
-            print(f"      cmd: {' '.join(cmd)}", file=sys.stderr)
-            return False
-        return True
+        print(f"      SNMP walk validation failed after {self.VALIDATION_RETRIES} attempts", file=sys.stderr)
+        return False
 
     def _detect_snmpwalk(self) -> Tuple[Optional[str], Optional[str]]:
         """Detect an available SNMP walk tool."""
@@ -274,7 +293,7 @@ class SNMPValidator:
                         authProtocol=usmHMACSHAAuthProtocol,
                         privProtocol=usmAesCfb128Protocol,
                     ),
-                    UdpTransportTarget((ip, self.DEFAULT_SNMP_PORT), timeout=5, retries=1),
+                    UdpTransportTarget((ip, self.DEFAULT_SNMP_PORT), timeout=10, retries=2),
                     ContextData(),
                     ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
                 ):
@@ -292,7 +311,7 @@ class SNMPValidator:
 
         async def _async_walk():
             transport = await UdpTransportTarget.create(
-                (ip, self.DEFAULT_SNMP_PORT), timeout=5, retries=1
+                (ip, self.DEFAULT_SNMP_PORT), timeout=10, retries=2
             )
             async for (errorIndication, errorStatus, errorIndex, varBinds) in walk_cmd(
                 SnmpEngine(),
