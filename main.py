@@ -1,43 +1,21 @@
-import json
 import os
 import sys
 import time
 from getpass import getpass
-from typing import Dict
 
 from appgate import AppGateClient
 from snmp_engine import SNMPEngineFetcher
 from snmp_hashgen import SNMPHashGenerator
 from snmp_validate import SNMPValidator
+from utils import load_credentials
 
-# ============================================================================
-# Credentials File
-# ============================================================================
-# credentials.json is git-ignored for security. It contains plaintext
-# passwords and should never be committed. The script loads it to pre-populate
-# prompts, but still asks for missing values interactively.
-# ============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
 
 
-def load_credentials() -> Dict[str, str]:
-    if not os.path.isfile(CREDENTIALS_PATH):
-        return {}
-    try:
-        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        if not isinstance(data, dict):
-            return {}
-        return {k: str(v) for k, v in data.items()}
-    except Exception as exc:
-        print(f"Warning: Could not load credentials from {CREDENTIALS_PATH}: {exc}", file=sys.stderr)
-        return {}
-
-
 def main() -> None:
     try:
-        creds = load_credentials()
+        creds = load_credentials(CREDENTIALS_PATH)
 
         def require(field: str, prompt: str, sensitive: bool = False) -> str:
             value = creds.get(field, "")

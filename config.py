@@ -61,10 +61,20 @@ warnings.filterwarnings(
 )
 
 # ============================================================================
+# TLS / Certificate Verification
+# ============================================================================
+# Set to True to verify the AppGate appliance's TLS certificate.
+# The appliance uses a self-signed cert by default, so this is False
+# unless you have installed a trusted CA-signed certificate.
+# WARNING: Setting this to False disables TLS verification and makes
+# you vulnerable to MITM attacks. Only do this on trusted networks.
+# ============================================================================
+TLS_VERIFY = False
+
+# ============================================================================
 # SNMP Defaults
 # ============================================================================
 DEFAULT_SNMP_PORT = 161
-DEFAULT_SNMP_COMMUNITY = "public"
 
 # ============================================================================
 # Timeouts (seconds)

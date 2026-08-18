@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import sys
 
@@ -13,36 +12,23 @@ from pysnmp.hlapi.v3arch.asyncio import (
     ObjectIdentity,
     walk_cmd,
 )
+from utils import load_credentials
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, "credentials.json")
-
-
-def load_credentials() -> dict:
-    if not os.path.isfile(CREDENTIALS_PATH):
-        return {}
-    try:
-        with open(CREDENTIALS_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        if not isinstance(data, dict):
-            return {}
-        return {k: str(v) for k, v in data.items()}
-    except Exception as exc:
-        print(f"Warning: Could not load credentials from {CREDENTIALS_PATH}: {exc}", file=sys.stderr)
-        return {}
 
 
 async def snmp_walk(ip: str, user: str, auth: str, priv: str) -> bool:
     transport = await UdpTransportTarget.create((ip, 161), timeout=5, retries=1)
     async for (errorIndication, errorStatus, errorIndex, varBinds) in walk_cmd(
         SnmpEngine(),
-        UsmUserData(
-            user,
-            auth,
-            priv,
-                    authProtocol=get_auth_protocol(),
-                    privProtocol=get_priv_protocol(),
-        ),
+            UsmUserData(
+                user,
+                auth,
+                priv,
+                authProtocol=get_auth_protocol(),
+                privProtocol=get_priv_protocol(),
+            ),
         transport,
         ContextData(),
         ObjectType(ObjectIdentity("1.3.6.1.2.1.1")),
@@ -60,7 +46,7 @@ async def snmp_walk(ip: str, user: str, auth: str, priv: str) -> bool:
 
 
 if __name__ == "__main__":
-    creds = load_credentials()
+    creds = load_credentials(CREDENTIALS_PATH)
     ip = creds.get("agip", "")
     user = creds.get("snmp_user", "")
     auth = creds.get("snmp_auth", "")

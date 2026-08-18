@@ -29,14 +29,8 @@ class SNMPEngineFetcher:
 
     def _ssh_query_engine_id(self, ip: str) -> Optional[str]:
         """SSH to the appliance and extract engine ID from snmpd.conf."""
-        if paramiko is None:
-            raise RuntimeError(
-                "paramiko is required for SSH engine ID retrieval. "
-                "Install it with: pip install paramiko"
-            )
-
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.set_missing_host_key_policy(paramiko.WarningPolicy())
         try:
             client.connect(
                 hostname=ip,
@@ -100,11 +94,8 @@ class SNMPEngineFetcher:
 
     def _ssh_query_engine_id_keyboard_interactive(self, ip: str) -> Optional[str]:
         """Fallback SSH using keyboard-interactive authentication."""
-        if paramiko is None:
-            return None
-
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.set_missing_host_key_policy(paramiko.WarningPolicy())
         try:
             def handler(title, instructions, prompt_list):
                 responses = []

@@ -1,6 +1,9 @@
 import importlib.util
+import json
+import os
 import subprocess
 import sys
+from typing import Any, Dict
 
 
 def ensure_package(package: str, import_name: str) -> None:
@@ -15,3 +18,17 @@ def ensure_package(package: str, import_name: str) -> None:
         return
     print(f"Please install {package} manually and rerun.", file=sys.stderr)
     sys.exit(1)
+
+
+def load_credentials(path: str) -> Dict[str, Any]:
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, dict):
+            return {}
+        return {k: str(v) for k, v in data.items()}
+    except Exception as exc:
+        print(f"Warning: Could not load credentials from {path}: {exc}", file=sys.stderr)
+        return {}

@@ -10,7 +10,7 @@ except ImportError:
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
     requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-from config import DEFAULT_SNMP_PORT, API_TIMEOUT, SNMP_AUTH_PROTOCOL, SNMP_PRIV_PROTOCOL
+from config import DEFAULT_SNMP_PORT, API_TIMEOUT, SNMP_AUTH_PROTOCOL, SNMP_PRIV_PROTOCOL, TLS_VERIFY
 import re
 import sys
 from typing import Any, Dict, Optional
@@ -52,7 +52,7 @@ class AppGateClient:
             f"{self.base_url}/login",
             headers=self.headers,
             json=payload,
-            verify=False,
+            verify=TLS_VERIFY,
             timeout=15,
         )
         if response.status_code != 200:
@@ -117,7 +117,7 @@ class AppGateClient:
         response = requests.get(
             f"{self.base_url}/appliances",
             headers=self.headers,
-            verify=False,
+            verify=TLS_VERIFY,
             timeout=15,
         )
         response.raise_for_status()
@@ -168,7 +168,7 @@ class AppGateClient:
         response = requests.get(
             f"{self.base_url}/appliances/{self.appliance_id}",
             headers=self.headers,
-            verify=False,
+            verify=TLS_VERIFY,
             timeout=15,
         )
         response.raise_for_status()
@@ -188,15 +188,15 @@ class AppGateClient:
         appliance["snmpServer"] = {
             "enabled": True,
             "snmpd.conf": new_conf,
-            "tcpPort": self.DEFAULT_SNMP_PORT,
-            "udpPort": self.DEFAULT_SNMP_PORT,
+            "tcpPort": DEFAULT_SNMP_PORT,
+            "udpPort": DEFAULT_SNMP_PORT,
         }
 
         put_response = requests.put(
             f"{self.base_url}/appliances/{self.appliance_id}",
             headers=self.headers,
             json=appliance,
-            verify=False,
+            verify=TLS_VERIFY,
             timeout=15,
         )
         if put_response.status_code != 200:
@@ -227,7 +227,7 @@ class AppGateClient:
         response = requests.get(
             f"{self.base_url}/appliances/{self.appliance_id}",
             headers=self.headers,
-            verify=False,
+            verify=TLS_VERIFY,
             timeout=15,
         )
         response.raise_for_status()
@@ -259,15 +259,15 @@ class AppGateClient:
         appliance["snmpServer"] = {
             "enabled": enabled,
             "snmpd.conf": new_conf,
-            "tcpPort": self.DEFAULT_SNMP_PORT,
-            "udpPort": self.DEFAULT_SNMP_PORT,
+            "tcpPort": DEFAULT_SNMP_PORT,
+            "udpPort": DEFAULT_SNMP_PORT,
         }
 
         put_response = requests.put(
             f"{self.base_url}/appliances/{self.appliance_id}",
             headers=self.headers,
             json=appliance,
-            verify=False,
+            verify=TLS_VERIFY,
             timeout=15,
         )
         if put_response.status_code != 200:
