@@ -65,7 +65,7 @@ class SNMPEngineFetcher:
                 err_output = stderr.read().decode("utf-8", errors="replace")
                 exit_status = stdout.channel.recv_exit_status()
 
-                if exit_status not in (0, 1) or err_output.strip():
+                if exit_status not in (0, 1):
                     print(f"      SSH command failed (exit {exit_status}): {err_output.strip()}", file=sys.stderr)
 
                 if output.strip():
@@ -135,7 +135,7 @@ class SNMPEngineFetcher:
             err_output = stderr.read().decode("utf-8", errors="replace")
             exit_status = stdout.channel.recv_exit_status()
 
-            if exit_status not in (0, 1) or err_output.strip():
+            if exit_status not in (0, 1):
                 print(
                     f"      Keyboard-interactive SSH command failed (exit {exit_status}): "
                     f"{err_output.strip()}",
