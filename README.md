@@ -2,6 +2,8 @@
 
 Generates localized SNMPv3 USM keys and pushes them to an AppGate SDP appliance. Designed for lab and production use, including air-gapped networks.
 
+Repository: https://github.com/nicowher/AppGate-SNMPv3-Passwordinator
+
 ## What it does
 
 Double-click a launcher (or run it from a terminal). It reads `credentials.json`, prompts for any missing fields, then:
