@@ -44,7 +44,7 @@ Required fields: `snmp_user`, `snmp_auth`, `snmp_priv`, `agip`, plus admin and S
 
 ## credentials.json (optional, gitignored)
 
-Put this next to `main.py`. Any missing key is prompted interactively. Sensitive prompts use `getpass`.
+Copy `credentials.example.json` and rename it to `credentials.json` next to `main.py`, then fill in your values. Any missing key is prompted interactively. Sensitive prompts use `getpass`.
 
 ```json
 {
