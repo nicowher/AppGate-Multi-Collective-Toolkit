@@ -264,7 +264,7 @@ class SNMPValidator:
                 ObjectType,
                 ObjectIdentity,
                 walk_cmd,
-                usmHMACSHAAuthProtocol,
+                usmHMAC192SHA256AuthProtocol,
                 usmAesCfb256Protocol,
             )
         except ImportError:
@@ -277,9 +277,13 @@ class SNMPValidator:
                     nextCmd,
                     ObjectType,
                     ObjectIdentity,
-                    usmHMACSHAAuthProtocol,
+                    ObjectIdentity,
                     usmAesCfb256Protocol,
                 )
+                try:
+                    from pysnmp.hlapi import usmHMAC192SHA256AuthProtocol
+                except ImportError:
+                    usmHMAC192SHA256AuthProtocol = (1, 3, 6, 1, 6, 3, 10, 1, 1, 5)
             except ImportError:
                 print("      pysnmp library not available.", file=sys.stderr)
                 return False
@@ -290,7 +294,7 @@ class SNMPValidator:
                         user,
                         auth,
                         priv,
-                        authProtocol=usmHMACSHAAuthProtocol,
+                        authProtocol=usmHMAC192SHA256AuthProtocol,
                         privProtocol=usmAesCfb256Protocol,
                     ),
                     UdpTransportTarget((ip, self.DEFAULT_SNMP_PORT), timeout=10, retries=2),
@@ -319,7 +323,7 @@ class SNMPValidator:
                     user,
                     auth,
                     priv,
-                    authProtocol=usmHMACSHAAuthProtocol,
+                    authProtocol=usmHMAC192SHA256AuthProtocol,
                     privProtocol=usmAesCfb256Protocol,
                 ),
                 transport,
