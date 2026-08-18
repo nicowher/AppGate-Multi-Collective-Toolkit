@@ -175,14 +175,10 @@ class AppGateClient:
 
         existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
         lines = existing_conf.splitlines() if existing_conf else []
-        lines = [
-            line for line in lines
-            if not re.match(rf"^createUser\s+{re.escape(user)}\s", line)
-        ]
-        lines = [
-            line for line in lines
-            if not re.match(rf"^(rouser|deleteUser)\s+{re.escape(user)}\s", line)
-        ]
+        lines = [line for line in lines if not re.match(rf"^createUser\s+{re.escape(user)}\s", line)]
+        lines = [line for line in lines if not re.match(rf"^rouser\s+{re.escape(user)}\s", line)]
+        lines = [line for line in lines if not re.match(rf"^deleteUser\s+{re.escape(user)}\s", line)]
+        lines = [line for line in lines if not re.match(r"^exactEngineID\s+", line)]
         if rouser_line:
             lines.append(rouser_line)
         lines.append(f"deleteUser {user}")
