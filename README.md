@@ -19,9 +19,9 @@ Double-click a launcher (or run it from a terminal). It reads `credentials.json`
 
 Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box; the rest still get pushed and walked.
 
-`SNMP-Walk-<OS>` only walks (no API/SSH). Prompt for the **appliance** IP — not a Controller `collectives[].agip`. Same SHA-256 / AES-256 and passphrase rules.
+`SNMP-Walk-<OS>` asks **1) single IP** (then *Walk another IP?*) or **2) pull list from Controller(s)** (same login / exclude as Passwordinator). No SSH and no config push. Controller IPs must be IPv4, IPv6, or FQDN.
 
-Set `DEBUG = True` in `app/config.py` to print a JSON block between `BEGIN DEBUG REPORT` and `END DEBUG REPORT` (no passwords/tokens). Uncomment `# print("DEBUG ...")` in sources for step traces.
+Set `DEBUG = True` in `app/config.py` to print a JSON block between `BEGIN DEBUG REPORT` and `END DEBUG REPORT`. Uncomment `# print("DEBUG ...")` for step traces.
 
 Missing Python packages install from `app/vendor/wheels` first (air-gapped), then offer online pip if you allow it.
 
@@ -39,7 +39,7 @@ On Linux/macOS: `chmod +x *.sh *.command` once. On macOS, right-click → Open t
 
 Shared: `snmp_user`, `snmp_auth`, `snmp_priv`, `ssh_username`, `ssh_password`. `rouser` is optional.
 
-Per collective (add as many objects as you want): `agip`, `admin_username`, `admin_password`. Collectives are numbered by array order (`1`, `2`, …). Duplicate `agip` values warn but still run.
+Per collective (add as many objects as you want): `agip`, `admin_username`, `admin_password`. Collectives are numbered by array order (`1`, `2`, …). Duplicate `agip` values warn but still run. After each collective the script asks **Add another Controller?** so you can type extras without editing the file.
 
 A single-controller `agip` / `admin_*` file still works (treated as collective `1`).
 
@@ -126,7 +126,8 @@ python -m unittest tests.test_snmp_hashgen
 | `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` / `SSH_PORT` | Transport hardening |
 | `APPGATE_*` | API version, port, provider, machineId |
 | `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
-| `DEBUG` | JSON report at end (off). Uncomment `# print("DEBUG ...")` in sources for traces |
+| `DEBUG` | JSON report at end (off) |
+| `YES_ANSWERS` | Accepted yes replies (`y`, `yes`) |
 | Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention and cz-configd wait |
 
 Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algorithms is a policy exception, not the default.

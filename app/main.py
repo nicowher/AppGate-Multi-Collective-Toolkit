@@ -14,11 +14,9 @@ Phase-aligned across collectives (array order = 1, 2, 3, ...):
 import json
 import os
 import platform
-import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from getpass import getpass
 from typing import Any, Callable, Dict, List, Optional
 
 from appgate import AppGateClient
@@ -36,13 +34,14 @@ from config import (
     SNMP_RELOAD_DELAY,
     SSH_CONCURRENCY,
     TLS_VERIFY,
+    YES_ANSWERS,
     warn_insecure_transport,
 )
 from inventory import Target, prompt_exclusions
 from snmp_engine import SNMPEngineFetcher
 from snmp_hashgen import SNMPHashGenerator
 from snmp_validate import SNMPValidator
-from utils import REPO_ROOT, load_credentials
+from utils import REPO_ROOT, is_valid_host, load_credentials, prompt_until_valid
 
 # credentials.json lives next to the launchers, not inside app/.
 CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
@@ -51,15 +50,31 @@ CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
 ClientMap = Dict[int, AppGateClient]
 
 
-def _require(creds: dict, field: str, prompt: str, sensitive: bool = False) -> str:
-    """Use credentials.json if the field is set; otherwise prompt (getpass for secrets)."""
-    value = creds.get(field, "")
-    if not value:
-        if sensitive:
-            value = getpass(f"{prompt}: ").strip()
-        else:
-            value = input(f"{prompt}: ").strip()
-    return value
+def _require(
+    creds: dict,
+    field: str,
+    prompt: str,
+    sensitive: bool = False,
+    required: bool = True,
+    min_len: int = 0,
+    pattern: Optional[str] = None,
+    pattern_msg: str = "Invalid format. Try again.",
+    validator=None,
+    validator_msg: str = "Enter IPv4, IPv6, or an FQDN (e.g. host.example.com).",
+) -> str:
+    """Use credentials.json if valid; otherwise keep asking (never exit)."""
+    return prompt_until_valid(
+        creds,
+        field,
+        prompt,
+        sensitive=sensitive,
+        required=required,
+        min_len=min_len,
+        pattern=pattern,
+        pattern_msg=pattern_msg,
+        validator=validator,
+        validator_msg=validator_msg,
+    )
 
 
 def _ok(targets: List[Target]) -> List[Target]:
@@ -120,14 +135,19 @@ def _parse_collectives(creds: dict) -> List[Dict[str, str]]:
 
     seen: Dict[str, int] = {}
     out: List[Dict[str, str]] = []
-    for i, row in enumerate(rows, 1):
-        agip = row["agip"] or _require({}, "agip", f"Collective {i} Controller IP")
-        user = row["admin_username"] or _require(
-            {}, "admin_username", f"Collective {i} Admin Username"
+
+    def _add(i: int, row: Dict[str, str]) -> None:
+        agip = _require(
+            row,
+            "agip",
+            f"Collective {i} Controller IP",
+            validator=is_valid_host,
         )
-        password = row["admin_password"] or getpass(
-            f"Collective {i} ({agip}) Admin Password: "
-        ).strip()
+        user = _require(row, "admin_username", f"Collective {i} Admin Username")
+        password = _require(
+            row, "admin_password", f"Collective {i} ({agip or 'Controller'}) Admin Password",
+            sensitive=True,
+        )
         if agip in seen:
             print(
                 f"WARNING: collectives {seen[agip]} and {i} share agip {agip}. "
@@ -142,6 +162,28 @@ def _parse_collectives(creds: dict) -> List[Dict[str, str]]:
             "admin_username": user,
             "admin_password": password,
         })
+
+    from_file = os.path.isfile(CREDENTIALS_PATH) and any(
+        (r.get("agip") or r.get("admin_username")) for r in rows
+    )
+    for i, row in enumerate(rows, 1):
+        _add(i, row)
+
+    first_ask = True
+    while True:
+        if first_ask and from_file:
+            print(f"\n      Found {CREDENTIALS_FILENAME} with {len(out)} Controller(s):")
+            for col in out:
+                print(f"        {col['index']}) {col['agip']}")
+            more = input(
+                "      Add another Controller besides those in the file? [y/N]: "
+            ).strip().lower()
+            first_ask = False
+        else:
+            more = input("      Add another Controller? [y/N]: ").strip().lower()
+        if more not in YES_ANSWERS:
+            break
+        _add(len(out) + 1, {"agip": "", "admin_username": "", "admin_password": ""})
     return out
 
 
@@ -176,27 +218,30 @@ def main() -> None:
         # --- Step 0: load file, prompt gaps, validate names/passphrase length ---
         creds = load_credentials(CREDENTIALS_PATH)
         inputs = {
-            "snmp_user": _require(creds, "snmp_user", "SNMP User"),
-            "snmp_auth": _require(creds, "snmp_auth", "SNMP Auth", sensitive=True),
-            "snmp_priv": _require(creds, "snmp_priv", "SNMP Priv", sensitive=True),
-            "rouser": _require(creds, "rouser", "SNMP Read-Only Username (rouser)"),
+            "snmp_user": _require(
+                creds,
+                "snmp_user",
+                "SNMP User",
+                pattern=SNMP_NAME_RE,
+                pattern_msg="Use letters, digits, underscore, dot, or hyphen.",
+            ),
+            "snmp_auth": _require(
+                creds, "snmp_auth", "SNMP Auth", sensitive=True, min_len=SNMP_MIN_PASSPHRASE_LEN
+            ),
+            "snmp_priv": _require(
+                creds, "snmp_priv", "SNMP Priv", sensitive=True, min_len=SNMP_MIN_PASSPHRASE_LEN
+            ),
+            "rouser": _require(
+                creds,
+                "rouser",
+                "SNMP Read-Only Username (rouser)",
+                required=False,
+                pattern=SNMP_NAME_RE,
+                pattern_msg="Use letters, digits, underscore, dot, or hyphen.",
+            ),
         }
-        if not all(inputs[k] for k in ("snmp_user", "snmp_auth", "snmp_priv")):
-            raise ValueError("snmp_user, snmp_auth, and snmp_priv are required")
-
         ssh_user = _require(creds, "ssh_username", "SSH Username")
         ssh_pass = _require(creds, "ssh_password", "SSH Password", sensitive=True)
-        if not all((ssh_user, ssh_pass)):
-            raise ValueError("SSH credentials are required")
-        if not re.fullmatch(SNMP_NAME_RE, inputs["snmp_user"]):
-            raise ValueError("snmp_user must be letters, digits, underscore, dot, or hyphen")
-        if inputs.get("rouser") and not re.fullmatch(SNMP_NAME_RE, inputs["rouser"]):
-            raise ValueError("rouser must be letters, digits, underscore, dot, or hyphen")
-        for label, secret in (("snmp_auth", inputs["snmp_auth"]), ("snmp_priv", inputs["snmp_priv"])):
-            if len(secret) < SNMP_MIN_PASSPHRASE_LEN:
-                raise ValueError(
-                    f"{label} must be at least {SNMP_MIN_PASSPHRASE_LEN} characters"
-                )
 
         collectives = _parse_collectives(creds)
         if not collectives:

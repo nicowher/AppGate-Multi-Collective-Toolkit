@@ -10,13 +10,36 @@
       Missing or invalid files become {} so the prompts still work.
 """
 import importlib.util
+import ipaddress
 import json
 import os
+import re
 import subprocess
 import sys
-from typing import Any, Dict
+from getpass import getpass
+from typing import Any, Callable, Dict, Optional
 
 from config import PIP_INSTALL_TIMEOUT, VENDOR_PACKAGES
+
+# FQDN: labels of letters/digits/hyphen, at least one dot, TLD 2+ letters.
+_FQDN_RE = re.compile(
+    r"(?i)^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
+
+
+def is_valid_host(value: str) -> bool:
+    """True if value is IPv4, IPv6 (optional brackets), or an FQDN."""
+    text = (value or "").strip()
+    if not text:
+        return False
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return bool(_FQDN_RE.fullmatch(value.strip()))
+
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(APP_DIR)
@@ -96,6 +119,41 @@ def ensure_package(package: str, import_name: str) -> None:
         file=sys.stderr,
     )
     sys.exit(1)
+
+
+def prompt_until_valid(
+    creds: Dict[str, Any],
+    field: str,
+    prompt: str,
+    *,
+    sensitive: bool = False,
+    required: bool = True,
+    min_len: int = 0,
+    pattern: Optional[str] = None,
+    pattern_msg: str = "Invalid format. Try again.",
+    validator: Optional[Callable[[str], bool]] = None,
+    validator_msg: str = "Enter IPv4, IPv6, or an FQDN (e.g. host.example.com).",
+) -> str:
+    """Read a field from creds or stdin. Invalid values re-prompt; never exit."""
+    value = str(creds.get(field) or "").strip()
+    while True:
+        if value:
+            if min_len and len(value) < min_len:
+                print(f"      Must be at least {min_len} characters. Try again.", file=sys.stderr)
+            elif pattern and not re.fullmatch(pattern, value):
+                print(f"      {pattern_msg}", file=sys.stderr)
+            elif validator and not validator(value):
+                print(f"      {validator_msg}", file=sys.stderr)
+            else:
+                return value
+        elif not required:
+            return ""
+        if sensitive:
+            value = getpass(f"{prompt}: ").strip()
+        else:
+            value = input(f"{prompt}: ").strip()
+        if required and not value:
+            print("      This field is required. Try again.", file=sys.stderr)
 
 
 def load_credentials(path: str) -> Dict[str, Any]:
