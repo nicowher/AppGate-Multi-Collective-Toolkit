@@ -111,9 +111,9 @@ def _run_ssh_batch(
 def _parse_collectives(creds: dict) -> List[Dict[str, str]]:
     """Step 0: turn credentials into a numbered list of Controllers.
 
-    Prefer collectives[]. If that key is missing, treat top-level agip/admin_*
-    as collective 1 (old single-controller files). Array order is the name:
-    first object = 1, second = 2. Duplicate agip warns; we still run both.
+    Prefer collectives[]. Each needs fqdn (API/SSH/walk primary) and optional
+    agip (connect fallback). Array order is the name: 1, 2, …. Duplicate
+    FQDNs warn; we still run both. Old files with only agip still prompt for FQDN.
     """
     raw = creds.get("collectives")
     rows: List[Dict[str, str]] = []
@@ -122,12 +122,14 @@ def _parse_collectives(creds: dict) -> List[Dict[str, str]]:
             if not isinstance(item, dict):
                 continue
             rows.append({
+                "fqdn": str(item.get("fqdn") or item.get("hostname") or "").strip(),
                 "agip": str(item.get("agip") or "").strip(),
                 "admin_username": str(item.get("admin_username") or "").strip(),
                 "admin_password": str(item.get("admin_password") or ""),
             })
     else:
         rows.append({
+            "fqdn": str(creds.get("fqdn") or creds.get("hostname") or "").strip(),
             "agip": str(creds.get("agip") or "").strip(),
             "admin_username": str(creds.get("admin_username") or "").strip(),
             "admin_password": str(creds.get("admin_password") or ""),
@@ -137,34 +139,45 @@ def _parse_collectives(creds: dict) -> List[Dict[str, str]]:
     out: List[Dict[str, str]] = []
 
     def _add(i: int, row: Dict[str, str]) -> None:
+        fqdn = _require(
+            row,
+            "fqdn",
+            f"Collective {i} Controller FQDN",
+            validator=is_valid_host,
+            validator_msg="Enter the Controller admin FQDN (e.g. hit-agr-001.hit.local).",
+        )
         agip = _require(
             row,
             "agip",
-            f"Collective {i} Controller IP",
+            f"Collective {i} Controller IP (fallback)",
+            required=False,
             validator=is_valid_host,
         )
         user = _require(row, "admin_username", f"Collective {i} Admin Username")
+        label = f"{fqdn} - {agip}" if agip else fqdn
         password = _require(
-            row, "admin_password", f"Collective {i} ({agip or 'Controller'}) Admin Password",
+            row, "admin_password", f"Collective {i} ({label}) Admin Password",
             sensitive=True,
         )
-        if agip in seen:
+        key = fqdn.lower()
+        if key in seen:
             print(
-                f"WARNING: collectives {seen[agip]} and {i} share agip {agip}. "
+                f"WARNING: collectives {seen[key]} and {i} share FQDN {fqdn}. "
                 "The same collective will be configured twice.",
                 file=sys.stderr,
             )
         else:
-            seen[agip] = i
+            seen[key] = i
         out.append({
             "index": str(i),
+            "fqdn": fqdn,
             "agip": agip,
             "admin_username": user,
             "admin_password": password,
         })
 
     from_file = os.path.isfile(CREDENTIALS_PATH) and any(
-        (r.get("agip") or r.get("admin_username")) for r in rows
+        (r.get("fqdn") or r.get("agip") or r.get("admin_username")) for r in rows
     )
     for i, row in enumerate(rows, 1):
         _add(i, row)
@@ -174,7 +187,8 @@ def _parse_collectives(creds: dict) -> List[Dict[str, str]]:
         if first_ask and from_file:
             print(f"\n      Found {CREDENTIALS_FILENAME} with {len(out)} Controller(s):")
             for col in out:
-                print(f"        {col['index']}) {col['agip']}")
+                extra = f" - {col['agip']}" if col.get("agip") else ""
+                print(f"        {col['index']}) {col['fqdn']}{extra}")
             more = input(
                 "      Add another Controller besides those in the file? [y/N]: "
             ).strip().lower()
@@ -183,7 +197,10 @@ def _parse_collectives(creds: dict) -> List[Dict[str, str]]:
             more = input("      Add another Controller? [y/N]: ").strip().lower()
         if more not in YES_ANSWERS:
             break
-        _add(len(out) + 1, {"agip": "", "admin_username": "", "admin_password": ""})
+        _add(
+            len(out) + 1,
+            {"fqdn": "", "agip": "", "admin_username": "", "admin_password": ""},
+        )
     return out
 
 
@@ -260,8 +277,8 @@ def main() -> None:
         clients: ClientMap = {}
         for col in collectives:
             idx = int(col["index"])
-            print(f"      [{idx}] {col['agip']} as {col['admin_username']}...")
-            client = AppGateClient(col["agip"])
+            print(f"      [{idx}] {col['fqdn']} as {col['admin_username']}...")
+            client = AppGateClient(col["fqdn"], fallback_ip=col.get("agip") or "")
             try:
                 client.login(col["admin_username"], col["admin_password"])
                 clients[idx] = client
@@ -306,7 +323,7 @@ def main() -> None:
         def _ssh_engine(target: Target) -> None:
             if target.status == "failed":
                 return
-            engine_id = engine_fetcher.get_engine_id(target.ssh_ip)
+            engine_id = engine_fetcher.get_engine_id(target.ssh_endpoints())
             if engine_id.lower().startswith("0x"):
                 engine_id = engine_id[2:]
             target.engine_id = engine_id
@@ -353,7 +370,7 @@ def main() -> None:
 
         def _ssh_purge(target: Target) -> None:
             engine_fetcher.purge_persistent_user(
-                target.ssh_ip, user, keep_hash=target.auth_hash
+                target.ssh_endpoints(), user, keep_hash=target.auth_hash
             )
             print(f"      {target.label()}: persistent USM purged")
 
@@ -364,7 +381,7 @@ def main() -> None:
         time.sleep(SNMP_RELOAD_DELAY)
         for target in _ok(selected):
             ok = validator.validate_snmp_walk(
-                target.ssh_ip,
+                target.ssh_endpoints(),
                 user,
                 inputs["snmp_auth"],
                 inputs["snmp_priv"],
@@ -390,7 +407,8 @@ def main() -> None:
                 print(f"  --- collective {current_col} ---")
             state = target.status.upper()
             extra = target.engine_id or target.error
-            print(f"  [{state:<7}] {target.label():<32} {target.ssh_ip:<18} {extra}")
+            host = target.ssh_fqdn or target.ssh_ip
+            print(f"  [{state:<7}] {target.label():<32} {host:<22} {extra}")
             if target.status == "ok" and target.auth_hash:
                 print(
                     f"           ESXi: {user}/{target.auth_hash}/{target.priv_hash}/priv"
@@ -416,7 +434,12 @@ def _print_debug_report(
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "collectives": [
-            {"index": int(c["index"]), "agip": c["agip"], "admin_username": c["admin_username"]}
+            {
+                "index": int(c["index"]),
+                "fqdn": c.get("fqdn", ""),
+                "agip": c.get("agip", ""),
+                "admin_username": c["admin_username"],
+            }
             for c in collectives
         ],
         "api_version": APPGATE_API_VERSION,
@@ -443,6 +466,7 @@ def _print_debug_report(
                 "label": t.label(),
                 "appliance_id": t.appliance_id,
                 "hostname": t.hostname,
+                "ssh_fqdn": t.ssh_fqdn,
                 "ssh_ip": t.ssh_ip,
                 "functions": t.functions,
                 "health": t.health,

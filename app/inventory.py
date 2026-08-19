@@ -2,9 +2,10 @@
 
 SSH uses the 6.7 admin hostname/IP (management path), not a data-plane NIC.
 """
+import ipaddress
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import APPLIANCE_FUNCTION_NAMES
 
@@ -14,7 +15,8 @@ class Target:
     """One appliance in the run. API calls use appliance_id; humans use label()."""
     appliance_id: str
     hostname: str
-    ssh_ip: str
+    ssh_fqdn: str = ""
+    ssh_ip: str = ""
     collective: int = 1
     functions: List[str] = field(default_factory=list)
     health: str = "unknown"
@@ -27,8 +29,16 @@ class Target:
 
     def label(self) -> str:
         """Human handle: 1.hit-agg-011 (collective index + hostname)."""
-        host = self.hostname or self.ssh_ip or self.appliance_id
+        host = self.hostname or self.ssh_fqdn or self.ssh_ip or self.appliance_id
         return f"{self.collective}.{host}"
+
+    def ssh_endpoints(self) -> List[str]:
+        """FQDN first, then IP. Used for SSH and SNMP walks."""
+        out: List[str] = []
+        for host in (self.ssh_fqdn, self.ssh_ip):
+            if host and host not in out:
+                out.append(host)
+        return out
 
 
 def appliance_functions(appliance: Dict[str, Any]) -> List[str]:
@@ -54,24 +64,48 @@ def appliance_health(appliance: Dict[str, Any], stats: Dict[str, Any]) -> str:
     return "unknown"
 
 
-def appliance_ssh_ip(appliance: Dict[str, Any]) -> str:
-    """6.7 admin / Appliance Hostname/IP — management path, not a random NIC."""
+def _is_ip(value: str) -> bool:
+    text = value.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return False
+
+
+def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, str]:
+    """Return (fqdn, ip) from 6.7 admin/peer/client hostname, then NICs."""
+    candidates: List[str] = []
     for block_name in ("adminInterface", "peerInterface", "clientInterface"):
         block = appliance.get(block_name) or {}
         if isinstance(block, dict):
             host = (block.get("hostname") or "").strip()
             if host:
-                return host
+                candidates.append(host)
     for key in ("hostname", "applianceHostname"):
         host = (appliance.get(key) or "").strip()
         if host:
-            return host
+            candidates.append(host)
     for nic in appliance.get("networking", {}).get("nics", []):
         for addr in nic.get("ipv4", {}).get("static", []):
             ip = (addr.get("address") or "").strip()
             if ip:
-                return ip
-    return ""
+                candidates.append(ip)
+        for addr in nic.get("ipv6", {}).get("static", []):
+            ip = (addr.get("address") or "").strip()
+            if ip:
+                candidates.append(ip)
+    fqdn = ""
+    ip = ""
+    for host in candidates:
+        if _is_ip(host):
+            if not ip:
+                ip = host
+        elif not fqdn:
+            fqdn = host
+    return fqdn, ip
 
 
 def is_selectable(health: str, skip_status: tuple) -> bool:
@@ -89,8 +123,9 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
     )
     for i, t in enumerate(targets, 1):
         funcs = ",".join(t.functions) or "-"
+        host = t.ssh_fqdn or t.ssh_ip
         print(
-            f"     {i:2d}  {t.collective:<10}  {t.hostname[:30]:<30}  {t.ssh_ip:<18}  {funcs:<22}  {t.health}"
+            f"     {i:2d}  {t.collective:<10}  {t.hostname[:30]:<30}  {host:<22}  {funcs:<22}  {t.health}"
         )
     raw = input(
         "\n      Exclude (numbers, 1.hostname, hostnames, or IPs; Enter for all): "
@@ -104,6 +139,7 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
         keys = {
             str(i),
             t.label().lower(),
+            t.ssh_fqdn.lower(),
             t.ssh_ip.lower(),
             t.appliance_id.lower(),
         }

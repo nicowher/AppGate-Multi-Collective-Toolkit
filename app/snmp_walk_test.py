@@ -54,7 +54,7 @@ def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
         ip = _require(
             source,
             "agip",
-            "Appliance IP / hostname to walk",
+            "Appliance FQDN or IP to walk",
             validator=is_valid_host,
         )
         # print(f"DEBUG walk-single: target={ip}")
@@ -78,8 +78,8 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     clients = {}
     for col in collectives:
         idx = int(col["index"])
-        print(f"      [{idx}] {col['agip']} as {col['admin_username']}...")
-        client = AppGateClient(col["agip"])
+        print(f"      [{idx}] {col['fqdn']} as {col['admin_username']}...")
+        client = AppGateClient(col["fqdn"], fallback_ip=col.get("agip") or "")
         try:
             client.login(col["admin_username"], col["admin_password"])
             clients[idx] = client
@@ -110,7 +110,7 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     failed = 0
     for target in selected:
         ok = validator.validate_snmp_walk(
-            target.ssh_ip, user, auth, priv, engine_id=target.engine_id or None
+            target.ssh_endpoints(), user, auth, priv, engine_id=target.engine_id or None
         )
         target.walk_ok = ok
         print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
@@ -124,11 +124,21 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
             "auth_protocol": SNMP_AUTH_PROTOCOL,
             "priv_protocol": SNMP_PRIV_PROTOCOL,
             "collectives": [
-                {"index": int(c["index"]), "agip": c["agip"], "admin_username": c["admin_username"]}
+                {
+                    "index": int(c["index"]),
+                    "fqdn": c.get("fqdn", ""),
+                    "agip": c.get("agip", ""),
+                    "admin_username": c["admin_username"],
+                }
                 for c in collectives
             ],
             "selected": [
-                {"label": t.label(), "ssh_ip": t.ssh_ip, "walk_ok": t.walk_ok}
+                {
+                    "label": t.label(),
+                    "ssh_fqdn": t.ssh_fqdn,
+                    "ssh_ip": t.ssh_ip,
+                    "walk_ok": t.walk_ok,
+                }
                 for t in selected
             ],
             "failed_count": failed,

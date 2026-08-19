@@ -43,7 +43,7 @@ from inventory import (
     Target,
     appliance_functions,
     appliance_health,
-    appliance_ssh_ip,
+    appliance_hosts,
     is_selectable,
 )
 
@@ -55,22 +55,33 @@ if not TLS_VERIFY:
 class AppGateClient:
     def __init__(
         self,
-        agip: str,
+        fqdn: str,
+        fallback_ip: str = "",
         api_version: Optional[str] = None,
         provider: str = APPGATE_PROVIDER,
     ) -> None:
-        self.agip = agip
+        # Prefer FQDN (Controller admin hostname). IP is only a connect fallback.
+        self.fqdn = (fqdn or "").strip()
+        self.fallback_ip = (fallback_ip or "").strip()
+        self.endpoints = [h for h in (self.fqdn, self.fallback_ip) if h]
+        if not self.endpoints:
+            raise ValueError("Controller FQDN or IP is required")
+        self.agip = self.endpoints[0]
         self.api_version = api_version or APPGATE_API_VERSION
         self.provider = provider
-        self.base_url = f"https://{agip}:{APPGATE_ADMIN_PORT}{APPGATE_ADMIN_PREFIX}"
         self.machine_id = APPGATE_MACHINE_ID
         self.headers: Dict[str, str] = {
             "Accept": f"application/vnd.appgate.peer-v{self.api_version}+json",
             "Content-Type": "application/json",
         }
+        self._set_endpoint(self.agip)
+
+    def _set_endpoint(self, host: str) -> None:
+        self.agip = host
+        self.base_url = f"https://{host}:{APPGATE_ADMIN_PORT}{APPGATE_ADMIN_PREFIX}"
 
     def login(self, username: str, password: str, provider: Optional[str] = None) -> str:
-        """Step 1: POST /admin/login and keep the bearer token on self.headers."""
+        """Step 1: POST /admin/login. Try FQDN first, then IP if the host is unreachable."""
         provider_name = provider or self.provider
         payload = {
             "machineId": self.machine_id,
@@ -78,26 +89,42 @@ class AppGateClient:
             "username": username,
             "password": password,
         }
-        response = requests.post(
-            f"{self.base_url}/login",
-            headers=self.headers,
-            json=payload,
-            verify=TLS_VERIFY,
-            timeout=API_TIMEOUT,
+        last_connect_error: Optional[Exception] = None
+        for host in self.endpoints:
+            self._set_endpoint(host)
+            try:
+                response = requests.post(
+                    f"{self.base_url}/login",
+                    headers=self.headers,
+                    json=payload,
+                    verify=TLS_VERIFY,
+                    timeout=API_TIMEOUT,
+                )
+            except (requests.ConnectionError, requests.Timeout, OSError) as exc:
+                last_connect_error = exc
+                # print(f"DEBUG step1: connect fail host={host} err={exc!r}")
+                print(
+                    f"      Cannot reach {host} ({type(exc).__name__}); trying fallback...",
+                    file=sys.stderr,
+                )
+                continue
+            if response.status_code != 200:
+                self._handle_login_error(response, username, provider_name)
+            data = response.json()
+            token = data.get("token")
+            if not token:
+                body_preview = (response.text or "")[:300]
+                raise ValueError(
+                    f"Login response did not contain an API token. "
+                    f"HTTP {response.status_code}. Response body: {body_preview}"
+                )
+            self.headers["Authorization"] = f"Bearer {token}"
+            if host != self.fqdn and self.fqdn:
+                print(f"      Using IP fallback {host} (FQDN {self.fqdn} unreachable)", file=sys.stderr)
+            return token
+        raise RuntimeError(
+            f"Could not reach Controller {self.fqdn or self.fallback_ip}: {last_connect_error}"
         )
-        if response.status_code != 200:
-            self._handle_login_error(response, username, provider_name)
-        data = response.json()
-        token = data.get("token")
-        if not token:
-            body_preview = (response.text or "")[:300]
-            raise ValueError(
-                f"Login response did not contain an API token. "
-                f"HTTP {response.status_code}. Response body: {body_preview}"
-            )
-        # Token stays on this client only — never reused on another Controller.
-        self.headers["Authorization"] = f"Bearer {token}"
-        return token
 
     def _handle_login_error(self, response: requests.Response, _username: str, provider: str) -> None:
         """Provide actionable guidance for common 401/403 responses."""
@@ -258,7 +285,10 @@ class AppGateClient:
     def list_targets(self, collective: int = 1) -> List[Target]:
         """Activated appliances this token can view, tagged with *collective* index."""
         raw = self.get_appliances()
-        print(f"      [{collective}] {self.agip}: {len(raw)} appliance(s)", file=sys.stderr)
+        print(
+            f"      [{collective}] {self.fqdn or self.agip}: {len(raw)} appliance(s)",
+            file=sys.stderr,
+        )
         targets: List[Target] = []
         for appliance in raw:
             name = str(appliance.get("name") or appliance.get("id") or "?")
@@ -268,13 +298,14 @@ class AppGateClient:
             health = appliance_health(appliance, {})
             if not is_selectable(health, APPLIANCE_SKIP_STATUS):
                 continue
-            ssh_ip = appliance_ssh_ip(appliance)
-            if not ssh_ip:
+            ssh_fqdn, ssh_ip = appliance_hosts(appliance)
+            if not ssh_fqdn and not ssh_ip:
                 continue
             targets.append(
                 Target(
                     appliance_id=aid,
                     hostname=name,
+                    ssh_fqdn=ssh_fqdn,
                     ssh_ip=ssh_ip,
                     collective=collective,
                     functions=appliance_functions(appliance),

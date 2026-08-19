@@ -19,7 +19,7 @@ import re
 import socket
 import sys
 import time
-from typing import Optional
+from typing import List, Optional, Sequence, Union
 
 from config import (
     ENGINE_ID_TYPE,
@@ -43,17 +43,32 @@ class SNMPEngineFetcher:
         self.ssh_user = ssh_user
         self.ssh_password = ssh_password
 
-    def get_engine_id(self, ip: str) -> str:
-        """Step 4: restart snmpd, read oldEngineID, match ETH_IFACE MAC."""
+    @staticmethod
+    def _hosts(host: Union[str, Sequence[str]]) -> List[str]:
+        if isinstance(host, str):
+            return [host] if host else []
+        return [h for h in host if h]
+
+    def get_engine_id(self, host: Union[str, Sequence[str]]) -> str:
+        """Step 4: SSH FQDN first, then IP. Restart snmpd, read oldEngineID, match MAC."""
         if not self.ssh_user or not self.ssh_password:
             raise ValueError("SSH credentials are required to retrieve the Engine ID")
+        addrs = self._hosts(host)
+        last = None
+        for i, addr in enumerate(addrs):
+            engine = self._ssh_query_engine_id(addr)
+            if engine:
+                return engine
+            last = addr
+            if i < len(addrs) - 1:
+                print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
+        raise ValueError(
+            f"Could not retrieve Engine ID via SSH ({last or host})"
+        )
 
-        engine = self._ssh_query_engine_id(ip)
-        if not engine:
-            raise ValueError("Could not retrieve Engine ID from appliance via SSH")
-        return engine
-
-    def purge_persistent_user(self, ip: str, user: str, keep_hash: str = "") -> None:
+    def purge_persistent_user(
+        self, host: Union[str, Sequence[str]], user: str, keep_hash: str = ""
+    ) -> None:
         """Drop stale usmUser rows. Keep the row that already has *keep_hash*."""
         if not re.fullmatch(SNMP_NAME_RE, user):
             raise ValueError(f"Unsafe SNMP username for remote edit: {user!r}")
@@ -95,7 +110,13 @@ class SNMPEngineFetcher:
             print(f"      Purged stale usmUser '{user}'. Restarting snmpd...", file=sys.stderr)
             return self._restart_snmpd(client)
 
-        if not self._with_ssh(ip, _purge):
+        ok = False
+        for addr in self._hosts(host):
+            if self._with_ssh(addr, _purge):
+                ok = True
+                break
+            print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
+        if not ok:
             raise RuntimeError(f"Could not purge persistent SNMP user '{user}' via SSH")
         time.sleep(SNMP_RELOAD_DELAY)
 

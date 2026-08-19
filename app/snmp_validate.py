@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Optional, Tuple
+from typing import List, Optional, Sequence, Tuple, Union
 
 from utils import install_from_vendor
 from config import (
@@ -37,6 +37,24 @@ class SNMPValidator:
         self._tool: Optional[Tuple[Optional[str], Optional[str]]] = None
 
     def validate_snmp_walk(
+        self,
+        host: Union[str, Sequence[str]],
+        user: str,
+        auth: str,
+        priv: str,
+        engine_id: Optional[str] = None,
+    ) -> bool:
+        hosts: List[str] = [host] if isinstance(host, str) else [h for h in host if h]
+        if not hosts:
+            return False
+        for addr in hosts:
+            if self._validate_snmp_walk_one(addr, user, auth, priv, engine_id):
+                return True
+            if addr != hosts[-1]:
+                print(f"      Walk {addr} failed; trying next endpoint...", file=sys.stderr)
+        return False
+
+    def _validate_snmp_walk_one(
         self, ip: str, user: str, auth: str, priv: str, engine_id: Optional[str] = None
     ) -> bool:
         # Pick a walk backend. If none is installed, offer native Net-SNMP
