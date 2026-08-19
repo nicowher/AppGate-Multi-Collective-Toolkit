@@ -2,8 +2,11 @@
 
 SSH uses the 6.7 admin hostname/IP (management path), not a data-plane NIC.
 """
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+from config import APPLIANCE_FUNCTION_NAMES
 
 
 @dataclass
@@ -27,18 +30,8 @@ class Target:
 
 
 def appliance_functions(appliance: Dict[str, Any]) -> List[str]:
-    names = (
-        "controller",
-        "gateway",
-        "logServer",
-        "logForwarder",
-        "portal",
-        "connector",
-        "metricsAggregator",
-        "connectionBroker",
-    )
     found = []
-    for name in names:
+    for name in APPLIANCE_FUNCTION_NAMES:
         block = appliance.get(name)
         if block is True:
             found.append(name)
@@ -97,15 +90,17 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
     if not raw:
         return list(targets)
     tokens = {part.strip().lower() for part in raw.split(",") if part.strip()}
+    host_counts = Counter(t.hostname.lower() for t in targets)
     kept = []
     for i, t in enumerate(targets, 1):
         keys = {
             str(i),
             t.label().lower(),
-            t.hostname.lower(),
             t.ssh_ip.lower(),
             t.appliance_id.lower(),
         }
+        if host_counts[t.hostname.lower()] == 1:
+            keys.add(t.hostname.lower())
         if tokens & keys:
             print(f"      Excluding {t.label()}", flush=True)
             continue

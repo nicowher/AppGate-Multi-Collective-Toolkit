@@ -19,9 +19,9 @@ Double-click a launcher (or run it from a terminal). It reads `credentials.json`
 
 Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box; the rest still get pushed and walked.
 
-`SNMP-Walk-<OS>` only walks (no API/SSH). Prompt for the **appliance** IP to walk — that is not the Controller unless you intend to query the Controller. Same SHA-256 / AES-256 and passphrase rules as Passwordinator.
+`SNMP-Walk-<OS>` only walks (no API/SSH). Prompt for the **appliance** IP — not a Controller `collectives[].agip`. Same SHA-256 / AES-256 and passphrase rules.
 
-With `DEBUG = True` in `app/config.py` (leave on until you have validated a run), Passwordinator and SNMP-Walk print a JSON block between `BEGIN DEBUG REPORT` and `END DEBUG REPORT`. No passwords or tokens. Extra `# print("DEBUG stepN: ...")` lines are in the sources — uncomment those for step-level traces.
+`DEBUG` is **on** for this feature branch. Passwordinator and SNMP-Walk print JSON between `BEGIN DEBUG REPORT` and `END DEBUG REPORT` (no passwords/tokens). Uncomment `# print("DEBUG ...")` in sources for step traces.
 
 Missing Python packages install from `app/vendor/wheels` first (air-gapped), then offer online pip if you allow it.
 

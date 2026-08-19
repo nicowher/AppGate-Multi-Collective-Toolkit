@@ -119,7 +119,9 @@ if __name__ == "__main__":
     try:
         warn_insecure_transport()
         creds = load_credentials(CREDENTIALS_PATH)
+        # Do not use collectives[].agip — that is a Controller, not a walk target.
         ip = _require(creds, "agip", "Appliance IP / hostname to walk")
+        # print(f"DEBUG walk-test: creds agip={creds.get('agip')!r} collectives={bool(creds.get('collectives'))}")
         user = _require(creds, "snmp_user", "SNMP User")
         auth = _require(creds, "snmp_auth", "SNMP Auth", sensitive=True)
         priv = _require(creds, "snmp_priv", "SNMP Priv", sensitive=True)

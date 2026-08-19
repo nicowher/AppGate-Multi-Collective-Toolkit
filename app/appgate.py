@@ -1,10 +1,11 @@
 """AppGate admin API: login, appliance lookup, snmpd.conf push.
 
-Called from main.py:
+One AppGateClient per collective (own login token). main.py steps:
 
-   login() / list_targets()
-   ensure_engine_id_type3(id) for each selected appliance
-   delete_snmp_user / update_snmp_config per success
+   1 login() each Controller
+   2 list_targets(collective=N)
+   3 ensure_engine_id_type3(id) via that client
+   6 delete_snmp_user / update_snmp_config via that client only
 
 cz-configd owns /etc/snmp/snmpd.conf, so every snmpd change is a PUT
 of the appliance object. Never push exactEngineID — cz-configd
@@ -26,6 +27,7 @@ from config import (
     APPGATE_API_VERSION,
     APPGATE_MACHINE_ID,
     APPGATE_PROVIDER,
+    APPLIANCE_LIST_PAGE,
     ENGINE_ID_TYPE,
     DEFAULT_SNMP_PORT,
     SNMP_AUTH_PROTOCOL,
@@ -189,7 +191,7 @@ class AppGateClient:
         """GET a 6.7 collection. range is a query param; total is in JSON 'range' (0-49/123)."""
         items: list = []
         start = 0
-        page = 50
+        page = APPLIANCE_LIST_PAGE
         while True:
             end = start + page - 1
             response = requests.get(

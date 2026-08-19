@@ -83,7 +83,7 @@ SSH_PORT = 22
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
 # Print a JSON debug report at the end (no passwords/tokens). Paste it back for review.
-DEBUG = False
+DEBUG = True
 # 6.7 health values we will not SSH or configure.
 APPLIANCE_SKIP_STATUS = (
     "offline",
@@ -102,6 +102,17 @@ SNMP_NAME_RE = r"^[A-Za-z0-9_.-]+$"
 DEFAULT_SNMP_PORT = 161
 ETH_IFACE = "eth0"
 ENGINE_ID_TYPE = 3
+APPLIANCE_LIST_PAGE = 50
+APPLIANCE_FUNCTION_NAMES = (
+    "controller",
+    "gateway",
+    "logServer",
+    "logForwarder",
+    "portal",
+    "connector",
+    "metricsAggregator",
+    "connectionBroker",
+)
 SNMP_WALK_OID = "1.3.6.1.2.1.1"
 SNMPWALK_PROBE_TIMEOUT = 5
 SNMPWALK_RETRIES = 1

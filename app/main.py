@@ -233,6 +233,7 @@ def main() -> None:
             print(f"      {target.label()}: engineIDType set")
 
         _api_by_collective(_ok(selected), clients, _pin)
+        # print("DEBUG step3: pinned", [t.label() for t in _ok(selected)])
         time.sleep(SNMP_RELOAD_DELAY)
 
         print(f"\n[4/8] SSH engine ID (up to {SSH_CONCURRENCY} at a time)...")
@@ -259,6 +260,7 @@ def main() -> None:
                 target.auth_hash = data["hashes"]["auth"]
                 target.priv_hash = data["hashes"]["priv"]
                 print(f"      {target.label()}: hashed")
+            # print(f"DEBUG step5: {target.label()} auth_len={len(target.auth_hash)}")
             except Exception as exc:
                 _fail(target, f"hash: {exc}")
 
@@ -301,6 +303,7 @@ def main() -> None:
             )
             target.walk_ok = ok
             print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
+            # print(f"DEBUG step8: {target.label()} walk_ok={ok}")
             if not ok:
                 _fail(target, "SNMP walk failed")
 
