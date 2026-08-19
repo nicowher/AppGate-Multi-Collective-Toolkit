@@ -21,7 +21,7 @@ Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box;
 
 `SNMP-Walk-<OS>` only walks (no API/SSH). Prompt for the **appliance** IP — not a Controller `collectives[].agip`. Same SHA-256 / AES-256 and passphrase rules.
 
-`DEBUG` is **on** for this feature branch. Passwordinator and SNMP-Walk print JSON between `BEGIN DEBUG REPORT` and `END DEBUG REPORT` (no passwords/tokens). Uncomment `# print("DEBUG ...")` in sources for step traces.
+Set `DEBUG = True` in `app/config.py` to print a JSON block between `BEGIN DEBUG REPORT` and `END DEBUG REPORT` (no passwords/tokens). Uncomment `# print("DEBUG ...")` in sources for step traces.
 
 Missing Python packages install from `app/vendor/wheels` first (air-gapped), then offer online pip if you allow it.
 
@@ -126,7 +126,7 @@ python -m unittest tests.test_snmp_hashgen
 | `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` / `SSH_PORT` | Transport hardening |
 | `APPGATE_*` | API version, port, provider, machineId |
 | `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
-| `DEBUG` | JSON report at end (on). Uncomment `# print("DEBUG ...")` in sources for traces |
+| `DEBUG` | JSON report at end (off). Uncomment `# print("DEBUG ...")` in sources for traces |
 | Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention and cz-configd wait |
 
 Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algorithms is a policy exception, not the default.
