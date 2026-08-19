@@ -27,18 +27,21 @@ from config import (
 
 
 class SNMPValidator:
-    """Step 6: walk the appliance with the new SNMPv3 user.
+    """Walk an appliance with the new SNMPv3 user (final workflow step).
 
     Backends, in order: Net-SNMP snmpwalk → SnmpSoft SnmpWalk.exe → pysnmp.
     Walks use the original passphrases (hashes live only on the appliance).
     """
+
+    def __init__(self) -> None:
+        self._tool: Optional[Tuple[Optional[str], Optional[str]]] = None
 
     def validate_snmp_walk(
         self, ip: str, user: str, auth: str, priv: str, engine_id: Optional[str] = None
     ) -> bool:
         # Pick a walk backend. If none is installed, offer native Net-SNMP
         # (Linux/macOS) or fall back to pip/vendor pysnmp (Windows too).
-        tool_type, executable = self._detect_snmpwalk()
+        tool_type, executable = self._cached_detect()
         if tool_type is None:
             print("      SNMP walk tool not found. Installing...", file=sys.stderr)
             if not self._install_snmpwalk():
@@ -48,7 +51,8 @@ class SNMPValidator:
                     file=sys.stderr,
                 )
                 return False
-            tool_type, executable = self._detect_snmpwalk()
+            self._tool = None
+            tool_type, executable = self._cached_detect()
             if tool_type is None:
                 print("      Auto-install finished but no walk tool is available.", file=sys.stderr)
                 return False
@@ -115,6 +119,11 @@ class SNMPValidator:
 
         print(f"      SNMP walk validation failed after {VALIDATION_RETRIES} attempts", file=sys.stderr)
         return False
+
+    def _cached_detect(self) -> Tuple[Optional[str], Optional[str]]:
+        if self._tool is None:
+            self._tool = self._detect_snmpwalk()
+        return self._tool
 
     def _detect_snmpwalk(self) -> Tuple[Optional[str], Optional[str]]:
         """Return (backend, executable). backend is snmpsoft, netsnmp, pysnmp, or None."""
@@ -312,7 +321,11 @@ class SNMPValidator:
             return False
 
         try:
-            return asyncio.run(_async_walk())
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(_async_walk())
+            finally:
+                loop.close()
         except Exception as exc:
             print(f"      SNMP walk (pysnmp) encountered an error: {exc}", file=sys.stderr)
             return False

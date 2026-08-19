@@ -8,14 +8,18 @@ Repository: https://github.com/nicowher/AppGate-SNMPv3-Passwordinator
 
 Double-click a launcher (or run it from a terminal). It reads `credentials.json`, prompts for any missing fields, then:
 
-1. Logs in to the AppGate admin API (`https://<agip>:8443/admin`)
-2. Finds the appliance that owns the given IP
-3. Pushes `engineIDType 3` via the API (cz-configd owns `/etc/snmp/snmpd.conf`), waits, SSHes in, restarts snmpd, reads `oldEngineID`, and checks it against the interface MAC (RFC 3411 type 3)
-4. Localizes auth/priv passphrases in-process (RFC 3414, SHA-256)
-5. Purges leftover `usmUser` rows from net-snmp persistent storage over SSH, then pushes `createUser` / `rouser` / `engineIDType 3`. It does **not** push `exactEngineID` (cz-configd truncates it and breaks type-3 IDs). SNMPv1/v2c community strings are stripped from the pushed config
-6. Walks the appliance with authPriv. A failed walk exits with status 1 (no success summary)
+1. Logs in to the **Controller** (`agip` is the Controller only)
+2. Pulls appliances from `GET /appliances` (6.7). Keeps activated/healthy boxes with an admin hostname/IP. You can exclude any from the printed list
+3. Pushes `engineIDType 3` via the Controller API for each selected appliance, then waits for cz-configd
+4. SSHes in batches (`SSH_CONCURRENCY`, default 5): restart snmpd, read `oldEngineID`, check MAC (RFC 3411 type 3)
+5. Localizes auth/priv per engine ID (RFC 3414, SHA-256)
+6. Pushes `deleteUser` then `createUser` / `rouser` / `engineIDType 3` one appliance at a time. No `exactEngineID`. v1/v2c communities stripped
+7. SSH again in batches: purge leftover `usmUser` from persistent store, restart snmpd
+8. Walks every appliance that was pushed. Any failure exits 1
 
-`SNMP-Walk-<OS>` only does step 6.
+Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box; the rest still get pushed and walked.
+
+`SNMP-Walk-<OS>` only walks (no API/SSH). Prompt for the **appliance** IP to walk — that is not the Controller unless you intend to query the Controller. Same SHA-256 / AES-256 and passphrase rules as Passwordinator.
 
 Missing Python packages install from `app/vendor/wheels` first (air-gapped), then offer online pip if you allow it.
 
@@ -31,7 +35,7 @@ Keep `README.md`, credentials files, and launchers in this folder. Python lives 
 
 On Linux/macOS: `chmod +x *.sh *.command` once. On macOS, right-click → Open the first time.
 
-Required fields: `snmp_user`, `snmp_auth`, `snmp_priv`, `agip`, `admin_username`, `admin_password`, `ssh_username`, `ssh_password`. `rouser` is optional. Passphrases must be at least `SNMP_MIN_PASSPHRASE_LEN` (default 8).
+Required fields: `snmp_user`, `snmp_auth`, `snmp_priv`, `agip` (**Controller IP**), `admin_username`, `admin_password`, `ssh_username`, `ssh_password`. `rouser` is optional. Passphrases must be at least `SNMP_MIN_PASSPHRASE_LEN` (default 8). Appliance IPs are **not** typed in; they come from the Controller.
 
 ## Prerequisites
 
@@ -49,7 +53,7 @@ Optional walk backend: Linux `snmp` / `net-snmp-utils`, macOS `brew install net-
 
 ## credentials.json (optional, gitignored)
 
-Copy `credentials.example.json` to `credentials.json` next to the launchers. Missing keys are prompted. Secrets use `getpass`. Do not commit this file.
+Copy `credentials.example.json` to `credentials.json` next to the launchers. Missing keys are prompted. Secrets use `getpass`. `agip` is the **Controller** IP for Passwordinator. SNMP-Walk uses it as the single walk target. Do not commit this file.
 
 ```json
 {
@@ -105,6 +109,8 @@ Hashing is in-process. No `snmpv3-hashgen` binary is required.
 | `ALLOWED_HASH_ALGOS` | CNSA-allowed localization hashes |
 | `SNMP_MIN_PASSPHRASE_LEN` | Raise to 15 for stricter sites |
 | `ENGINE_ID_TYPE` / `ETH_IFACE` | Type 3 + MAC source |
+| `SSH_CONCURRENCY` | Parallel SSH sessions (default 5) |
+| `APPLIANCE_SKIP_STATUS` | Health values skipped (offline / error / not active) |
 | `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` / `SSH_PORT` | Transport hardening |
 | `APPGATE_*` | API version, port, provider, machineId |
 | `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
@@ -126,6 +132,7 @@ Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algor
 | --- | --- |
 | 401 login failed | API user, MFA exemption, `APPGATE_PROVIDER` (`local` / `saml` / `oidc`) |
 | 403 Forbidden | Admin role can edit appliances |
+| No appliances listed | Activated, not Offline/Error/Warning; admin hostname/IP present |
 | Engine ID not found | API `engineIDType 3`, SSH/sudo, `oldEngineID` after restart, MAC on `ETH_IFACE` |
 | Passphrase too short | Increase length or lower `SNMP_MIN_PASSPHRASE_LEN` |
 | Walk / digest error | Leftover `usmUser` in persistent conf, algorithm mismatch, short reload wait |
@@ -140,7 +147,8 @@ Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algor
 | `SNMP-Walk-<OS>.*` | Walk only |
 | `Download-Deps-<OS>.*` | Prefetch `app/vendor/wheels` |
 | `credentials.example.json` | Empty template |
-| `app/main.py` | Workflow |
+| `app/main.py` | Multi-appliance workflow |
+| `app/inventory.py` | Controller list + exclude prompt |
 | `app/config.py` | Algorithms, timeouts, paths |
 | `app/appgate.py` | Admin API |
 | `app/snmp_engine.py` | SSH engine ID + USM purge |

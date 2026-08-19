@@ -80,6 +80,19 @@ TLS_VERIFY = False
 # Reject unknown SSH host keys (DISA). False = warn and continue (lab/self-signed).
 SSH_STRICT_HOST_KEY = False
 SSH_PORT = 22
+# Parallel SSH sessions (engine-ID pass and later USM purge pass).
+SSH_CONCURRENCY = 5
+# 6.7 health values we will not SSH or configure.
+APPLIANCE_SKIP_STATUS = (
+    "offline",
+    "error",
+    "not active",
+    "not_active",
+    "inactive",
+    "warning",
+)
+# Safe for snmpd.conf lines and remote sed (DISA: no metacharacters).
+SNMP_NAME_RE = r"^[A-Za-z0-9_.-]+$"
 
 # ============================================================================
 # SNMP Defaults

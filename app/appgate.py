@@ -1,12 +1,10 @@
 """AppGate admin API: login, appliance lookup, snmpd.conf push.
 
-Called from main.py in this order:
+Called from main.py:
 
-  login()                 → step 1  (bearer token)
-  find_appliance_by_ip()  → step 2  (sets self.appliance_id)
-  ensure_engine_id_type3()→ step 3  (API pin; SSH reads the ID)
-  delete_snmp_user()      → step 5a (deleteUser + engineIDType 3)
-  update_snmp_config()    → step 5b (createUser / rouser / type 3)
+   login() / list_targets()
+   ensure_engine_id_type3(id) for each selected appliance
+   delete_snmp_user / update_snmp_config per success
 
 cz-configd owns /etc/snmp/snmpd.conf, so every snmpd change is a PUT
 of the appliance object. Never push exactEngineID — cz-configd
@@ -22,6 +20,7 @@ except ImportError:
 
 from config import (
     API_TIMEOUT,
+    APPLIANCE_SKIP_STATUS,
     APPGATE_ADMIN_PORT,
     APPGATE_ADMIN_PREFIX,
     APPGATE_API_VERSION,
@@ -36,7 +35,15 @@ from config import (
 )
 import re
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from inventory import (
+    Target,
+    appliance_functions,
+    appliance_health,
+    appliance_ssh_ip,
+    is_selectable,
+)
 
 if not TLS_VERIFY:
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
@@ -172,12 +179,9 @@ class AppGateClient:
         drop = AppGateClient._engine_pin_patterns() + AppGateClient._community_patterns()
         return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
 
-    def ensure_engine_id_type3(self) -> None:
-        """Step 3 (API half): drop old engine pins, then write engineIDType 3.
-
-        SSH (snmp_engine.py) restarts snmpd afterwards and reads oldEngineID.
-        """
-        appliance = self._get_appliance()
+    def ensure_engine_id_type3(self, appliance_id: Optional[str] = None) -> None:
+        """Pin engineIDType via API before SSH reads oldEngineID."""
+        appliance = self._get_appliance(appliance_id)
         lines = self._snmpd_lines_without_engine_pins(appliance)
         lines.append(f"engineIDType {ENGINE_ID_TYPE}")
         self._put_snmpd_conf(appliance, "\n".join(lines), enabled=True)
@@ -199,40 +203,61 @@ class AppGateClient:
             )
         return data.get("data", [])
 
-    def find_appliance_by_ip(self, ip: str) -> Dict[str, Any]:
-        """Step 2: find the appliance whose hostname or NIC address is *ip*."""
+    def get_appliance_stats(self) -> Dict[str, Dict[str, Any]]:
+        """Best-effort 6.7 health map. Missing endpoint → empty dict."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/stats/appliances",
+                headers=self.headers,
+                verify=TLS_VERIFY,
+                timeout=API_TIMEOUT,
+            )
+            if response.status_code != 200:
+                return {}
+            data = response.json()
+            items = data.get("data", data if isinstance(data, list) else [])
+            out = {}
+            for item in items:
+                if isinstance(item, dict) and item.get("id"):
+                    out[item["id"]] = item
+            return out
+        except Exception:
+            return {}
+
+    def list_targets(self) -> List[Target]:
+        """Activated/healthy appliances with an SSH address (admin hostname/IP)."""
+        stats_by_id = self.get_appliance_stats()
+        targets: List[Target] = []
         for appliance in self.get_appliances():
-            if self._ip_matches_appliance(ip, appliance):
-                self.appliance_id = appliance["id"]
-                return appliance
-        raise ValueError(f"Appliance with IP address {ip} not found in AppGate")
+            aid = appliance.get("id") or ""
+            if not aid:
+                continue
+            if appliance.get("activated") is False:
+                continue
+            health = appliance_health(appliance, stats_by_id.get(aid, {}))
+            if not is_selectable(health, APPLIANCE_SKIP_STATUS):
+                continue
+            ssh_ip = appliance_ssh_ip(appliance)
+            if not ssh_ip:
+                continue
+            targets.append(
+                Target(
+                    appliance_id=aid,
+                    hostname=str(appliance.get("name") or ssh_ip),
+                    ssh_ip=ssh_ip,
+                    functions=appliance_functions(appliance),
+                    health=health,
+                )
+            )
+        return targets
 
-    @staticmethod
-    def _ip_matches_appliance(ip: str, appliance: Dict[str, Any]) -> bool:
-        for iface in (
-            appliance.get("adminInterface", {}),
-            appliance.get("clientInterface", {}),
-        ):
-            if iface.get("hostname") == ip:
-                return True
+    def delete_snmp_user(self, user: str, appliance_id: Optional[str] = None) -> bool:
+        """Push deleteUser + engineIDType. createUser is a later PUT.
 
-        for nic in appliance.get("networking", {}).get("nics", []):
-            for addr in nic.get("ipv4", {}).get("static", []):
-                if addr.get("address") == ip:
-                    return True
-            for addr in nic.get("ipv6", {}).get("static", []):
-                if addr.get("address") == ip:
-                    return True
-        return False
-
-    def delete_snmp_user(self, user: str) -> bool:
-        """Step 5a (API half): push deleteUser, then wait for cz-configd.
-
-        Separate from createUser so the final snmpd.conf has no deleteUser
-        line. Persistent /var/lib/snmp usmUser rows are purged over SSH
-        first (see SNMPEngineFetcher.purge_persistent_user).
+        Persistent usmUser rows are purged over SSH *after* createUser
+        so snmpd re-reads the new keys on restart.
         """
-        appliance = self._get_appliance()
+        appliance = self._get_appliance(appliance_id)
         lines = self._snmpd_lines_without_user(appliance, user)
         lines.append(f"deleteUser {user}")
         # Do not pin exactEngineID — AppGate/cz-configd truncates it (16 hex)
@@ -248,6 +273,7 @@ class AppGateClient:
         priv_hash: str,
         rouser_line: str = "",
         enabled: bool = True,
+        appliance_id: Optional[str] = None,
     ) -> bool:
         """Step 5b: PUT createUser + optional rouser + engineIDType 3.
 
@@ -259,7 +285,7 @@ class AppGateClient:
             f"{SNMP_PRIV_PROTOCOL} -l 0x{priv_hash}"
         )
 
-        appliance = self._get_appliance()
+        appliance = self._get_appliance(appliance_id)
         lines = self._snmpd_lines_without_user(appliance, user)
         if rouser_line:
             lines.append(rouser_line)
@@ -268,11 +294,12 @@ class AppGateClient:
         self._put_snmpd_conf(appliance, "\n".join(lines), enabled=enabled)
         return True
 
-    def _get_appliance(self) -> Dict[str, Any]:
-        if not self.appliance_id:
-            raise RuntimeError("Appliance ID is not set. Run find_appliance_by_ip first.")
+    def _get_appliance(self, appliance_id: Optional[str] = None) -> Dict[str, Any]:
+        aid = appliance_id or self.appliance_id
+        if not aid:
+            raise RuntimeError("Appliance ID is not set.")
         response = requests.get(
-            f"{self.base_url}/appliances/{self.appliance_id}",
+            f"{self.base_url}/appliances/{aid}",
             headers=self.headers,
             verify=TLS_VERIFY,
             timeout=API_TIMEOUT,
@@ -293,7 +320,7 @@ class AppGateClient:
             "udpPort": existing.get("udpPort", DEFAULT_SNMP_PORT),
         }
         put_response = requests.put(
-            f"{self.base_url}/appliances/{self.appliance_id}",
+            f"{self.base_url}/appliances/{appliance.get('id') or self.appliance_id}",
             headers=self.headers,
             json=appliance,
             verify=TLS_VERIFY,

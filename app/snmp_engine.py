@@ -1,19 +1,11 @@
-"""SSH half of the workflow (steps 3 and 5a).
+"""SSH: engine-ID read (after API type-3 pin) and later USM purge.
 
-  get_engine_id()          → step 3 after the API pins engineIDType 3
-      1. restart snmpd so it applies the new type
-      2. read oldEngineID from /var/lib/snmp/snmpd.conf
-      3. read ETH_IFACE MAC and check RFC 3411 type 3
-         (4-byte enterprise + 0x03 + 6-byte MAC)
+  get_engine_id()
+      restart snmpd, read oldEngineID, check RFC 3411 type 3 vs ETH_IFACE MAC
 
-  purge_persistent_user()  → step 5a before API deleteUser
-      1. sed usmUser / createUser rows out of persistent conf
-      2. confirm they are gone
-      3. restart snmpd so the old localized keys are dropped
-
-AppGate deleteUser only edits the API snmpd.conf blob. net-snmp keeps
-USM users in /var/lib/snmp (and /var/net-snmp); leftover rows make
-createUser a no-op (Wrong SNMP PDU digest).
+  purge_persistent_user()
+      after API createUser: delete leftover usmUser rows, restart snmpd
+      so the daemon applies the new localized keys
 """
 from utils import ensure_package
 
@@ -60,7 +52,7 @@ class SNMPEngineFetcher:
         return engine
 
     def purge_persistent_user(self, ip: str, user: str) -> None:
-        """Step 5a (SSH half): strip *user* from net-snmp persistent store, restart snmpd."""
+        """After API createUser: strip leftover usmUser rows and restart snmpd."""
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", user):
             raise ValueError(f"Unsafe SNMP username for remote edit: {user!r}")
 
