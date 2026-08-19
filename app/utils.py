@@ -1,4 +1,4 @@
-"""Shared helpers used before and during the 6-step workflow.
+"""Shared helpers used before and during the 8-step workflow.
 
   vendor_has_wheels / install_from_vendor / ensure_package
       Launchers and API/SSH modules call these when a pip package is

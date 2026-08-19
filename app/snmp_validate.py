@@ -68,6 +68,7 @@ class SNMPValidator:
                 time.sleep(VALIDATION_RETRY_DELAY)
 
             try:
+                # print(f"DEBUG step8: backend={tool_type} target={ip} engine={engine_id}")
                 if tool_type == "pysnmp":
                     print("      Using pysnmp for SNMP walk validation...", file=sys.stderr)
                     if self._validate_snmp_walk_pysnmp(ip, user, auth, priv, engine_id):
@@ -304,27 +305,52 @@ class SNMPValidator:
                 timeout=SNMPWALK_PROBE_TIMEOUT,
                 retries=SNMPWALK_RETRIES,
             )
-            async for (errorIndication, errorStatus, errorIndex, varBinds) in walk_cmd(
-                SnmpEngine(),
+            engine = SnmpEngine()
+            agen = walk_cmd(
+                engine,
                 UsmUserData(user, auth, priv, **self._usm(engine_id)),
                 transport,
                 ContextData(),
                 ObjectType(ObjectIdentity(SNMP_WALK_OID)),
-            ):
-                if errorIndication:
-                    print(f"      SNMP walk (pysnmp): {errorIndication}", file=sys.stderr)
-                    return False
-                if errorStatus:
-                    print(f"      SNMP walk (pysnmp): {errorStatus.prettyPrint()}", file=sys.stderr)
-                    return False
-                return True
-            return False
+            )
+            try:
+                async for (errorIndication, errorStatus, errorIndex, varBinds) in agen:
+                    if errorIndication:
+                        print(f"      SNMP walk (pysnmp): {errorIndication}", file=sys.stderr)
+                        return False
+                    if errorStatus:
+                        print(f"      SNMP walk (pysnmp): {errorStatus.prettyPrint()}", file=sys.stderr)
+                        return False
+                    return True
+                return False
+            finally:
+                try:
+                    await agen.aclose()
+                except Exception:
+                    pass
+                dispatcher = getattr(engine, "transport_dispatcher", None) or getattr(
+                    engine, "transportDispatcher", None
+                )
+                if dispatcher is not None:
+                    for name in ("close_dispatcher", "closeDispatcher"):
+                        closer = getattr(dispatcher, name, None)
+                        if closer:
+                            try:
+                                closer()
+                            except Exception:
+                                pass
+                            break
 
         try:
             loop = asyncio.new_event_loop()
             try:
                 return loop.run_until_complete(_async_walk())
             finally:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
                 loop.close()
         except Exception as exc:
             print(f"      SNMP walk (pysnmp) encountered an error: {exc}", file=sys.stderr)

@@ -23,6 +23,7 @@ from typing import Optional
 from config import (
     ENGINE_ID_TYPE,
     ETH_IFACE,
+    SNMP_NAME_RE,
     SNMP_PERSISTENT_CONF,
     SNMP_PERSISTENT_CONF_ALT,
     SNMP_RELOAD_DELAY,
@@ -42,7 +43,7 @@ class SNMPEngineFetcher:
         self.ssh_password = ssh_password
 
     def get_engine_id(self, ip: str) -> str:
-        """Step 3 (SSH half): restart snmpd, read oldEngineID, match ETH_IFACE MAC."""
+        """Step 4: restart snmpd, read oldEngineID, match ETH_IFACE MAC."""
         if not self.ssh_user or not self.ssh_password:
             raise ValueError("SSH credentials are required to retrieve the Engine ID")
 
@@ -51,35 +52,45 @@ class SNMPEngineFetcher:
             raise ValueError("Could not retrieve Engine ID from appliance via SSH")
         return engine
 
-    def purge_persistent_user(self, ip: str, user: str) -> None:
-        """After API createUser: strip leftover usmUser rows and restart snmpd."""
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", user):
+    def purge_persistent_user(self, ip: str, user: str, keep_hash: str = "") -> None:
+        """Drop stale usmUser rows. Keep the row that already has *keep_hash*."""
+        if not re.fullmatch(SNMP_NAME_RE, user):
             raise ValueError(f"Unsafe SNMP username for remote edit: {user!r}")
+        keep = (keep_hash or "").lower()
+        if keep and not re.fullmatch(r"[0-9a-f]+", keep):
+            keep = ""
 
         def _purge(client: paramiko.SSHClient) -> bool:
-            # Only touch known net-snmp paths (no find /).
             paths = (SNMP_PERSISTENT_CONF, SNMP_PERSISTENT_CONF_ALT)
             for path in paths:
-                self._sudo(
-                    client,
-                    f"sed -i '/usmUser.*\"{user}\"/d' {path} || true",
-                    check=False,
-                )
-                self._sudo(
-                    client,
-                    f"sed -i '/createUser[[:space:]]\\+{user}\\b/d' {path} || true",
-                    check=False,
-                )
+                if keep:
+                    self._sudo(
+                        client,
+                        f"sed -i '/usmUser.*\"{user}\"/{{ /{keep}/!d; }}' {path} || true",
+                        check=False,
+                    )
+                else:
+                    self._sudo(
+                        client,
+                        f"sed -i '/usmUser.*\"{user}\"/d' {path} || true",
+                        check=False,
+                    )
             leftover = self._sudo(
                 client,
                 f"grep -h 'usmUser.*\"{user}\"' {SNMP_PERSISTENT_CONF} "
                 f"{SNMP_PERSISTENT_CONF_ALT} 2>/dev/null || true",
                 check=False,
             )
+            if leftover.strip() and keep and keep in leftover.lower():
+                print(
+                    f"      Persistent usmUser '{user}' already has the new key.",
+                    file=sys.stderr,
+                )
+                return True
             if leftover.strip():
                 print(f"      usmUser still present after purge:\n{leftover}", file=sys.stderr)
                 return False
-            print(f"      Purged persistent usmUser '{user}'. Restarting snmpd...", file=sys.stderr)
+            print(f"      Purged stale usmUser '{user}'. Restarting snmpd...", file=sys.stderr)
             return self._restart_snmpd(client)
 
         if not self._with_ssh(ip, _purge):
@@ -190,6 +201,7 @@ class SNMPEngineFetcher:
             return None
         engine_id = match.group(1).lower()
         print(f"      oldEngineID: {engine_id}", file=sys.stderr)
+        # print(f"DEBUG step4: raw oldEngineID line={raw!r}")
 
         # 3) type 3 must embed this interface's MAC
         mac = self._read_iface_mac(client)

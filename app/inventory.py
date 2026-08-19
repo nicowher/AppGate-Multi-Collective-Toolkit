@@ -3,7 +3,7 @@
 SSH uses the 6.7 admin hostname/IP (management path), not a data-plane NIC.
 """
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -18,6 +18,7 @@ class Target:
     priv_hash: str = ""
     status: str = "pending"
     error: str = ""
+    walk_ok: Optional[bool] = None
 
     def label(self) -> str:
         return self.hostname or self.ssh_ip or self.appliance_id
@@ -37,7 +38,9 @@ def appliance_functions(appliance: Dict[str, Any]) -> List[str]:
     found = []
     for name in names:
         block = appliance.get(name)
-        if isinstance(block, dict) and block.get("enabled"):
+        if block is True:
+            found.append(name)
+        elif isinstance(block, dict) and block.get("enabled"):
             found.append(name)
     return found
 
@@ -54,10 +57,12 @@ def appliance_health(appliance: Dict[str, Any], stats: Dict[str, Any]) -> str:
 
 def appliance_ssh_ip(appliance: Dict[str, Any]) -> str:
     """6.7 admin / Appliance Hostname/IP — management path, not a random NIC."""
-    admin = appliance.get("adminInterface") or {}
-    host = (admin.get("hostname") or "").strip()
-    if host:
-        return host
+    for block_name in ("adminInterface", "peerInterface", "clientInterface"):
+        block = appliance.get(block_name) or {}
+        if isinstance(block, dict):
+            host = (block.get("hostname") or "").strip()
+            if host:
+                return host
     for key in ("hostname", "applianceHostname"):
         host = (appliance.get(key) or "").strip()
         if host:

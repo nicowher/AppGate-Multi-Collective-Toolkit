@@ -14,11 +14,14 @@ from getpass import getpass
 
 from config import (
     CREDENTIALS_FILENAME,
+    DEBUG,
     DEFAULT_SNMP_PORT,
     SNMPWALK_PROBE_TIMEOUT,
     SNMPWALK_RETRIES,
+    SNMP_AUTH_PROTOCOL,
     SNMP_MIN_PASSPHRASE_LEN,
     SNMP_NAME_RE,
+    SNMP_PRIV_PROTOCOL,
     SNMP_WALK_OID,
     get_auth_protocol,
     get_priv_protocol,
@@ -57,8 +60,9 @@ async def snmp_walk(ip: str, user: str, auth: str, priv: str) -> bool:
         timeout=SNMPWALK_PROBE_TIMEOUT,
         retries=SNMPWALK_RETRIES,
     )
-    async for (errorIndication, errorStatus, errorIndex, varBinds) in walk_cmd(
-        SnmpEngine(),
+    engine = SnmpEngine()
+    agen = walk_cmd(
+        engine,
         UsmUserData(
             user,
             auth,
@@ -69,17 +73,36 @@ async def snmp_walk(ip: str, user: str, auth: str, priv: str) -> bool:
         transport,
         ContextData(),
         ObjectType(ObjectIdentity(SNMP_WALK_OID)),
-    ):
-        if errorIndication:
-            print(f"SNMP walk error: {errorIndication}", file=sys.stderr)
-            return False
-        if errorStatus:
-            print(f"SNMP walk error: {errorStatus.prettyPrint()}", file=sys.stderr)
-            return False
-        for varBind in varBinds:
-            print(varBind.prettyPrint())
-        return True
-    return False
+    )
+    try:
+        async for (errorIndication, errorStatus, errorIndex, varBinds) in agen:
+            if errorIndication:
+                print(f"SNMP walk error: {errorIndication}", file=sys.stderr)
+                return False
+            if errorStatus:
+                print(f"SNMP walk error: {errorStatus.prettyPrint()}", file=sys.stderr)
+                return False
+            for varBind in varBinds:
+                print(varBind.prettyPrint())
+            return True
+        return False
+    finally:
+        try:
+            await agen.aclose()
+        except Exception:
+            pass
+        dispatcher = getattr(engine, "transport_dispatcher", None) or getattr(
+            engine, "transportDispatcher", None
+        )
+        if dispatcher is not None:
+            for name in ("close_dispatcher", "closeDispatcher"):
+                closer = getattr(dispatcher, name, None)
+                if closer:
+                    try:
+                        closer()
+                    except Exception:
+                        pass
+                    break
 
 
 def _require(creds: dict, field: str, prompt: str, sensitive: bool = False) -> str:
@@ -113,11 +136,30 @@ if __name__ == "__main__":
                 )
                 sys.exit(1)
 
+        # print(f"DEBUG walk-test: target={ip} user={user} oid={SNMP_WALK_OID}")
         loop = asyncio.new_event_loop()
         try:
             ok = loop.run_until_complete(snmp_walk(ip, user, auth, priv))
         finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             loop.close()
+        if DEBUG:
+            import json
+            print("\n----- BEGIN DEBUG REPORT -----")
+            print(json.dumps({
+                "script": "snmp_walk_test",
+                "target": ip,
+                "user": user,
+                "auth_protocol": SNMP_AUTH_PROTOCOL,
+                "priv_protocol": SNMP_PRIV_PROTOCOL,
+                "oid": SNMP_WALK_OID,
+                "walk_ok": ok,
+            }, indent=2))
+            print("----- END DEBUG REPORT -----")
         sys.exit(0 if ok else 1)
     except KeyboardInterrupt:
         print("\nOperation cancelled by user", file=sys.stderr)

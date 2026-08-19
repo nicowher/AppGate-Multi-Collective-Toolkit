@@ -21,6 +21,8 @@ Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box;
 
 `SNMP-Walk-<OS>` only walks (no API/SSH). Prompt for the **appliance** IP to walk — that is not the Controller unless you intend to query the Controller. Same SHA-256 / AES-256 and passphrase rules as Passwordinator.
 
+With `DEBUG = True` in `app/config.py` (leave on until you have validated a run), Passwordinator and SNMP-Walk print a JSON block between `BEGIN DEBUG REPORT` and `END DEBUG REPORT`. No passwords or tokens. Extra `# print("DEBUG stepN: ...")` lines are in the sources — uncomment those for step-level traces.
+
 Missing Python packages install from `app/vendor/wheels` first (air-gapped), then offer online pip if you allow it.
 
 ## Launchers
@@ -114,6 +116,7 @@ Hashing is in-process. No `snmpv3-hashgen` binary is required.
 | `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` / `SSH_PORT` | Transport hardening |
 | `APPGATE_*` | API version, port, provider, machineId |
 | `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
+| `DEBUG` | JSON report at end (on). Uncomment `# print("DEBUG ...")` in sources for traces |
 | Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention and cz-configd wait |
 
 Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algorithms is a policy exception, not the default.
@@ -132,10 +135,10 @@ Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algor
 | --- | --- |
 | 401 login failed | API user, MFA exemption, `APPGATE_PROVIDER` (`local` / `saml` / `oidc`) |
 | 403 Forbidden | Admin role can edit appliances |
-| No appliances listed | Activated, not Offline/Error/Warning; admin hostname/IP present |
+| Gateway missing from list | 6.7 lists only appliances this user can **View**. Edit without View is not enough. Grant Appliance View on all tags / All appliances. |
 | Engine ID not found | API `engineIDType 3`, SSH/sudo, `oldEngineID` after restart, MAC on `ETH_IFACE` |
 | Passphrase too short | Increase length or lower `SNMP_MIN_PASSPHRASE_LEN` |
-| Walk / digest error | Leftover `usmUser` in persistent conf, algorithm mismatch, short reload wait |
+| Walk timeout then pass | cz-configd may drop SNMP iptables briefly; retries usually recover |
 | Unknown ssh-rsa host key | Expected when `SSH_STRICT_HOST_KEY` is False |
 | Vendor install failed | Wheels built for another OS/Python — rerun Download-Deps on a matching host |
 

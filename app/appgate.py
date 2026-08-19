@@ -66,7 +66,6 @@ class AppGateClient:
             "Accept": f"application/vnd.appgate.peer-v{self.api_version}+json",
             "Content-Type": "application/json",
         }
-        self.appliance_id: Optional[str] = None
 
     def login(self, username: str, password: str, provider: Optional[str] = None) -> str:
         """Step 1: POST /admin/login and keep the bearer token on self.headers."""
@@ -186,8 +185,52 @@ class AppGateClient:
         lines.append(f"engineIDType {ENGINE_ID_TYPE}")
         self._put_snmpd_conf(appliance, "\n".join(lines), enabled=True)
 
+    def _paged_get(self, path: str) -> list:
+        """GET a 6.7 collection. range is a query param; total is in JSON 'range' (0-49/123)."""
+        items: list = []
+        start = 0
+        page = 50
+        while True:
+            end = start + page - 1
+            response = requests.get(
+                f"{self.base_url}{path}",
+                headers=self.headers,
+                params={"range": f"{start}-{end}"},
+                verify=TLS_VERIFY,
+                timeout=API_TIMEOUT,
+            )
+            if response.status_code not in (200, 206):
+                response.raise_for_status()
+            payload = response.json()
+            body_range = ""
+            if isinstance(payload, list):
+                chunk = payload
+            elif isinstance(payload, dict):
+                chunk = payload.get("data", [])
+                body_range = str(payload.get("range") or "")
+            else:
+                chunk = []
+            items.extend(chunk)
+            total = None
+            if "/" in body_range:
+                try:
+                    total = int(body_range.rsplit("/", 1)[-1])
+                except ValueError:
+                    total = None
+            if total is not None:
+                if len(items) >= total or not chunk:
+                    break
+                start = len(items)
+                continue
+            if len(chunk) < page:
+                break
+            start += len(chunk)
+            if start > 10000:
+                break
+        return items
+
     def get_appliances(self) -> list:
-        """Return all appliances visible to the current API user."""
+        """Every appliance this token can view. Paginate if JSON range says so."""
         response = requests.get(
             f"{self.base_url}/appliances",
             headers=self.headers,
@@ -195,46 +238,31 @@ class AppGateClient:
             timeout=API_TIMEOUT,
         )
         response.raise_for_status()
-        data = response.json()
-        if "data" not in data:
-            raise ValueError(
-                f"Unexpected appliances response format. "
-                f"HTTP {response.status_code}. Body preview: {(response.text or '')[:300]}"
-            )
-        return data.get("data", [])
-
-    def get_appliance_stats(self) -> Dict[str, Dict[str, Any]]:
-        """Best-effort 6.7 health map. Missing endpoint → empty dict."""
-        try:
-            response = requests.get(
-                f"{self.base_url}/stats/appliances",
-                headers=self.headers,
-                verify=TLS_VERIFY,
-                timeout=API_TIMEOUT,
-            )
-            if response.status_code != 200:
-                return {}
-            data = response.json()
-            items = data.get("data", data if isinstance(data, list) else [])
-            out = {}
-            for item in items:
-                if isinstance(item, dict) and item.get("id"):
-                    out[item["id"]] = item
-            return out
-        except Exception:
-            return {}
+        payload = response.json()
+        if isinstance(payload, list):
+            return payload
+        chunk = payload.get("data", [])
+        body_range = str(payload.get("range") or "")
+        if "/" in body_range:
+            try:
+                total = int(body_range.rsplit("/", 1)[-1])
+            except ValueError:
+                total = 0
+            if total > len(chunk):
+                return self._paged_get("/appliances")
+        return chunk
 
     def list_targets(self) -> List[Target]:
-        """Activated/healthy appliances with an SSH address (admin hostname/IP)."""
-        stats_by_id = self.get_appliance_stats()
+        """Activated appliances this user can view, with an SSH address."""
+        raw = self.get_appliances()
+        print(f"      Controller returned {len(raw)} appliance(s)", file=sys.stderr)
         targets: List[Target] = []
-        for appliance in self.get_appliances():
+        for appliance in raw:
+            name = str(appliance.get("name") or appliance.get("id") or "?")
             aid = appliance.get("id") or ""
-            if not aid:
+            if not aid or appliance.get("activated") is False:
                 continue
-            if appliance.get("activated") is False:
-                continue
-            health = appliance_health(appliance, stats_by_id.get(aid, {}))
+            health = appliance_health(appliance, {})
             if not is_selectable(health, APPLIANCE_SKIP_STATUS):
                 continue
             ssh_ip = appliance_ssh_ip(appliance)
@@ -243,7 +271,7 @@ class AppGateClient:
             targets.append(
                 Target(
                     appliance_id=aid,
-                    hostname=str(appliance.get("name") or ssh_ip),
+                    hostname=name,
                     ssh_ip=ssh_ip,
                     functions=appliance_functions(appliance),
                     health=health,
@@ -275,7 +303,7 @@ class AppGateClient:
         enabled: bool = True,
         appliance_id: Optional[str] = None,
     ) -> bool:
-        """Step 5b: PUT createUser + optional rouser + engineIDType 3.
+        """Step 6: PUT createUser + optional rouser + engineIDType 3.
 
         Call after delete_snmp_user so the final blob has no deleteUser line.
         Auth/priv algorithms must match snmp_hashgen.py / config.py.
@@ -295,7 +323,7 @@ class AppGateClient:
         return True
 
     def _get_appliance(self, appliance_id: Optional[str] = None) -> Dict[str, Any]:
-        aid = appliance_id or self.appliance_id
+        aid = appliance_id
         if not aid:
             raise RuntimeError("Appliance ID is not set.")
         response = requests.get(
@@ -320,7 +348,7 @@ class AppGateClient:
             "udpPort": existing.get("udpPort", DEFAULT_SNMP_PORT),
         }
         put_response = requests.put(
-            f"{self.base_url}/appliances/{appliance.get('id') or self.appliance_id}",
+            f"{self.base_url}/appliances/{appliance.get('id')}",
             headers=self.headers,
             json=appliance,
             verify=TLS_VERIFY,
