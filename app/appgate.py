@@ -138,7 +138,7 @@ class AppGateClient:
         else:
             print(f"ERROR: Login failed (HTTP {response.status_code}): {msg}", file=sys.stderr)
 
-        raise SystemExit(1)
+        raise RuntimeError(f"Login failed (HTTP {response.status_code})")
 
     @staticmethod
     def _snmpd_lines_without_user(appliance: Dict[str, Any], user: str) -> list:
@@ -252,10 +252,10 @@ class AppGateClient:
                 return self._paged_get("/appliances")
         return chunk
 
-    def list_targets(self) -> List[Target]:
-        """Activated appliances this user can view, with an SSH address."""
+    def list_targets(self, collective: int = 1) -> List[Target]:
+        """Activated appliances this token can view, tagged with *collective* index."""
         raw = self.get_appliances()
-        print(f"      Controller returned {len(raw)} appliance(s)", file=sys.stderr)
+        print(f"      [{collective}] {self.agip}: {len(raw)} appliance(s)", file=sys.stderr)
         targets: List[Target] = []
         for appliance in raw:
             name = str(appliance.get("name") or appliance.get("id") or "?")
@@ -273,6 +273,7 @@ class AppGateClient:
                     appliance_id=aid,
                     hostname=name,
                     ssh_ip=ssh_ip,
+                    collective=collective,
                     functions=appliance_functions(appliance),
                     health=health,
                 )

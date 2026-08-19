@@ -1,12 +1,14 @@
-"""Multi-appliance SNMPv3 configure-and-validate via the Controller.
+"""Multi-collective SNMPv3 configure-and-validate.
 
-  1. Login to the Controller (agip)
-  2. Pull appliances, keep activated/healthy, prompt to exclude
-  3. API: engineIDType 3 on selected boxes, wait
-  4. SSH (batches): restart snmpd, read oldEngineID, check MAC
+Phase-aligned across collectives (array order = 1, 2, 3, ...):
+
+  1. Login every Controller (own API account / token)
+  2. Pull appliances from every successful login; one exclude prompt
+  3. API engineIDType 3 (serialized per Controller)
+  4. SSH engine IDs (shared pool)
   5. Localize hashes
-  6. API: deleteUser then createUser per success (one PUT stream at a time)
-  7. SSH (batches): purge persistent usmUser, restart
+  6. API deleteUser + createUser (owning client only, serialized per Controller)
+  7. SSH purge usmUser
   8. Walk every pushed device
 """
 import json
@@ -17,7 +19,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from getpass import getpass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from appgate import AppGateClient
 from config import (
@@ -43,6 +45,9 @@ from snmp_validate import SNMPValidator
 from utils import REPO_ROOT, load_credentials
 
 CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
+
+# collective index (1-based) -> logged-in client
+ClientMap = Dict[int, AppGateClient]
 
 
 def _require(creds: dict, field: str, prompt: str, sensitive: bool = False) -> str:
@@ -83,6 +88,75 @@ def _run_ssh_batch(
                 _fail(target, str(exc))
 
 
+def _parse_collectives(creds: dict) -> List[Dict[str, str]]:
+    """Build [{index, agip, admin_username, admin_password}, ...]. Warn on duplicate agip."""
+    raw = creds.get("collectives")
+    rows: List[Dict[str, str]] = []
+    if isinstance(raw, list) and raw:
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            rows.append({
+                "agip": str(item.get("agip") or "").strip(),
+                "admin_username": str(item.get("admin_username") or "").strip(),
+                "admin_password": str(item.get("admin_password") or ""),
+            })
+    else:
+        rows.append({
+            "agip": str(creds.get("agip") or "").strip(),
+            "admin_username": str(creds.get("admin_username") or "").strip(),
+            "admin_password": str(creds.get("admin_password") or ""),
+        })
+
+    seen: Dict[str, int] = {}
+    out: List[Dict[str, str]] = []
+    for i, row in enumerate(rows, 1):
+        agip = row["agip"] or _require({}, "agip", f"Collective {i} Controller IP")
+        user = row["admin_username"] or _require(
+            {}, "admin_username", f"Collective {i} Admin Username"
+        )
+        password = row["admin_password"] or getpass(
+            f"Collective {i} ({agip}) Admin Password: "
+        ).strip()
+        if agip in seen:
+            print(
+                f"WARNING: collectives {seen[agip]} and {i} share agip {agip}. "
+                "The same collective will be configured twice.",
+                file=sys.stderr,
+            )
+        else:
+            seen[agip] = i
+        out.append({
+            "index": str(i),
+            "agip": agip,
+            "admin_username": user,
+            "admin_password": password,
+        })
+    return out
+
+
+def _api_by_collective(
+    targets: List[Target],
+    clients: ClientMap,
+    worker: Callable[[Target, AppGateClient], None],
+) -> None:
+    """Run *worker* sequentially within each collective (never two PUTs to one API)."""
+    by_col: Dict[int, List[Target]] = {}
+    for t in targets:
+        by_col.setdefault(t.collective, []).append(t)
+    for col in sorted(by_col):
+        client = clients.get(col)
+        if client is None:
+            for t in by_col[col]:
+                _fail(t, f"no API client for collective {col}")
+            continue
+        for target in by_col[col]:
+            try:
+                worker(target, client)
+            except Exception as exc:
+                _fail(target, str(exc))
+
+
 def main() -> None:
     try:
         creds = load_credentials(CREDENTIALS_PATH)
@@ -90,18 +164,15 @@ def main() -> None:
             "snmp_user": _require(creds, "snmp_user", "SNMP User"),
             "snmp_auth": _require(creds, "snmp_auth", "SNMP Auth", sensitive=True),
             "snmp_priv": _require(creds, "snmp_priv", "SNMP Priv", sensitive=True),
-            "agip": _require(creds, "agip", "AppGate Controller IP"),
             "rouser": _require(creds, "rouser", "SNMP Read-Only Username (rouser)"),
         }
-        if not all(inputs[k] for k in ("snmp_user", "snmp_auth", "snmp_priv", "agip")):
-            raise ValueError("snmp_user, snmp_auth, snmp_priv, and agip (Controller) are required")
+        if not all(inputs[k] for k in ("snmp_user", "snmp_auth", "snmp_priv")):
+            raise ValueError("snmp_user, snmp_auth, and snmp_priv are required")
 
-        admin_user = _require(creds, "admin_username", "AppGate Admin Username")
-        admin_pass = _require(creds, "admin_password", "AppGate Admin Password", sensitive=True)
         ssh_user = _require(creds, "ssh_username", "SSH Username")
         ssh_pass = _require(creds, "ssh_password", "SSH Password", sensitive=True)
-        if not all((admin_user, admin_pass, ssh_user, ssh_pass)):
-            raise ValueError("admin and SSH credentials are required")
+        if not all((ssh_user, ssh_pass)):
+            raise ValueError("SSH credentials are required")
         if not re.fullmatch(SNMP_NAME_RE, inputs["snmp_user"]):
             raise ValueError("snmp_user must be letters, digits, underscore, dot, or hyphen")
         if inputs.get("rouser") and not re.fullmatch(SNMP_NAME_RE, inputs["rouser"]):
@@ -112,37 +183,56 @@ def main() -> None:
                     f"{label} must be at least {SNMP_MIN_PASSPHRASE_LEN} characters"
                 )
 
+        collectives = _parse_collectives(creds)
+        if not collectives:
+            raise ValueError("No collectives defined (collectives[] or agip)")
+
         warn_insecure_transport()
-        client = AppGateClient(inputs["agip"])
         engine_fetcher = SNMPEngineFetcher(ssh_user, ssh_pass)
         hashgen = SNMPHashGenerator()
         validator = SNMPValidator()
         user = inputs["snmp_user"]
         rouser_line = f"rouser {inputs['rouser']} priv" if inputs.get("rouser") else ""
 
-        print("\n[1/8] Authenticating to Controller API...")
-        client.login(admin_user, admin_pass)
-        print("      Authenticated")
-        # print(f"DEBUG step1: controller={inputs['agip']} api=v{APPGATE_API_VERSION}")
+        print("\n[1/8] Authenticating to Controller API(s)...")
+        clients: ClientMap = {}
+        for col in collectives:
+            idx = int(col["index"])
+            print(f"      [{idx}] {col['agip']} as {col['admin_username']}...")
+            client = AppGateClient(col["agip"])
+            try:
+                client.login(col["admin_username"], col["admin_password"])
+                clients[idx] = client
+                print(f"      [{idx}] Authenticated")
+            except Exception as exc:
+                print(f"      [{idx}] LOGIN FAILED: {exc}", file=sys.stderr)
+        if not clients:
+            raise ValueError("No Controller accepted login")
+        # print("DEBUG step1: logged in", list(clients))
 
-        print("\n[2/8] Pulling appliances from Controller...")
-        inventory = client.list_targets()
+        print("\n[2/8] Pulling appliances from every Controller...")
+        inventory: List[Target] = []
+        for idx, client in sorted(clients.items()):
+            try:
+                inventory.extend(client.list_targets(collective=idx))
+            except Exception as exc:
+                print(f"      [{idx}] list failed: {exc}", file=sys.stderr)
         if not inventory:
-            raise ValueError("No activated/healthy appliances with an SSH address were found")
+            raise ValueError("No activated appliances with an SSH address were found")
         print(f"      Found {len(inventory)} selectable appliance(s)")
         selected = prompt_exclusions(inventory)
         if not selected:
             raise ValueError("Nothing left to configure after exclusions")
         print(f"      Selected {len(selected)} appliance(s)")
-        # print("DEBUG step2:", [(t.hostname, t.ssh_ip, t.functions) for t in selected])
+        # print("DEBUG step2:", [t.label() for t in selected])
 
         print("\n[3/8] Pinning engineIDType via API...")
-        for target in selected:
-            try:
-                client.ensure_engine_id_type3(target.appliance_id)
-                print(f"      {target.label()}: engineIDType set")
-            except Exception as exc:
-                _fail(target, f"API engineIDType: {exc}")
+
+        def _pin(target: Target, client: AppGateClient) -> None:
+            client.ensure_engine_id_type3(target.appliance_id)
+            print(f"      {target.label()}: engineIDType set")
+
+        _api_by_collective(_ok(selected), clients, _pin)
         time.sleep(SNMP_RELOAD_DELAY)
 
         print(f"\n[4/8] SSH engine ID (up to {SSH_CONCURRENCY} at a time)...")
@@ -155,7 +245,6 @@ def main() -> None:
                 engine_id = engine_id[2:]
             target.engine_id = engine_id
             print(f"      {target.label()}: engine {engine_id}")
-            # print(f"DEBUG step4: {target.label()} engine_len={len(engine_id)}")
 
         _run_ssh_batch(_ok(selected), _ssh_engine, SSH_CONCURRENCY)
         if not _ok(selected):
@@ -170,26 +259,25 @@ def main() -> None:
                 target.auth_hash = data["hashes"]["auth"]
                 target.priv_hash = data["hashes"]["priv"]
                 print(f"      {target.label()}: hashed")
-                # print(f"DEBUG step5: {target.label()} auth_len={len(target.auth_hash)}")
             except Exception as exc:
                 _fail(target, f"hash: {exc}")
 
-        print("\n[6/8] Pushing SNMPv3 config via Controller...")
-        for target in _ok(selected):
-            try:
-                client.delete_snmp_user(user, appliance_id=target.appliance_id)
-                time.sleep(SNMP_RELOAD_DELAY)
-                client.update_snmp_config(
-                    user,
-                    target.auth_hash,
-                    target.priv_hash,
-                    rouser_line,
-                    appliance_id=target.appliance_id,
-                )
-                target.status = "ok"
-                print(f"      {target.label()}: config pushed")
-            except Exception as exc:
-                _fail(target, f"API push: {exc}")
+        print("\n[6/8] Pushing SNMPv3 config via each Controller...")
+
+        def _push(target: Target, client: AppGateClient) -> None:
+            client.delete_snmp_user(user, appliance_id=target.appliance_id)
+            time.sleep(SNMP_RELOAD_DELAY)
+            client.update_snmp_config(
+                user,
+                target.auth_hash,
+                target.priv_hash,
+                rouser_line,
+                appliance_id=target.appliance_id,
+            )
+            target.status = "ok"
+            print(f"      {target.label()}: config pushed")
+
+        _api_by_collective(_ok(selected), clients, _push)
 
         print(f"\n[7/8] SSH purge leftover usmUser (up to {SSH_CONCURRENCY} at a time)...")
 
@@ -213,7 +301,6 @@ def main() -> None:
             )
             target.walk_ok = ok
             print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
-            # print(f"DEBUG step8: {target.label()} walk_ok={ok}")
             if not ok:
                 _fail(target, "SNMP walk failed")
 
@@ -223,17 +310,21 @@ def main() -> None:
         print(f"User:     {user}")
         if rouser_line:
             print(f"Read-Only:{rouser_line}")
+        current_col: Optional[int] = None
         for target in selected:
+            if target.collective != current_col:
+                current_col = target.collective
+                print(f"  --- collective {current_col} ---")
             state = target.status.upper()
             extra = target.engine_id or target.error
-            print(f"  [{state:<7}] {target.label():<28} {target.ssh_ip:<18} {extra}")
+            print(f"  [{state:<7}] {target.label():<32} {target.ssh_ip:<18} {extra}")
             if target.status == "ok" and target.auth_hash:
                 print(
                     f"           ESXi: {user}/{target.auth_hash}/{target.priv_hash}/priv"
                 )
         print("=" * 60)
         if DEBUG:
-            _print_debug_report(inputs["agip"], inventory, selected)
+            _print_debug_report(collectives, inventory, selected)
         if any(t.status == "failed" for t in selected):
             sys.exit(1)
 
@@ -246,13 +337,15 @@ def main() -> None:
 
 
 def _print_debug_report(
-    controller: str, inventory: List[Target], selected: List[Target]
+    collectives: List[Dict[str, str]], inventory: List[Target], selected: List[Target]
 ) -> None:
-    """JSON dump with no passwords, tokens, or full localized keys."""
     report: Dict[str, Any] = {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
-        "controller": controller,
+        "collectives": [
+            {"index": int(c["index"]), "agip": c["agip"], "admin_username": c["admin_username"]}
+            for c in collectives
+        ],
         "api_version": APPGATE_API_VERSION,
         "tls_verify": TLS_VERIFY,
         "config": {
@@ -273,6 +366,8 @@ def _print_debug_report(
     for t in selected:
         report["targets"].append(
             {
+                "collective": t.collective,
+                "label": t.label(),
                 "appliance_id": t.appliance_id,
                 "hostname": t.hostname,
                 "ssh_ip": t.ssh_ip,

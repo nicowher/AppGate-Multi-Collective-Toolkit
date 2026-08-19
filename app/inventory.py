@@ -11,6 +11,7 @@ class Target:
     appliance_id: str
     hostname: str
     ssh_ip: str
+    collective: int = 1
     functions: List[str] = field(default_factory=list)
     health: str = "unknown"
     engine_id: str = ""
@@ -21,7 +22,8 @@ class Target:
     walk_ok: Optional[bool] = None
 
     def label(self) -> str:
-        return self.hostname or self.ssh_ip or self.appliance_id
+        host = self.hostname or self.ssh_ip or self.appliance_id
+        return f"{self.collective}.{host}"
 
 
 def appliance_functions(appliance: Dict[str, Any]) -> List[str]:
@@ -81,21 +83,29 @@ def is_selectable(health: str, skip_status: tuple) -> bool:
 
 def prompt_exclusions(targets: List[Target]) -> List[Target]:
     """Print numbered inventory; user types numbers, hostnames, or IPs to drop."""
-    print("\n      #  Hostname                        SSH IP              Functions              Health")
+    print(
+        "\n      #  Collective  Hostname                        SSH IP              Functions              Health"
+    )
     for i, t in enumerate(targets, 1):
         funcs = ",".join(t.functions) or "-"
         print(
-            f"     {i:2d}  {t.hostname[:30]:<30}  {t.ssh_ip:<18}  {funcs:<22}  {t.health}"
+            f"     {i:2d}  {t.collective:<10}  {t.hostname[:30]:<30}  {t.ssh_ip:<18}  {funcs:<22}  {t.health}"
         )
     raw = input(
-        "\n      Exclude (numbers, hostnames, or IPs, comma-separated; Enter for all): "
+        "\n      Exclude (numbers, 1.hostname, hostnames, or IPs; Enter for all): "
     ).strip()
     if not raw:
         return list(targets)
     tokens = {part.strip().lower() for part in raw.split(",") if part.strip()}
     kept = []
     for i, t in enumerate(targets, 1):
-        keys = {str(i), t.hostname.lower(), t.ssh_ip.lower(), t.appliance_id.lower()}
+        keys = {
+            str(i),
+            t.label().lower(),
+            t.hostname.lower(),
+            t.ssh_ip.lower(),
+            t.appliance_id.lower(),
+        }
         if tokens & keys:
             print(f"      Excluding {t.label()}", flush=True)
             continue

@@ -8,8 +8,8 @@ Repository: https://github.com/nicowher/AppGate-SNMPv3-Passwordinator
 
 Double-click a launcher (or run it from a terminal). It reads `credentials.json`, prompts for any missing fields, then:
 
-1. Logs in to the **Controller** (`agip` is the Controller only)
-2. Pulls appliances from `GET /appliances` (6.7). Keeps activated/healthy boxes with an admin hostname/IP. You can exclude any from the printed list
+1. Logs in to **every** Controller in `collectives[]` (array order = collective `1`, `2`, …). Each has its own API account and bearer token. A failed login skips that collective
+2. Pulls appliances from each successful login. One exclude list; handles are `1.hostname` (avoids name clashes across sites)
 3. Pushes `engineIDType 3` via the Controller API for each selected appliance, then waits for cz-configd
 4. SSHes in batches (`SSH_CONCURRENCY`, default 5): restart snmpd, read `oldEngineID`, check MAC (RFC 3411 type 3)
 5. Localizes auth/priv per engine ID (RFC 3414, SHA-256)
@@ -37,7 +37,11 @@ Keep `README.md`, credentials files, and launchers in this folder. Python lives 
 
 On Linux/macOS: `chmod +x *.sh *.command` once. On macOS, right-click → Open the first time.
 
-Required fields: `snmp_user`, `snmp_auth`, `snmp_priv`, `agip` (**Controller IP**), `admin_username`, `admin_password`, `ssh_username`, `ssh_password`. `rouser` is optional. Passphrases must be at least `SNMP_MIN_PASSPHRASE_LEN` (default 8). Appliance IPs are **not** typed in; they come from the Controller.
+Shared: `snmp_user`, `snmp_auth`, `snmp_priv`, `ssh_username`, `ssh_password`. `rouser` is optional.
+
+Per collective (add as many objects as you want): `agip`, `admin_username`, `admin_password`. Collectives are numbered by array order (`1`, `2`, …). Duplicate `agip` values warn but still run.
+
+A single-controller `agip` / `admin_*` file still works (treated as collective `1`).
 
 ## Prerequisites
 
@@ -62,12 +66,13 @@ Copy `credentials.example.json` to `credentials.json` next to the launchers. Mis
   "snmp_user": "myuser",
   "snmp_auth": "authpass",
   "snmp_priv": "privpass",
-  "agip": "192.168.1.10",
   "rouser": "readonlyuser",
-  "admin_username": "admin",
-  "admin_password": "adminpass",
   "ssh_username": "admin",
-  "ssh_password": "sshpass"
+  "ssh_password": "sshpass",
+  "collectives": [
+    { "agip": "192.168.1.10", "admin_username": "api-a", "admin_password": "..." },
+    { "agip": "10.0.0.10", "admin_username": "api-b", "admin_password": "..." }
+  ]
 }
 ```
 

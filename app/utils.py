@@ -107,7 +107,13 @@ def load_credentials(path: str) -> Dict[str, Any]:
             data = json.load(fh)
         if not isinstance(data, dict):
             return {}
-        return {k: str(v) for k, v in data.items()}
+        out: Dict[str, Any] = {}
+        for key, value in data.items():
+            if key == "collectives":
+                out[key] = value
+            else:
+                out[key] = "" if value is None else str(value)
+        return out
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         print(f"Warning: Could not load credentials from {path}: {exc}", file=sys.stderr)
         return {}
