@@ -33,12 +33,10 @@ class Target:
         return f"{self.collective}.{host}"
 
     def ssh_endpoints(self) -> List[str]:
-        """FQDN first, then IP. Used for SSH and SNMP walks."""
-        out: List[str] = []
-        for host in (self.ssh_fqdn, self.ssh_ip):
-            if host and host not in out:
-                out.append(host)
-        return out
+        """FQDN first. Skip NIC IPs when an FQDN exists (those are often not SSH)."""
+        if self.ssh_fqdn:
+            return [self.ssh_fqdn]
+        return [self.ssh_ip] if self.ssh_ip else []
 
 
 def appliance_functions(appliance: Dict[str, Any]) -> List[str]:

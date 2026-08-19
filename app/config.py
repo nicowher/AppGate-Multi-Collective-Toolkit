@@ -84,6 +84,9 @@ SSH_PORT = 22
 SSH_CONCURRENCY = 5
 # Print a JSON debug report at the end (no passwords/tokens). Paste it back for review.
 DEBUG = False
+SNMPD_STOP_RETRIES = 5
+USM_SED_RETRIES = 3
+USM_RECREATE_WAITS = 5
 # Accepted answers for yes/no prompts (Add another Controller, Walk another IP).
 YES_ANSWERS = ("y", "yes")
 # 6.7 health values we will not SSH or configure.

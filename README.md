@@ -14,7 +14,7 @@ Double-click a launcher (or run it from a terminal). It reads `credentials.json`
 4. SSHes in batches (`SSH_CONCURRENCY`, default 5): restart snmpd, read `oldEngineID`, check MAC (RFC 3411 type 3)
 5. Localizes auth/priv per engine ID (RFC 3414, SHA-256)
 6. Pushes `deleteUser` then `createUser` / `rouser` / `engineIDType 3` one appliance at a time. No `exactEngineID`. v1/v2c communities stripped
-7. SSH again in batches: purge leftover `usmUser` from persistent store, restart snmpd
+7. SSH: **stop snmpd**, delete persistent `usmUser` (net-snmp will not update an existing user’s password), **start snmpd** so `/etc` `createUser` writes the new keys
 8. Walks every appliance that was pushed. Any failure exits 1
 
 Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box; the rest still get pushed and walked.
@@ -127,6 +127,7 @@ python -m unittest tests.test_snmp_hashgen
 | `APPGATE_*` | API version, port, provider, machineId |
 | `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
 | `DEBUG` | JSON report at end (off) |
+| `SNMPD_STOP_RETRIES` / `USM_SED_RETRIES` / `USM_RECREATE_WAITS` | Persistent USM purge timing |
 | `APPLIANCE_STATUS_PATH` | `GET /appliances/status` (6.3+) |
 | `YES_ANSWERS` | Accepted yes replies (`y`, `yes`) |
 | Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention and cz-configd wait |

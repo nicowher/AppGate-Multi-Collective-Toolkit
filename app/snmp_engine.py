@@ -29,6 +29,9 @@ from config import (
     SNMP_PERSISTENT_CONF,
     SNMP_PERSISTENT_CONF_ALT,
     SNMP_RELOAD_DELAY,
+    SNMPD_STOP_RETRIES,
+    USM_RECREATE_WAITS,
+    USM_SED_RETRIES,
     SSH_AUTH_TIMEOUT,
     SSH_PORT,
     SSH_STRICT_HOST_KEY,
@@ -83,6 +86,11 @@ class SNMPEngineFetcher:
             keep = ""
 
         def _purge(client: paramiko.SSHClient) -> bool:
+            # Stop first. A running snmpd rewrites persistent conf on exit
+            # and would undo sed (Wrong SNMP PDU digest on the next walk).
+            print(f"      Stopping snmpd before editing persistent USM...", file=sys.stderr)
+            if not self._stop_snmpd(client):
+                return False
             paths = (SNMP_PERSISTENT_CONF, SNMP_PERSISTENT_CONF_ALT)
             for path in paths:
                 self._sudo(
@@ -95,50 +103,77 @@ class SNMPEngineFetcher:
                     f"sed -i '/createUser[[:space:]]\\+{user}\\b/d' {path} || true",
                     check=False,
                 )
-            leftover = self._sudo(
-                client,
-                f"grep -h 'usmUser.*\"{user}\"' {SNMP_PERSISTENT_CONF} "
-                f"{SNMP_PERSISTENT_CONF_ALT} 2>/dev/null || true",
-                check=False,
-            )
+            leftover = ""
+            for _try in range(USM_SED_RETRIES):
+                leftover = self._sudo(
+                    client,
+                    f"grep -h 'usmUser.*\"{user}\"' {SNMP_PERSISTENT_CONF} "
+                    f"{SNMP_PERSISTENT_CONF_ALT} 2>/dev/null || true",
+                    check=False,
+                )
+                if not leftover.strip():
+                    break
+                print(
+                    f"      usmUser still present; retrying delete ({_try + 1}/{USM_SED_RETRIES})...",
+                    file=sys.stderr,
+                )
+                for path in paths:
+                    self._sudo(
+                        client,
+                        f"sed -i '/usmUser.*\"{user}\"/d' {path} || true",
+                        check=False,
+                    )
             if leftover.strip():
                 print(f"      usmUser still present after purge:\n{leftover}", file=sys.stderr)
+                self._start_snmpd(client)
                 return False
             print(
-                f"      Removed persistent usmUser '{user}'. Restarting snmpd "
+                f"      Removed persistent usmUser '{user}'. Starting snmpd "
                 "so createUser can recreate it...",
                 file=sys.stderr,
             )
-            if not self._restart_snmpd(client):
+            if not self._start_snmpd(client):
                 return False
             if not keep:
                 return True
-            time.sleep(SNMP_RELOAD_DELAY)
-            created = self._sudo(
-                client,
-                f"grep -h 'usmUser.*\"{user}\"' {SNMP_PERSISTENT_CONF} "
-                f"{SNMP_PERSISTENT_CONF_ALT} 2>/dev/null || true",
-                check=False,
-            )
-            if keep in created.lower():
-                print(f"      snmpd recreated usmUser '{user}' with the new key.", file=sys.stderr)
-                return True
+            for attempt in range(1, USM_RECREATE_WAITS + 1):
+                time.sleep(SNMP_RELOAD_DELAY)
+                created = self._sudo(
+                    client,
+                    f"grep -h 'usmUser.*\"{user}\"' {SNMP_PERSISTENT_CONF} "
+                    f"{SNMP_PERSISTENT_CONF_ALT} 2>/dev/null || true",
+                    check=False,
+                )
+                # print(f"DEBUG step7: recreate attempt={attempt} keep={keep[:8]} file={(created or '')[:80]!r}")
+                if keep in (created or "").lower():
+                    print(
+                        f"      snmpd recreated usmUser '{user}' with the new key.",
+                        file=sys.stderr,
+                    )
+                    return True
+                print(
+                    f"      Waiting for createUser to persist "
+                    f"(attempt {attempt}/{USM_RECREATE_WAITS})...",
+                    file=sys.stderr,
+                )
             print(
-                "      usmUser not yet rewritten with the new key "
-                f"(createUser may still be loading).\n{created}",
+                "      createUser has not written the new key yet; walk may fail.",
                 file=sys.stderr,
             )
             return True
 
-        ok = False
+        last_result = None
         for addr in self._hosts(host):
-            if self._with_ssh(addr, _purge):
-                ok = True
-                break
+            last_result = self._with_ssh(addr, _purge)
+            if last_result is True:
+                time.sleep(SNMP_RELOAD_DELAY)
+                return
+            if last_result is False:
+                raise RuntimeError(
+                    f"Could not purge persistent SNMP user '{user}' on {addr}"
+                )
             print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
-        if not ok:
-            raise RuntimeError(f"Could not purge persistent SNMP user '{user}' via SSH")
-        time.sleep(SNMP_RELOAD_DELAY)
+        raise RuntimeError(f"Could not purge persistent SNMP user '{user}' via SSH")
 
     def _apply_host_key_policy(self, client: paramiko.SSHClient) -> None:
         try:
@@ -266,6 +301,27 @@ class SNMPEngineFetcher:
             return None
         print(f"      Engine ID matches {ETH_IFACE} MAC (engineIDType {ENGINE_ID_TYPE}).", file=sys.stderr)
         return engine_id
+
+    def _stop_snmpd(self, client: paramiko.SSHClient) -> bool:
+        for _ in range(SNMPD_STOP_RETRIES):
+            self._sudo(client, "systemctl stop snmpd", check=False)
+            self._sudo(client, "service snmpd stop", check=False)
+            self._sudo(client, "killall -q snmpd || true", check=False)
+            time.sleep(1)
+            status = (self._sudo(client, "systemctl is-active snmpd || true") or "").strip()
+            if status != "active":
+                return True
+        print("      snmpd still active after stop attempts.", file=sys.stderr)
+        return False
+
+    def _start_snmpd(self, client: paramiko.SSHClient) -> bool:
+        self._sudo(client, "systemctl start snmpd", check=False)
+        status = (self._sudo(client, "systemctl is-active snmpd || true") or "").strip()
+        if status == "active":
+            return True
+        self._sudo(client, "service snmpd start", check=False)
+        status = (self._sudo(client, "systemctl is-active snmpd || true") or "").strip()
+        return status == "active"
 
     def _restart_snmpd(self, client: paramiko.SSHClient) -> bool:
         """systemctl first; `service snmpd restart` if the unit is not active."""
