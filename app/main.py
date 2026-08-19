@@ -365,7 +365,7 @@ def main() -> None:
 
         _api_by_collective(_ok(selected), clients, _push)
 
-        # --- Step 7: drop stale usmUser rows; keep the row that already has the new hash ---
+        # --- Step 7: delete persistent usmUser so snmpd applies createUser on restart ---
         print(f"\n[7/8] SSH purge leftover usmUser (up to {SSH_CONCURRENCY} at a time)...")
 
         def _ssh_purge(target: Target) -> None:

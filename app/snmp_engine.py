@@ -4,8 +4,9 @@
       restart snmpd, read oldEngineID, check RFC 3411 type 3 vs ETH_IFACE MAC
 
   purge_persistent_user()
-      after API createUser: delete leftover usmUser rows, restart snmpd
-      so the daemon applies the new localized keys
+      after API createUser: delete ALL persistent usmUser rows for the user,
+      restart snmpd so /etc createUser writes new keys (net-snmp will not
+      update an existing usmUser password)
 """
 from utils import ensure_package
 
@@ -69,7 +70,12 @@ class SNMPEngineFetcher:
     def purge_persistent_user(
         self, host: Union[str, Sequence[str]], user: str, keep_hash: str = ""
     ) -> None:
-        """Drop stale usmUser rows. Keep the row that already has *keep_hash*."""
+        """Delete every persistent usmUser for *user*, then restart snmpd.
+
+        net-snmp ignores createUser in /etc/snmp/snmpd.conf when a usmUser
+        already exists in /var/lib/snmp. Always strip those rows so the
+        new createUser (already pushed via API) is applied on restart.
+        """
         if not re.fullmatch(SNMP_NAME_RE, user):
             raise ValueError(f"Unsafe SNMP username for remote edit: {user!r}")
         keep = (keep_hash or "").lower()
@@ -79,36 +85,50 @@ class SNMPEngineFetcher:
         def _purge(client: paramiko.SSHClient) -> bool:
             paths = (SNMP_PERSISTENT_CONF, SNMP_PERSISTENT_CONF_ALT)
             for path in paths:
-                # keep_hash set: delete only usmUser rows for this user that lack the new key.
-                if keep:
-                    self._sudo(
-                        client,
-                        f"sed -i '/usmUser.*\"{user}\"/{{ /{keep}/!d; }}' {path} || true",
-                        check=False,
-                    )
-                else:
-                    self._sudo(
-                        client,
-                        f"sed -i '/usmUser.*\"{user}\"/d' {path} || true",
-                        check=False,
-                    )
+                self._sudo(
+                    client,
+                    f"sed -i '/usmUser.*\"{user}\"/d' {path} || true",
+                    check=False,
+                )
+                self._sudo(
+                    client,
+                    f"sed -i '/createUser[[:space:]]\\+{user}\\b/d' {path} || true",
+                    check=False,
+                )
             leftover = self._sudo(
                 client,
                 f"grep -h 'usmUser.*\"{user}\"' {SNMP_PERSISTENT_CONF} "
                 f"{SNMP_PERSISTENT_CONF_ALT} 2>/dev/null || true",
                 check=False,
             )
-            if leftover.strip() and keep and keep in leftover.lower():
-                print(
-                    f"      Persistent usmUser '{user}' already has the new key.",
-                    file=sys.stderr,
-                )
-                return True
             if leftover.strip():
                 print(f"      usmUser still present after purge:\n{leftover}", file=sys.stderr)
                 return False
-            print(f"      Purged stale usmUser '{user}'. Restarting snmpd...", file=sys.stderr)
-            return self._restart_snmpd(client)
+            print(
+                f"      Removed persistent usmUser '{user}'. Restarting snmpd "
+                "so createUser can recreate it...",
+                file=sys.stderr,
+            )
+            if not self._restart_snmpd(client):
+                return False
+            if not keep:
+                return True
+            time.sleep(SNMP_RELOAD_DELAY)
+            created = self._sudo(
+                client,
+                f"grep -h 'usmUser.*\"{user}\"' {SNMP_PERSISTENT_CONF} "
+                f"{SNMP_PERSISTENT_CONF_ALT} 2>/dev/null || true",
+                check=False,
+            )
+            if keep in created.lower():
+                print(f"      snmpd recreated usmUser '{user}' with the new key.", file=sys.stderr)
+                return True
+            print(
+                "      usmUser not yet rewritten with the new key "
+                f"(createUser may still be loading).\n{created}",
+                file=sys.stderr,
+            )
+            return True
 
         ok = False
         for addr in self._hosts(host):
