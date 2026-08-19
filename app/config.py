@@ -83,7 +83,7 @@ SSH_PORT = 22
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
 # Print a JSON debug report at the end (no passwords/tokens). Paste it back for review.
-DEBUG = True
+DEBUG = False
 # 6.7 health values we will not SSH or configure.
 APPLIANCE_SKIP_STATUS = (
     "offline",
