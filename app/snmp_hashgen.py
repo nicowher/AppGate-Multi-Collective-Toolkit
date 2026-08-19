@@ -1,4 +1,16 @@
-"""RFC 3414 USM key localization. No external hashgen tool."""
+"""Step 4: RFC 3414 USM key localization. No external hashgen binary.
+
+For each passphrase (auth, then priv):
+
+  1. Reject passphrases shorter than SNMP_MIN_PASSPHRASE_LEN
+  2. Repeat the passphrase until it fills 1 MiB (RFC3414_KDF_LEN)
+  3. Ku  = H(that 1 MiB buffer)
+  4. Kul = H(Ku || engineID || Ku)   ← this hex string is the USM key
+
+H is SHA-256 by default (CNSA 2.0). MD5 / SHA-1 are rejected.
+createUser on the appliance stores Kul; walks use the original
+passphrases, not these hashes.
+"""
 import hashlib
 import sys
 from typing import Any, Dict
@@ -21,7 +33,7 @@ class SNMPHashGenerator:
         engine_id: str,
         hash_algo: str = SNMP_HASH_ALGO,
     ) -> Dict[str, Any]:
-        """Return localized SNMPv3 auth/priv keys (RFC 3414)."""
+        """Step 4: localize *auth* and *priv* against *engine_id*."""
         algo = hash_algo.lower()
         if algo not in ALLOWED_HASH_ALGOS or algo not in HASH_HEX_LEN:
             raise ValueError(
@@ -45,10 +57,12 @@ class SNMPHashGenerator:
                 f"SNMP passphrase must be at least {SNMP_MIN_PASSPHRASE_LEN} characters"
             )
         digest = getattr(hashlib, hash_algo)
+        # Repeat passphrase to exactly 1 MiB, then hash → Ku.
         expanded = (passphrase * ((RFC3414_KDF_LEN // len(passphrase)) + 1))[:RFC3414_KDF_LEN]
         ku = digest(expanded.encode("utf-8")).digest()
         hex_id = engine_id[2:] if engine_id.lower().startswith("0x") else engine_id
         engine = bytes.fromhex(hex_id)
+        # Localized key Kul = H(Ku || engineID || Ku).
         return digest(ku + engine + ku).hexdigest()
 
     @staticmethod

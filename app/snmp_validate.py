@@ -27,15 +27,17 @@ from config import (
 
 
 class SNMPValidator:
-    """Walk the appliance with the new SNMPv3 user to confirm the push worked.
+    """Step 6: walk the appliance with the new SNMPv3 user.
 
-    Backends, in order: Net-SNMP snmpwalk, SnmpSoft SnmpWalk.exe, then pysnmp.
-    Walks use plaintext passwords — hashes live only on the appliance.
+    Backends, in order: Net-SNMP snmpwalk → SnmpSoft SnmpWalk.exe → pysnmp.
+    Walks use the original passphrases (hashes live only on the appliance).
     """
 
     def validate_snmp_walk(
         self, ip: str, user: str, auth: str, priv: str, engine_id: Optional[str] = None
     ) -> bool:
+        # Pick a walk backend. If none is installed, offer native Net-SNMP
+        # (Linux/macOS) or fall back to pip/vendor pysnmp (Windows too).
         tool_type, executable = self._detect_snmpwalk()
         if tool_type is None:
             print("      SNMP walk tool not found. Installing...", file=sys.stderr)
@@ -52,6 +54,7 @@ class SNMPValidator:
                 return False
             print("      SNMP walk tool installed.", file=sys.stderr)
 
+        # cz-configd / snmpd may still be reloading; retry a few times.
         for attempt in range(1, VALIDATION_RETRIES + 1):
             if attempt > 1:
                 print(
@@ -67,6 +70,7 @@ class SNMPValidator:
                         return True
                     continue
 
+                # Never print -A / -X / -aw / -pw — those are live passphrases.
                 if tool_type == "snmpsoft":
                     cmd = [
                         executable,
@@ -113,6 +117,7 @@ class SNMPValidator:
         return False
 
     def _detect_snmpwalk(self) -> Tuple[Optional[str], Optional[str]]:
+        """Return (backend, executable). backend is snmpsoft, netsnmp, pysnmp, or None."""
         candidates = ["snmpwalk", "snmpwalk.exe", "SnmpWalk.exe", "SnmpWalk"]
 
         for candidate in candidates:
@@ -150,6 +155,7 @@ class SNMPValidator:
             return (None, None)
 
     def _install_snmpwalk(self) -> bool:
+        """Ask to install Net-SNMP on Linux/macOS; Windows always uses pysnmp."""
         system = platform.system()
         native_ok = False
         try:

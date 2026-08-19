@@ -1,4 +1,11 @@
-"""Standalone SNMPv3 walk using credentials.json (no API or SSH)."""
+"""Standalone SNMPv3 walk using credentials.json (no API or SSH).
+
+This is step 6 only — the SNMP-Walk-<OS> launchers call this file.
+
+  1. Load credentials.json; prompt for agip / user / auth / priv
+  2. pysnmp authPriv walk of SNMP_WALK_OID (system MIB)
+  3. Print the first varBind and exit 0, or exit 1 on failure
+"""
 import asyncio
 import os
 import sys
@@ -81,6 +88,7 @@ def _require(creds: dict, field: str, prompt: str, sensitive: bool = False) -> s
 
 
 if __name__ == "__main__":
+    # Same credential file as Passwordinator; no admin/SSH fields needed.
     creds = load_credentials(CREDENTIALS_PATH)
     ip = _require(creds, "agip", "AppGate IP Address")
     user = _require(creds, "snmp_user", "SNMP User")

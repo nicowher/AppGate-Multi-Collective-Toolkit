@@ -1,7 +1,9 @@
-"""Download Python wheels into app/vendor/wheels for air-gapped installs.
+"""Prefetch Python wheels into app/vendor/wheels for air-gapped installs.
 
-Run this on a networked machine that matches the target OS/Python, then copy
-the whole project (including app/vendor/) to the air-gapped host.
+Not part of the 6-step configure flow. Run on a networked machine that
+matches the target OS and Python, then copy the whole project
+(including app/vendor/) to the air-gapped host. Launchers install from
+vendor/ before any network pip.
 """
 import sys
 

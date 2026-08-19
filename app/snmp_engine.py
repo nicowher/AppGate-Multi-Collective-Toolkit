@@ -1,4 +1,20 @@
-"""SSH: apply engineIDType, read oldEngineID, purge persistent USM users."""
+"""SSH half of the workflow (steps 3 and 5a).
+
+  get_engine_id()          → step 3 after the API pins engineIDType 3
+      1. restart snmpd so it applies the new type
+      2. read oldEngineID from /var/lib/snmp/snmpd.conf
+      3. read ETH_IFACE MAC and check RFC 3411 type 3
+         (4-byte enterprise + 0x03 + 6-byte MAC)
+
+  purge_persistent_user()  → step 5a before API deleteUser
+      1. sed usmUser / createUser rows out of persistent conf
+      2. confirm they are gone
+      3. restart snmpd so the old localized keys are dropped
+
+AppGate deleteUser only edits the API snmpd.conf blob. net-snmp keeps
+USM users in /var/lib/snmp (and /var/net-snmp); leftover rows make
+createUser a no-op (Wrong SNMP PDU digest).
+"""
 from utils import ensure_package
 
 try:
@@ -34,7 +50,7 @@ class SNMPEngineFetcher:
         self.ssh_password = ssh_password
 
     def get_engine_id(self, ip: str) -> str:
-        """Restart snmpd, read oldEngineID, check it against the interface MAC."""
+        """Step 3 (SSH half): restart snmpd, read oldEngineID, match ETH_IFACE MAC."""
         if not self.ssh_user or not self.ssh_password:
             raise ValueError("SSH credentials are required to retrieve the Engine ID")
 
@@ -44,16 +60,12 @@ class SNMPEngineFetcher:
         return engine
 
     def purge_persistent_user(self, ip: str, user: str) -> None:
-        """Remove every usmUser/createUser row for *user* from net-snmp persistent store.
-
-        AppGate deleteUser only edits the API snmpd.conf. net-snmp keeps USM
-        users in /var/lib/snmp/snmpd.conf; leftover rows make createUser a no-op
-        and leave the old localized keys (Wrong SNMP PDU digest).
-        """
+        """Step 5a (SSH half): strip *user* from net-snmp persistent store, restart snmpd."""
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", user):
             raise ValueError(f"Unsafe SNMP username for remote edit: {user!r}")
 
         def _purge(client: paramiko.SSHClient) -> bool:
+            # Only touch known net-snmp paths (no find /).
             paths = (SNMP_PERSISTENT_CONF, SNMP_PERSISTENT_CONF_ALT)
             for path in paths:
                 self._sudo(
@@ -91,6 +103,11 @@ class SNMPEngineFetcher:
         client.set_missing_host_key_policy(policy)
 
     def _with_ssh(self, ip: str, fn):
+        """Open an SSH session, run *fn(client)*, then close.
+
+        Password auth first; keyboard-interactive is the fallback some
+        AppGate boxes require.
+        """
         client = paramiko.SSHClient()
         self._apply_host_key_policy(client)
         try:
@@ -162,12 +179,14 @@ class SNMPEngineFetcher:
         return self._with_ssh(ip, self._configure_and_read_engine_id)
 
     def _configure_and_read_engine_id(self, client: paramiko.SSHClient) -> Optional[str]:
+        # 1) restart so snmpd picks up engineIDType 3 from cz-configd
         print(f"      Restarting snmpd so it applies engineIDType {ENGINE_ID_TYPE}...", file=sys.stderr)
         if not self._restart_snmpd(client):
             print("      snmpd restart failed.", file=sys.stderr)
             return None
         time.sleep(SNMP_RELOAD_DELAY)
 
+        # 2) oldEngineID is written to persistent conf after a clean start
         raw = self._sudo(client, f"grep -E '^oldEngineID' {SNMP_PERSISTENT_CONF} | tail -n 1")
         match = OLD_ENGINE_RE.search(raw or "")
         if not match:
@@ -180,6 +199,7 @@ class SNMPEngineFetcher:
         engine_id = match.group(1).lower()
         print(f"      oldEngineID: {engine_id}", file=sys.stderr)
 
+        # 3) type 3 must embed this interface's MAC
         mac = self._read_iface_mac(client)
         if not mac:
             print(f"      Could not read {ETH_IFACE} MAC via ip addr.", file=sys.stderr)
@@ -198,6 +218,7 @@ class SNMPEngineFetcher:
         return engine_id
 
     def _restart_snmpd(self, client: paramiko.SSHClient) -> bool:
+        """systemctl first; `service snmpd restart` if the unit is not active."""
         out = self._sudo(client, "systemctl restart snmpd", check=False)
         status = (self._sudo(client, "systemctl is-active snmpd || true") or "").strip()
         if status == "active":

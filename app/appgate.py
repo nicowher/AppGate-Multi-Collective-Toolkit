@@ -1,4 +1,17 @@
-"""AppGate admin API: login, appliance lookup, snmpd.conf push."""
+"""AppGate admin API: login, appliance lookup, snmpd.conf push.
+
+Called from main.py in this order:
+
+  login()                 → step 1  (bearer token)
+  find_appliance_by_ip()  → step 2  (sets self.appliance_id)
+  ensure_engine_id_type3()→ step 3  (API pin; SSH reads the ID)
+  delete_snmp_user()      → step 5a (deleteUser + engineIDType 3)
+  update_snmp_config()    → step 5b (createUser / rouser / type 3)
+
+cz-configd owns /etc/snmp/snmpd.conf, so every snmpd change is a PUT
+of the appliance object. Never push exactEngineID — cz-configd
+truncates it and breaks RFC 3411 type-3 (11-byte) IDs.
+"""
 from utils import ensure_package
 
 try:
@@ -49,7 +62,7 @@ class AppGateClient:
         self.appliance_id: Optional[str] = None
 
     def login(self, username: str, password: str, provider: Optional[str] = None) -> str:
-        """Authenticate to the AppGate API and store the bearer token."""
+        """Step 1: POST /admin/login and keep the bearer token on self.headers."""
         provider_name = provider or self.provider
         payload = {
             "machineId": self.machine_id,
@@ -160,7 +173,10 @@ class AppGateClient:
         return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
 
     def ensure_engine_id_type3(self) -> None:
-        """Persist engineIDType 3 via the API (cz-configd owns /etc/snmp/snmpd.conf)."""
+        """Step 3 (API half): drop old engine pins, then write engineIDType 3.
+
+        SSH (snmp_engine.py) restarts snmpd afterwards and reads oldEngineID.
+        """
         appliance = self._get_appliance()
         lines = self._snmpd_lines_without_engine_pins(appliance)
         lines.append(f"engineIDType {ENGINE_ID_TYPE}")
@@ -184,7 +200,7 @@ class AppGateClient:
         return data.get("data", [])
 
     def find_appliance_by_ip(self, ip: str) -> Dict[str, Any]:
-        """Locate the appliance object whose interface matches *ip*."""
+        """Step 2: find the appliance whose hostname or NIC address is *ip*."""
         for appliance in self.get_appliances():
             if self._ip_matches_appliance(ip, appliance):
                 self.appliance_id = appliance["id"]
@@ -210,11 +226,11 @@ class AppGateClient:
         return False
 
     def delete_snmp_user(self, user: str) -> bool:
-        """Push a config that deletes the SNMP user from the appliance.
+        """Step 5a (API half): push deleteUser, then wait for cz-configd.
 
-        This is a separate first step to clear the user from the running
-        daemon before pushing the new createUser config, so that the final
-        snmpd.conf does not contain a deleteUser line.
+        Separate from createUser so the final snmpd.conf has no deleteUser
+        line. Persistent /var/lib/snmp usmUser rows are purged over SSH
+        first (see SNMPEngineFetcher.purge_persistent_user).
         """
         appliance = self._get_appliance()
         lines = self._snmpd_lines_without_user(appliance, user)
@@ -233,12 +249,11 @@ class AppGateClient:
         rouser_line: str = "",
         enabled: bool = True,
     ) -> bool:
-        """Push the updated snmpd.conf to the AppGate appliance.
+        """Step 5b: PUT createUser + optional rouser + engineIDType 3.
 
-        Assumes the user has already been deleted (via delete_snmp_user)
-        so the final config contains createUser, rouser, and engineIDType 3.
+        Call after delete_snmp_user so the final blob has no deleteUser line.
+        Auth/priv algorithms must match snmp_hashgen.py / config.py.
         """
-        # createUser algorithms must match in-process localization (config.py).
         create_user_line = (
             f"createUser {user} {SNMP_AUTH_PROTOCOL} -l 0x{auth_hash} "
             f"{SNMP_PRIV_PROTOCOL} -l 0x{priv_hash}"
@@ -266,6 +281,7 @@ class AppGateClient:
         return response.json()
 
     def _put_snmpd_conf(self, appliance: Dict[str, Any], new_conf: str, enabled: bool) -> None:
+        """PUT the whole appliance object with a replaced snmpd.conf blob."""
         existing = appliance.get("snmpServer")
         if not isinstance(existing, dict):
             existing = {}

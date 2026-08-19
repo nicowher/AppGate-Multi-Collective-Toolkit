@@ -1,4 +1,14 @@
-"""Vendor wheel install and credentials.json loader."""
+"""Shared helpers used before and during the 6-step workflow.
+
+  vendor_has_wheels / install_from_vendor / ensure_package
+      Launchers and API/SSH modules call these when a pip package is
+      missing. Vendor wheels (air-gapped) are tried first; online pip
+      only if the operator allows it.
+
+  load_credentials
+      Step 0: read optional credentials.json next to the launchers.
+      Missing or invalid files become {} so the prompts still work.
+"""
 import importlib.util
 import json
 import os
