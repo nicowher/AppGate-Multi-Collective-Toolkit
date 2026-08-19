@@ -108,6 +108,6 @@ def load_credentials(path: str) -> Dict[str, Any]:
         if not isinstance(data, dict):
             return {}
         return {k: str(v) for k, v in data.items()}
-    except Exception as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         print(f"Warning: Could not load credentials from {path}: {exc}", file=sys.stderr)
         return {}

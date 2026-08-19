@@ -139,7 +139,7 @@ class SNMPValidator:
                 )
                 if "SnmpSoft" in ((probe.stdout or "") + (probe.stderr or "")):
                     return ("snmpsoft", candidate)
-            except Exception:
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
                 pass
 
         for candidate in candidates:
@@ -155,7 +155,7 @@ class SNMPValidator:
                 output = (probe.stdout or "") + (probe.stderr or "")
                 if "NET-SNMP" in output or "snmpwalk" in output.lower():
                     return ("netsnmp", candidate)
-            except Exception:
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
                 pass
 
         try:
@@ -248,7 +248,7 @@ class SNMPValidator:
             try:
                 from pysnmp.proto.rfc1902 import OctetString
                 kwargs["securityEngineId"] = OctetString(hexValue=hex_id)
-            except Exception:
+            except (ImportError, ValueError, TypeError):
                 pass
         return kwargs
 

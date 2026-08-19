@@ -16,6 +16,7 @@ except ImportError:
     import paramiko
 
 import re
+import socket
 import sys
 import time
 from typing import Optional
@@ -100,7 +101,7 @@ class SNMPEngineFetcher:
     def _apply_host_key_policy(self, client: paramiko.SSHClient) -> None:
         try:
             client.load_system_host_keys()
-        except Exception:
+        except OSError:
             pass
         policy = paramiko.RejectPolicy() if SSH_STRICT_HOST_KEY else paramiko.WarningPolicy()
         client.set_missing_host_key_policy(policy)
@@ -133,13 +134,13 @@ class SNMPEngineFetcher:
             )
             return self._with_ssh_keyboard_interactive(ip, fn)
         except paramiko.SSHException as exc:
-            print(f"      SSH connection error: {exc}", file=sys.stderr)
-        except Exception as exc:
-            print(f"      SSH error: {exc}", file=sys.stderr)
+            print(f"      SSH connection error ({type(exc).__name__}): {exc}", file=sys.stderr)
+        except (OSError, socket.timeout, TimeoutError) as exc:
+            print(f"      SSH network error ({type(exc).__name__}): {exc}", file=sys.stderr)
         finally:
             try:
                 client.close()
-            except Exception:
+            except OSError:
                 pass
         return None
 
@@ -164,17 +165,20 @@ class SNMPEngineFetcher:
             transport.auth_interactive(self.ssh_user, handler)
             client._transport = transport
             return fn(client)
-        except Exception as exc:
-            print(f"      Keyboard-interactive SSH also failed: {exc}", file=sys.stderr)
+        except (paramiko.SSHException, OSError, socket.timeout, TimeoutError) as exc:
+            print(
+                f"      Keyboard-interactive SSH failed ({type(exc).__name__}): {exc}",
+                file=sys.stderr,
+            )
         finally:
             try:
                 client.close()
-            except Exception:
+            except OSError:
                 pass
             if transport is not None:
                 try:
                     transport.close()
-                except Exception:
+                except OSError:
                     pass
         return None
 
@@ -275,8 +279,8 @@ class SNMPEngineFetcher:
             output = stdout.read().decode("utf-8", errors="replace")
             err_output = stderr.read().decode("utf-8", errors="replace")
             exit_status = stdout.channel.recv_exit_status()
-        except Exception as exc:
-            print(f"      SSH command timed out or failed: {exc}", file=sys.stderr)
+        except (socket.timeout, TimeoutError, OSError) as exc:
+            print(f"      SSH command timed out or failed ({type(exc).__name__}): {exc}", file=sys.stderr)
             return ""
         if check and exit_status not in (0, 1):
             print(

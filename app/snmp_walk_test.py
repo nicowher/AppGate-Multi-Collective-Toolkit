@@ -25,6 +25,7 @@ from config import (
     SNMP_WALK_OID,
     get_auth_protocol,
     get_priv_protocol,
+    warn_insecure_transport,
 )
 from utils import REPO_ROOT, ensure_package, load_credentials
 
@@ -116,6 +117,7 @@ def _require(creds: dict, field: str, prompt: str, sensitive: bool = False) -> s
 
 if __name__ == "__main__":
     try:
+        warn_insecure_transport()
         creds = load_credentials(CREDENTIALS_PATH)
         ip = _require(creds, "agip", "Appliance IP / hostname to walk")
         user = _require(creds, "snmp_user", "SNMP User")

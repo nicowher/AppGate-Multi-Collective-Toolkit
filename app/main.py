@@ -34,6 +34,7 @@ from config import (
     SNMP_RELOAD_DELAY,
     SSH_CONCURRENCY,
     TLS_VERIFY,
+    warn_insecure_transport,
 )
 from inventory import Target, prompt_exclusions
 from snmp_engine import SNMPEngineFetcher
@@ -111,6 +112,7 @@ def main() -> None:
                     f"{label} must be at least {SNMP_MIN_PASSPHRASE_LEN} characters"
                 )
 
+        warn_insecure_transport()
         client = AppGateClient(inputs["agip"])
         engine_fetcher = SNMPEngineFetcher(ssh_user, ssh_pass)
         hashgen = SNMPHashGenerator()

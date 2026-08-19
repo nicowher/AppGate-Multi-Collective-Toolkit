@@ -85,6 +85,12 @@ Wheels are gitignored. A GitHub ZIP has no wheels until you run Download-Deps. T
 
 Hashing is in-process. No `snmpv3-hashgen` binary is required.
 
+RFC 3414 / CNSA checks:
+
+```bash
+python -m unittest tests.test_snmp_hashgen
+```
+
 ## Standards (NSA / DISA / RFC)
 
 | Area | What this tool does |
@@ -99,8 +105,7 @@ Hashing is in-process. No `snmpv3-hashgen` binary is required.
 
 **Known deviations (set in `app/config.py`):**
 
-- `TLS_VERIFY = False` — appliances usually have a self-signed cert. Set `True` when you trust the CA (DISA prefers this).
-- `SSH_STRICT_HOST_KEY = False` — unknown host keys warn, then connect. Set `True` after pinning the appliance in `known_hosts`.
+- `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` live at the **bottom of `app/config.py`**. Lab = both `False` (self-signed). Production = both `True` after you trust the CA and pin SSH host keys. The script warns at start when either is False.
 - AppGate `createUser` stores a vendor priv OID (`.1.3.6.1.4.1.14832.1.4`) that is still AES-256 CFB; walks use pysnmp’s AES-256 protocol object.
 
 ## Tunables (`app/config.py`)

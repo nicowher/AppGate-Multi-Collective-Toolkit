@@ -67,18 +67,18 @@ warnings.filterwarnings(
     category=DeprecationWarning,
 )
 
-# ============================================================================
-# TLS / Certificate Verification
-# ============================================================================
-# Set to True to verify the AppGate appliance's TLS certificate.
-# The appliance uses a self-signed cert by default, so this is False
-# unless you have installed a trusted CA-signed certificate.
-# WARNING: Setting this to False disables TLS verification and makes
-# you vulnerable to MITM attacks. Only do this on trusted networks.
-# ============================================================================
-TLS_VERIFY = False
-# Reject unknown SSH host keys (DISA). False = warn and continue (lab/self-signed).
-SSH_STRICT_HOST_KEY = False
+def warn_insecure_transport() -> None:
+    """Print a DISA-style warning if TLS or SSH host-key checks are off."""
+    import sys
+    if TLS_VERIFY and SSH_STRICT_HOST_KEY:
+        return
+    print(
+        "WARNING: Insecure transport defaults are on "
+        f"(TLS_VERIFY={TLS_VERIFY}, SSH_STRICT_HOST_KEY={SSH_STRICT_HOST_KEY}). "
+        "Admin and SSH secrets can be MITM'd. Set both True in app/config.py "
+        "on untrusted networks (DISA / CNSA).",
+        file=sys.stderr,
+    )
 SSH_PORT = 22
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
@@ -155,3 +155,11 @@ PKG_INSTALL_TIMEOUT = 300
 # ============================================================================
 # Download-Deps-<OS> — run on a networked box, then copy app/vendor/ over.
 VENDOR_PACKAGES = ("requests", "paramiko", "pysnmp")
+
+# ============================================================================
+# Lab / production transport switch (keep at the bottom)
+# ============================================================================
+# Lab (no CA / no known_hosts): leave both False. Passwordinator warns at start.
+# Production: set both True after you trust the Controller cert and pin SSH keys.
+TLS_VERIFY = False
+SSH_STRICT_HOST_KEY = False

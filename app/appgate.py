@@ -103,7 +103,7 @@ class AppGateClient:
             msg = body.get("message", response.text)
             err_id = body.get("id", "")
             failure = body.get("failureType", "")
-        except Exception:
+        except (ValueError, TypeError, requests.JSONDecodeError):
             msg = response.text or f"HTTP {response.status_code}"
             err_id = ""
             failure = ""
