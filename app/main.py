@@ -44,13 +44,15 @@ from snmp_hashgen import SNMPHashGenerator
 from snmp_validate import SNMPValidator
 from utils import REPO_ROOT, load_credentials
 
+# credentials.json lives next to the launchers, not inside app/.
 CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
 
-# collective index (1-based) -> logged-in client
+# After step 1: collective number (1, 2, …) → that Controller's logged-in API client.
 ClientMap = Dict[int, AppGateClient]
 
 
 def _require(creds: dict, field: str, prompt: str, sensitive: bool = False) -> str:
+    """Use credentials.json if the field is set; otherwise prompt (getpass for secrets)."""
     value = creds.get(field, "")
     if not value:
         if sensitive:
@@ -61,10 +63,12 @@ def _require(creds: dict, field: str, prompt: str, sensitive: bool = False) -> s
 
 
 def _ok(targets: List[Target]) -> List[Target]:
+    """Appliances that have not failed a previous phase (still in the run)."""
     return [t for t in targets if t.status != "failed"]
 
 
 def _fail(target: Target, message: str) -> None:
+    """Mark one appliance failed and keep going (fail-soft)."""
     target.status = "failed"
     target.error = message
     print(f"      FAIL {target.label()}: {message}", file=sys.stderr)
@@ -75,6 +79,7 @@ def _run_ssh_batch(
     worker: Callable[[Target], None],
     concurrency: int,
 ) -> None:
+    """Steps 4 and 7: run SSH work in a pool (default 5). One box crashing does not stop the rest."""
     if not targets:
         return
     workers = max(1, min(concurrency, len(targets)))
@@ -89,7 +94,12 @@ def _run_ssh_batch(
 
 
 def _parse_collectives(creds: dict) -> List[Dict[str, str]]:
-    """Build [{index, agip, admin_username, admin_password}, ...]. Warn on duplicate agip."""
+    """Step 0: turn credentials into a numbered list of Controllers.
+
+    Prefer collectives[]. If that key is missing, treat top-level agip/admin_*
+    as collective 1 (old single-controller files). Array order is the name:
+    first object = 1, second = 2. Duplicate agip warns; we still run both.
+    """
     raw = creds.get("collectives")
     rows: List[Dict[str, str]] = []
     if isinstance(raw, list) and raw:
@@ -140,7 +150,11 @@ def _api_by_collective(
     clients: ClientMap,
     worker: Callable[[Target, AppGateClient], None],
 ) -> None:
-    """Run *worker* sequentially within each collective (never two PUTs to one API)."""
+    """Steps 3 and 6: call the API using the client that owns that appliance.
+
+    PUTs to the same Controller stay sequential. Never send collective 2's
+    token to collective 1's appliance id.
+    """
     by_col: Dict[int, List[Target]] = {}
     for t in targets:
         by_col.setdefault(t.collective, []).append(t)
@@ -159,6 +173,7 @@ def _api_by_collective(
 
 def main() -> None:
     try:
+        # --- Step 0: load file, prompt gaps, validate names/passphrase length ---
         creds = load_credentials(CREDENTIALS_PATH)
         inputs = {
             "snmp_user": _require(creds, "snmp_user", "SNMP User"),
@@ -187,6 +202,7 @@ def main() -> None:
         if not collectives:
             raise ValueError("No collectives defined (collectives[] or agip)")
 
+        # Lab TLS/SSH defaults print a DISA warning; flip TLS_VERIFY at bottom of config.py.
         warn_insecure_transport()
         engine_fetcher = SNMPEngineFetcher(ssh_user, ssh_pass)
         hashgen = SNMPHashGenerator()
@@ -194,6 +210,7 @@ def main() -> None:
         user = inputs["snmp_user"]
         rouser_line = f"rouser {inputs['rouser']} priv" if inputs.get("rouser") else ""
 
+        # --- Step 1: one POST /login per Controller; skip a site if login fails ---
         print("\n[1/8] Authenticating to Controller API(s)...")
         clients: ClientMap = {}
         for col in collectives:
@@ -210,6 +227,7 @@ def main() -> None:
             raise ValueError("No Controller accepted login")
         # print("DEBUG step1: logged in", list(clients))
 
+        # --- Step 2: GET /appliances on each token; one exclude table (1.hostname) ---
         print("\n[2/8] Pulling appliances from every Controller...")
         inventory: List[Target] = []
         for idx, client in sorted(clients.items()):
@@ -226,6 +244,7 @@ def main() -> None:
         print(f"      Selected {len(selected)} appliance(s)")
         # print("DEBUG step2:", [t.label() for t in selected])
 
+        # --- Step 3: PUT engineIDType 3 so SSH later reads a MAC-based engine ID ---
         print("\n[3/8] Pinning engineIDType via API...")
 
         def _pin(target: Target, client: AppGateClient) -> None:
@@ -236,6 +255,7 @@ def main() -> None:
         # print("DEBUG step3: pinned", [t.label() for t in _ok(selected)])
         time.sleep(SNMP_RELOAD_DELAY)
 
+        # --- Step 4: restart snmpd, read oldEngineID, check RFC 3411 type 3 vs eth0 MAC ---
         print(f"\n[4/8] SSH engine ID (up to {SSH_CONCURRENCY} at a time)...")
 
         def _ssh_engine(target: Target) -> None:
@@ -251,6 +271,7 @@ def main() -> None:
         if not _ok(selected):
             print("      No appliances left after SSH engine-ID pass.", file=sys.stderr)
 
+        # --- Step 5: RFC 3414 localize auth/priv against that box's engine ID ---
         print("\n[5/8] Localizing SNMPv3 keys...")
         for target in _ok(selected):
             try:
@@ -264,6 +285,7 @@ def main() -> None:
             except Exception as exc:
                 _fail(target, f"hash: {exc}")
 
+        # --- Step 6: deleteUser then createUser/rouser via the owning Controller ---
         print("\n[6/8] Pushing SNMPv3 config via each Controller...")
 
         def _push(target: Target, client: AppGateClient) -> None:
@@ -281,6 +303,7 @@ def main() -> None:
 
         _api_by_collective(_ok(selected), clients, _push)
 
+        # --- Step 7: drop stale usmUser rows; keep the row that already has the new hash ---
         print(f"\n[7/8] SSH purge leftover usmUser (up to {SSH_CONCURRENCY} at a time)...")
 
         def _ssh_purge(target: Target) -> None:
@@ -291,6 +314,7 @@ def main() -> None:
 
         _run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY)
 
+        # --- Step 8: authPriv walk; cz-configd may need SNMP_RELOAD_DELAY first ---
         print("\n[8/8] Validating SNMP walks...")
         time.sleep(SNMP_RELOAD_DELAY)
         for target in _ok(selected):
@@ -307,6 +331,7 @@ def main() -> None:
             if not ok:
                 _fail(target, "SNMP walk failed")
 
+        # Localized hashes are for ESXi USM, not the original passphrases.
         print("\n" + "=" * 60)
         print("Configuration Summary")
         print("=" * 60)

@@ -33,7 +33,7 @@ class SNMPHashGenerator:
         engine_id: str,
         hash_algo: str = SNMP_HASH_ALGO,
     ) -> Dict[str, Any]:
-        """Step 4: localize *auth* and *priv* against *engine_id*."""
+        """Step 5: localize *auth* and *priv* against *engine_id*."""
         algo = hash_algo.lower()
         if algo not in ALLOWED_HASH_ALGOS or algo not in HASH_HEX_LEN:
             raise ValueError(

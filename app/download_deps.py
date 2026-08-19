@@ -1,6 +1,6 @@
 """Prefetch Python wheels into app/vendor/wheels for air-gapped installs.
 
-Not part of the 6-step configure flow. Run on a networked machine that
+Not part of the 8-step configure flow. Run on a networked machine that
 matches the target OS and Python, then copy the whole project
 (including app/vendor/) to the air-gapped host. Launchers install from
 vendor/ before any network pip.

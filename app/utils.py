@@ -109,6 +109,7 @@ def load_credentials(path: str) -> Dict[str, Any]:
             return {}
         out: Dict[str, Any] = {}
         for key, value in data.items():
+            # Keep collectives[] as a list of objects (do not stringify it).
             if key == "collectives":
                 out[key] = value
             else:

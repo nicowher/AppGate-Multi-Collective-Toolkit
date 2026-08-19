@@ -11,6 +11,7 @@ from config import APPLIANCE_FUNCTION_NAMES
 
 @dataclass
 class Target:
+    """One appliance in the run. API calls use appliance_id; humans use label()."""
     appliance_id: str
     hostname: str
     ssh_ip: str
@@ -25,11 +26,13 @@ class Target:
     walk_ok: Optional[bool] = None
 
     def label(self) -> str:
+        """Human handle: 1.hit-agg-011 (collective index + hostname)."""
         host = self.hostname or self.ssh_ip or self.appliance_id
         return f"{self.collective}.{host}"
 
 
 def appliance_functions(appliance: Dict[str, Any]) -> List[str]:
+    """Which 6.7 functions are enabled (controller, gateway, …)."""
     found = []
     for name in APPLIANCE_FUNCTION_NAMES:
         block = appliance.get(name)
@@ -41,6 +44,7 @@ def appliance_functions(appliance: Dict[str, Any]) -> List[str]:
 
 
 def appliance_health(appliance: Dict[str, Any], stats: Dict[str, Any]) -> str:
+    """Best-effort health string. unknown is selectable (stats API is often 403)."""
     for key in ("status", "health"):
         value = stats.get(key) or appliance.get(key)
         if value:
@@ -75,7 +79,11 @@ def is_selectable(health: str, skip_status: tuple) -> bool:
 
 
 def prompt_exclusions(targets: List[Target]) -> List[Target]:
-    """Print numbered inventory; user types numbers, hostnames, or IPs to drop."""
+    """Step 2: print the table; Enter keeps all.
+
+    Tokens: row number, 1.hostname, unique hostname, SSH IP, or appliance UUID.
+    A hostname that exists in two collectives only matches as N.hostname.
+    """
     print(
         "\n      #  Collective  Hostname                        SSH IP              Functions              Health"
     )

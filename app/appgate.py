@@ -95,6 +95,7 @@ class AppGateClient:
                 f"Login response did not contain an API token. "
                 f"HTTP {response.status_code}. Response body: {body_preview}"
             )
+        # Token stays on this client only — never reused on another Controller.
         self.headers["Authorization"] = f"Bearer {token}"
         return token
 

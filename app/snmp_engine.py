@@ -64,6 +64,7 @@ class SNMPEngineFetcher:
         def _purge(client: paramiko.SSHClient) -> bool:
             paths = (SNMP_PERSISTENT_CONF, SNMP_PERSISTENT_CONF_ALT)
             for path in paths:
+                # keep_hash set: delete only usmUser rows for this user that lack the new key.
                 if keep:
                     self._sudo(
                         client,
