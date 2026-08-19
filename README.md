@@ -19,7 +19,7 @@ Double-click a launcher (or run it from a terminal). It reads `credentials.json`
 
 Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box; the rest still get pushed and walked.
 
-`SNMP-Walk-<OS>` asks **1) single IP** (then *Walk another IP?*) or **2) pull list from Controller(s)** (same login / exclude as Passwordinator). No SSH and no config push. Controller IPs must be IPv4, IPv6, or FQDN.
+`SNMP-Walk-<OS>` asks **1) single FQDN/IP** (then *Walk another?*) or **2) pull list from Controller(s)** (same FQDN-first login / exclude as Passwordinator). No SSH and no config push. Health uses `GET /admin/appliances/status` (not the removed `/stats/appliances`).
 
 Set `DEBUG = True` in `app/config.py` to print JSON between `BEGIN DEBUG REPORT` and `END DEBUG REPORT`. Uncomment `# print("DEBUG ...")` for step traces.
 
@@ -127,6 +127,7 @@ python -m unittest tests.test_snmp_hashgen
 | `APPGATE_*` | API version, port, provider, machineId |
 | `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
 | `DEBUG` | JSON report at end (off) |
+| `APPLIANCE_STATUS_PATH` | `GET /appliances/status` (6.3+) |
 | `YES_ANSWERS` | Accepted yes replies (`y`, `yes`) |
 | Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention and cz-configd wait |
 

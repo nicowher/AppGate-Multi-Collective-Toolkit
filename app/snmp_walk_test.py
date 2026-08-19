@@ -89,6 +89,7 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     if not clients:
         raise ValueError("No Controller accepted login")
 
+    # list_targets uses GET /appliances plus GET /appliances/status (not /stats/appliances).
     print("\n[2/3] Pulling appliances from every Controller...")
     inventory = []
     for idx, client in sorted(clients.items()):

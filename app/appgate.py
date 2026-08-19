@@ -27,7 +27,9 @@ from config import (
     APPGATE_API_VERSION,
     APPGATE_MACHINE_ID,
     APPGATE_PROVIDER,
+    APPLIANCE_LIST_MAX,
     APPLIANCE_LIST_PAGE,
+    APPLIANCE_STATUS_PATH,
     ENGINE_ID_TYPE,
     DEFAULT_SNMP_PORT,
     SNMP_AUTH_PROTOCOL,
@@ -255,7 +257,7 @@ class AppGateClient:
             if len(chunk) < page:
                 break
             start += len(chunk)
-            if start > 10000:
+            if start > APPLIANCE_LIST_MAX:
                 break
         return items
 
@@ -282,9 +284,23 @@ class AppGateClient:
                 return self._paged_get("/appliances")
         return chunk
 
+    def get_appliance_status(self) -> Dict[str, Dict[str, Any]]:
+        """6.3+ replacement for GET /stats/appliances → GET /appliances/status."""
+        try:
+            # print(f"DEBUG step2: GET {APPLIANCE_STATUS_PATH}")
+            items = self._paged_get(APPLIANCE_STATUS_PATH)
+        except (requests.RequestException, ValueError, OSError):
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        for item in items:
+            if isinstance(item, dict) and item.get("id"):
+                out[item["id"]] = item
+        return out
+
     def list_targets(self, collective: int = 1) -> List[Target]:
         """Activated appliances this token can view, tagged with *collective* index."""
         raw = self.get_appliances()
+        status_by_id = self.get_appliance_status()
         print(
             f"      [{collective}] {self.fqdn or self.agip}: {len(raw)} appliance(s)",
             file=sys.stderr,
@@ -295,7 +311,7 @@ class AppGateClient:
             aid = appliance.get("id") or ""
             if not aid or appliance.get("activated") is False:
                 continue
-            health = appliance_health(appliance, {})
+            health = appliance_health(appliance, status_by_id.get(aid, {}))
             if not is_selectable(health, APPLIANCE_SKIP_STATUS):
                 continue
             ssh_fqdn, ssh_ip = appliance_hosts(appliance)

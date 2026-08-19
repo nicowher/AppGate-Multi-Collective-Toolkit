@@ -54,7 +54,7 @@ def appliance_functions(appliance: Dict[str, Any]) -> List[str]:
 
 
 def appliance_health(appliance: Dict[str, Any], stats: Dict[str, Any]) -> str:
-    """Best-effort health string. unknown is selectable (stats API is often 403)."""
+    """Best-effort health from GET /appliances/status (not the removed /stats/appliances)."""
     for key in ("status", "health"):
         value = stats.get(key) or appliance.get(key)
         if value:

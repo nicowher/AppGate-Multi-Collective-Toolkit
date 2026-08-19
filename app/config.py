@@ -105,6 +105,9 @@ DEFAULT_SNMP_PORT = 161
 ETH_IFACE = "eth0"
 ENGINE_ID_TYPE = 3
 APPLIANCE_LIST_PAGE = 50
+APPLIANCE_LIST_MAX = 10000
+# 6.3+ health endpoint (replaces removed /admin/stats/appliances).
+APPLIANCE_STATUS_PATH = "/appliances/status"
 APPLIANCE_FUNCTION_NAMES = (
     "controller",
     "gateway",
