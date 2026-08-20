@@ -26,6 +26,7 @@ from config import (
     APPGATE_ADMIN_PREFIX,
     APPGATE_API_VERSION,
     APPGATE_MACHINE_ID,
+    API_AUTH_FAIL_CODES,
     APPGATE_PROVIDER,
     APPLIANCE_LIST_MAX,
     APPLIANCE_LIST_PAGE,
@@ -83,7 +84,7 @@ class AppGateClient:
         self.base_url = f"https://{host}:{APPGATE_ADMIN_PORT}{APPGATE_ADMIN_PREFIX}"
 
     def login(self, username: str, password: str, provider: Optional[str] = None) -> str:
-        """Step 1: POST /admin/login. Try FQDN first, then IP if the host is unreachable."""
+        """Step 1: POST /admin/login. FQDN first; IP if connect/HTTP fails (not 401/403)."""
         provider_name = provider or self.provider
         payload = {
             "machineId": self.machine_id,
@@ -110,7 +111,7 @@ class AppGateClient:
                 )
                 continue
             if response.status_code != 200:
-                if response.status_code in (401, 403):
+                if response.status_code in API_AUTH_FAIL_CODES:
                     self._handle_login_error(response, username, provider_name)
                 print(
                     f"      {host} returned HTTP {response.status_code}; trying fallback...",

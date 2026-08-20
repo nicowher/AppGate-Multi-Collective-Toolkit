@@ -43,6 +43,7 @@ class Target:
         out: List[str] = []
         if self.ssh_fqdn:
             out.append(self.ssh_fqdn)
+        # print(f"DEBUG ssh_endpoints: fqdn={self.ssh_fqdn} cfg_ip={self.collective_ip} fn={self.functions}")
         use_cfg_ip = bool(self.collective_ip) and (
             "controller" in self.functions
             or (

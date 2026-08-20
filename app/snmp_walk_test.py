@@ -117,6 +117,7 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     failed = 0
     for target in selected:
         ok = validator.validate_snmp_walk(
+            # Controllers: FQDN then credentials agip. Gateways: FQDN only.
             target.ssh_endpoints(), user, auth, priv, engine_id=target.engine_id or None
         )
         target.walk_ok = ok

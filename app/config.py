@@ -83,7 +83,7 @@ SSH_PORT = 22
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
 # Print a JSON debug report at the end (no passwords/tokens). Paste it back for review.
-DEBUG = False
+DEBUG = True
 SNMPD_STOP_RETRIES = 5
 USM_SED_RETRIES = 3
 USM_RECREATE_WAITS = 5
@@ -135,6 +135,8 @@ APPGATE_ADMIN_PORT = 8443
 APPGATE_ADMIN_PREFIX = "/admin"
 APPGATE_PROVIDER = "local"
 APPGATE_MACHINE_ID = "f0031c00-0522-43b3-a642-ae23cfd1bc22"
+# Do not fall back to IP on these (credentials/ACL, not a bad FQDN).
+API_AUTH_FAIL_CODES = (401, 403)
 
 # ============================================================================
 # Timeouts (seconds)

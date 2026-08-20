@@ -152,6 +152,7 @@ Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algor
 | Engine ID not found | API `engineIDType 3`, SSH/sudo, `oldEngineID` after restart, MAC on `ETH_IFACE` |
 | Passphrase too short | Increase length or lower `SNMP_MIN_PASSPHRASE_LEN` |
 | Walk timeout then pass | cz-configd may drop SNMP iptables briefly; retries usually recover |
+| SSH to Controller FQDN times out | NAT/DNS: set `agip` in that collective; SSH retries the configured IP |
 | Unknown ssh-rsa host key | Expected when `SSH_STRICT_HOST_KEY` is False |
 | Vendor install failed | Wheels built for another OS/Python — rerun Download-Deps on a matching host |
 
