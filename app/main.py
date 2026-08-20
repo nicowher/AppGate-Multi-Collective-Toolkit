@@ -294,7 +294,13 @@ def main() -> None:
         inventory: List[Target] = []
         for idx, client in sorted(clients.items()):
             try:
-                inventory.extend(client.list_targets(collective=idx))
+                inventory.extend(
+                    client.list_targets(
+                        collective=idx,
+                        fallback_ip=client.fallback_ip,
+                        collective_fqdn=client.fqdn,
+                    )
+                )
             except Exception as exc:
                 print(f"      [{idx}] list failed: {exc}", file=sys.stderr)
         if not inventory:

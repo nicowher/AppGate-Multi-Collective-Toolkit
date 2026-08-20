@@ -104,14 +104,20 @@ class AppGateClient:
                 )
             except (requests.ConnectionError, requests.Timeout, OSError) as exc:
                 last_connect_error = exc
-                # print(f"DEBUG step1: connect fail host={host} err={exc!r}")
                 print(
                     f"      Cannot reach {host} ({type(exc).__name__}); trying fallback...",
                     file=sys.stderr,
                 )
                 continue
             if response.status_code != 200:
-                self._handle_login_error(response, username, provider_name)
+                if response.status_code in (401, 403):
+                    self._handle_login_error(response, username, provider_name)
+                print(
+                    f"      {host} returned HTTP {response.status_code}; trying fallback...",
+                    file=sys.stderr,
+                )
+                last_connect_error = RuntimeError(f"HTTP {response.status_code} from {host}")
+                continue
             data = response.json()
             token = data.get("token")
             if not token:
@@ -297,7 +303,12 @@ class AppGateClient:
                 out[item["id"]] = item
         return out
 
-    def list_targets(self, collective: int = 1) -> List[Target]:
+    def list_targets(
+        self,
+        collective: int = 1,
+        fallback_ip: str = "",
+        collective_fqdn: str = "",
+    ) -> List[Target]:
         """Activated appliances this token can view, tagged with *collective* index."""
         raw = self.get_appliances()
         status_by_id = self.get_appliance_status()
@@ -324,6 +335,8 @@ class AppGateClient:
                     ssh_fqdn=ssh_fqdn,
                     ssh_ip=ssh_ip,
                     collective=collective,
+                    collective_fqdn=collective_fqdn or self.fqdn,
+                    collective_ip=fallback_ip or self.fallback_ip,
                     functions=appliance_functions(appliance),
                     health=health,
                 )

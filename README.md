@@ -39,7 +39,7 @@ On Linux/macOS: `chmod +x *.sh *.command` once. On macOS, right-click → Open t
 
 Shared: `snmp_user`, `snmp_auth`, `snmp_priv`, `ssh_username`, `ssh_password`. `rouser` is optional.
 
-Per collective: required `fqdn` (Controller admin hostname), optional `agip` (IP fallback), `admin_username`, `admin_password`. API, SSH, and walks use FQDN first, then IP if the name does not connect. Duplicate FQDNs warn but still run. After each collective the script asks **Add another Controller?**
+Per collective: required `fqdn` (Controller admin hostname), optional `agip` (IP fallback), `admin_username`, `admin_password`. API uses FQDN first, then IP on connect/HTTP failure (not 401/403). SSH to a **Controller** tries FQDN then that collective’s `agip` (NAT/DNS mismatch). Gateways stay on their FQDN. Duplicate FQDNs warn but still run.
 
 A single-controller file still works (collective `1`) but you will be prompted for `fqdn` if it is missing.
 

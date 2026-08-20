@@ -18,6 +18,8 @@ class Target:
     ssh_fqdn: str = ""
     ssh_ip: str = ""
     collective: int = 1
+    collective_fqdn: str = ""
+    collective_ip: str = ""
     functions: List[str] = field(default_factory=list)
     health: str = "unknown"
     engine_id: str = ""
@@ -33,10 +35,27 @@ class Target:
         return f"{self.collective}.{host}"
 
     def ssh_endpoints(self) -> List[str]:
-        """FQDN first. Skip NIC IPs when an FQDN exists (those are often not SSH)."""
+        """FQDN first; configured collective IP if FQDN is NAT'd / not SSH-able.
+
+        Controller boxes: credentials agip is the SSH fallback.
+        Gateways: only FQDN (do not SSH the Controller IP by mistake).
+        """
+        out: List[str] = []
         if self.ssh_fqdn:
-            return [self.ssh_fqdn]
-        return [self.ssh_ip] if self.ssh_ip else []
+            out.append(self.ssh_fqdn)
+        use_cfg_ip = bool(self.collective_ip) and (
+            "controller" in self.functions
+            or (
+                self.collective_fqdn
+                and self.ssh_fqdn
+                and self.ssh_fqdn.lower() == self.collective_fqdn.lower()
+            )
+        )
+        if use_cfg_ip and self.collective_ip not in out:
+            out.append(self.collective_ip)
+        if not out and self.ssh_ip:
+            out.append(self.ssh_ip)
+        return out
 
 
 def appliance_functions(appliance: Dict[str, Any]) -> List[str]:
