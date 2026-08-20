@@ -15,7 +15,7 @@ Double-click a launcher (or run it from a terminal). It reads `credentials.json`
 5. Localizes auth/priv per engine ID (RFC 3414, SHA-256)
 6. Pushes `deleteUser` then `createUser` / `rouser` / `engineIDType 3` one appliance at a time. No `exactEngineID`. v1/v2c communities stripped
 7. SSH: **stop snmpd**, delete persistent `usmUser` (net-snmp will not update an existing user’s password), **start snmpd** so `/etc` `createUser` writes the new keys
-8. Walks every appliance that was pushed. Any failure exits 1
+8. Walks every pushed appliance: **IP first** (NAT), then FQDN. Attempts are `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` (default 2 each). Gateways never use the Controller IP.
 
 Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box; the rest still get pushed and walked.
 
@@ -39,7 +39,7 @@ On Linux/macOS: `chmod +x *.sh *.command` once. On macOS, right-click → Open t
 
 Shared: `snmp_user`, `snmp_auth`, `snmp_priv`, `ssh_username`, `ssh_password`. `rouser` is optional.
 
-Per collective: required `fqdn` (Controller admin hostname), optional `agip` (IP fallback), `admin_username`, `admin_password`. API uses FQDN first, then IP on connect/HTTP failure (not 401/403). SSH to a **Controller** tries FQDN then that collective’s `agip` (NAT/DNS mismatch). Gateways stay on their FQDN. Duplicate FQDNs warn but still run.
+Per collective: required `fqdn`, optional `agip`, `admin_username`, `admin_password`. API: FQDN then IP (not on 401/403). SSH: FQDN then IP (Controller uses credentials `agip`; gateway uses appliance `ssh_ip`). SNMP walk: **IP first**, then FQDN (`WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS`). Gateways never walk the Controller IP.
 
 A single-controller file still works (collective `1`) but you will be prompted for `fqdn` if it is missing.
 
@@ -126,7 +126,8 @@ python -m unittest tests.test_snmp_hashgen
 | `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` / `SSH_PORT` | Transport hardening |
 | `APPGATE_*` | API version, port, provider, machineId |
 | `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
-| `DEBUG` | JSON report at end (off) |
+| `DEBUG` | JSON report at end (see `config.py`) |
+| `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per IP / per FQDN (default 2) |
 | `SNMPD_STOP_RETRIES` / `USM_SED_RETRIES` / `USM_RECREATE_WAITS` | Persistent USM purge timing |
 | `APPLIANCE_STATUS_PATH` | `GET /appliances/status` (6.3+) |
 | `YES_ANSWERS` | Accepted yes replies (`y`, `yes`) |

@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import platform
 import shutil
 import subprocess
@@ -19,8 +20,9 @@ from config import (
     SNMPWALK_PROBE_TIMEOUT,
     SNMPWALK_RETRIES,
     SNMP_WALK_OID,
-    VALIDATION_RETRIES,
     VALIDATION_RETRY_DELAY,
+    WALK_FQDN_ATTEMPTS,
+    WALK_IP_ATTEMPTS,
     get_auth_protocol,
     get_priv_protocol,
 )
@@ -48,14 +50,32 @@ class SNMPValidator:
         if not hosts:
             return False
         for addr in hosts:
-            if self._validate_snmp_walk_one(addr, user, auth, priv, engine_id):
+            attempts = WALK_IP_ATTEMPTS if self._addr_is_ip(addr) else WALK_FQDN_ATTEMPTS
+            kind = "IP" if self._addr_is_ip(addr) else "FQDN"
+            print(f"      Walk {kind} {addr} ({attempts} attempt(s))...", file=sys.stderr)
+            if self._validate_snmp_walk_one(addr, user, auth, priv, engine_id, attempts):
                 return True
-            if addr != hosts[-1]:
-                print(f"      Walk {addr} failed; trying next endpoint...", file=sys.stderr)
         return False
 
+    @staticmethod
+    def _addr_is_ip(value: str) -> bool:
+        text = (value or "").strip()
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1]
+        try:
+            ipaddress.ip_address(text)
+            return True
+        except ValueError:
+            return False
+
     def _validate_snmp_walk_one(
-        self, ip: str, user: str, auth: str, priv: str, engine_id: Optional[str] = None
+        self,
+        ip: str,
+        user: str,
+        auth: str,
+        priv: str,
+        engine_id: Optional[str] = None,
+        max_attempts: int = WALK_FQDN_ATTEMPTS,
     ) -> bool:
         # Pick a walk backend. If none is installed, offer native Net-SNMP
         # (Linux/macOS) or fall back to pip/vendor pysnmp (Windows too).
@@ -77,10 +97,10 @@ class SNMPValidator:
             print("      SNMP walk tool installed.", file=sys.stderr)
 
         # cz-configd / snmpd may still be reloading; retry a few times.
-        for attempt in range(1, VALIDATION_RETRIES + 1):
+        for attempt in range(1, max_attempts + 1):
             if attempt > 1:
                 print(
-                    f"      Retrying SNMP walk (attempt {attempt}/{VALIDATION_RETRIES})...",
+                    f"      Retrying SNMP walk (attempt {attempt}/{max_attempts})...",
                     file=sys.stderr,
                 )
                 time.sleep(VALIDATION_RETRY_DELAY)
@@ -136,7 +156,7 @@ class SNMPValidator:
             except subprocess.TimeoutExpired:
                 print(f"      SNMP walk timed out after {SNMPWALK_TIMEOUT}s", file=sys.stderr)
 
-        print(f"      SNMP walk validation failed after {VALIDATION_RETRIES} attempts", file=sys.stderr)
+        print(f"      SNMP walk validation failed after {max_attempts} attempts", file=sys.stderr)
         return False
 
     def _cached_detect(self) -> Tuple[Optional[str], Optional[str]]:

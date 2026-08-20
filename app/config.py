@@ -154,8 +154,10 @@ SNMPWALK_HELP_TIMEOUT = 3
 # ============================================================================
 # The appliance SNMP daemon needs time to reload after config push.
 # A brief delay + retry tolerance handles this without being excessive.
-VALIDATION_RETRIES = 3
 VALIDATION_RETRY_DELAY = 3
+# Step 8 / SNMP-Walk: attempts per FQDN then per IP (NAT: name often fails UDP).
+WALK_FQDN_ATTEMPTS = 2
+WALK_IP_ATTEMPTS = 2
 
 # ============================================================================
 # SNMP Daemon Reload Wait (seconds)

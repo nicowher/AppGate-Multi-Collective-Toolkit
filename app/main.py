@@ -387,7 +387,7 @@ def main() -> None:
         time.sleep(SNMP_RELOAD_DELAY)
         for target in _ok(selected):
             ok = validator.validate_snmp_walk(
-                target.ssh_endpoints(),
+                target.walk_endpoints(),
                 user,
                 inputs["snmp_auth"],
                 inputs["snmp_priv"],

@@ -26,6 +26,24 @@ from utils import REPO_ROOT, is_valid_host, load_credentials
 CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
 
 
+def _single_walk_hosts(creds: dict, typed: str) -> list:
+    """If the typed FQDN matches a collective, also try that Controller's agip."""
+    hosts = [typed]
+    raw = creds.get("collectives")
+    items = raw if isinstance(raw, list) else []
+    if not items and (creds.get("fqdn") or creds.get("agip")):
+        items = [{"fqdn": creds.get("fqdn"), "agip": creds.get("agip")}]
+    typed_l = typed.strip().lower()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        fqdn = str(item.get("fqdn") or item.get("hostname") or "").strip()
+        agip = str(item.get("agip") or "").strip()
+        if fqdn.lower() == typed_l and agip and agip not in hosts:
+            hosts.insert(0, agip)
+    return hosts
+
+
 def _snmp_creds(creds: dict):
     user = _require(
         creds,
@@ -57,9 +75,10 @@ def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
             "Appliance FQDN or IP to walk",
             validator=is_valid_host,
         )
-        # print(f"DEBUG walk-single: target={ip}")
-        print(f"\n      SNMP walk {ip}...")
-        ok = validator.validate_snmp_walk(ip, user, auth, priv)
+        hosts = _single_walk_hosts(creds, ip)
+        # print(f"DEBUG walk-single: hosts={hosts}")
+        print(f"\n      SNMP walk {hosts}...")
+        ok = validator.validate_snmp_walk(hosts, user, auth, priv)
         print(f"      {ip}: walk {'PASSED' if ok else 'FAILED'}")
         if not ok:
             any_fail = True
@@ -118,7 +137,8 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     for target in selected:
         ok = validator.validate_snmp_walk(
             # Controllers: FQDN then credentials agip. Gateways: FQDN only.
-            target.ssh_endpoints(), user, auth, priv, engine_id=target.engine_id or None
+            # IP first (NAT), then FQDN. Gateway never uses Controller agip.
+            target.walk_endpoints(), user, auth, priv, engine_id=target.engine_id or None
         )
         target.walk_ok = ok
         print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")

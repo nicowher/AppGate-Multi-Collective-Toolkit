@@ -43,18 +43,35 @@ class Target:
         out: List[str] = []
         if self.ssh_fqdn:
             out.append(self.ssh_fqdn)
-        use_cfg_ip = bool(self.collective_ip) and (
-            "controller" in self.functions
-            or (
-                self.collective_fqdn
-                and self.ssh_fqdn
-                and self.ssh_fqdn.lower() == self.collective_fqdn.lower()
-            )
-        )
-        if use_cfg_ip and self.collective_ip not in out:
+        if self._is_controller_box() and self.collective_ip and self.collective_ip not in out:
             out.append(self.collective_ip)
         if self.ssh_ip and self.ssh_ip not in out:
             out.append(self.ssh_ip)
+        return out
+
+    def _is_controller_box(self) -> bool:
+        return "controller" in self.functions or (
+            bool(self.collective_fqdn)
+            and bool(self.ssh_fqdn)
+            and self.ssh_fqdn.lower() == self.collective_fqdn.lower()
+        )
+
+    def walk_endpoints(self) -> List[str]:
+        """SNMP UDP: private IP first (NAT FQDNs often fail), then FQDN.
+
+        Gateway: ssh_ip then FQDN. Never the Controller agip.
+        Controller: credentials agip then FQDN.
+        """
+        out: List[str] = []
+        # print(f"DEBUG walk_endpoints: controller={self._is_controller_box()} ip={self.ssh_ip} fqdn={self.ssh_fqdn}")
+        if self._is_controller_box():
+            for host in (self.collective_ip, self.ssh_ip, self.ssh_fqdn):
+                if host and host not in out:
+                    out.append(host)
+        else:
+            for host in (self.ssh_ip, self.ssh_fqdn):
+                if host and host not in out:
+                    out.append(host)
         return out
 
 
