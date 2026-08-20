@@ -89,10 +89,9 @@ USM_SED_RETRIES = 3
 USM_RECREATE_WAITS = 5
 # Accepted answers for yes/no prompts (Add another Controller, Walk another IP).
 YES_ANSWERS = ("y", "yes")
-# 6.7 health values we will not SSH or configure.
+# 6.7 health values we will not SSH or configure. "error" is allowed (still push).
 APPLIANCE_SKIP_STATUS = (
     "offline",
-    "error",
     "not active",
     "not_active",
     "inactive",

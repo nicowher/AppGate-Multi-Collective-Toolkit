@@ -35,15 +35,14 @@ class Target:
         return f"{self.collective}.{host}"
 
     def ssh_endpoints(self) -> List[str]:
-        """FQDN first; configured collective IP if FQDN is NAT'd / not SSH-able.
+        """FQDN first, then IPs if SSH to the name fails (NAT/DNS).
 
-        Controller boxes: credentials agip is the SSH fallback.
-        Gateways: only FQDN (do not SSH the Controller IP by mistake).
+        Controller: credentials agip. Gateway: appliance ssh_ip (never the
+        Controller IP).
         """
         out: List[str] = []
         if self.ssh_fqdn:
             out.append(self.ssh_fqdn)
-        # print(f"DEBUG ssh_endpoints: fqdn={self.ssh_fqdn} cfg_ip={self.collective_ip} fn={self.functions}")
         use_cfg_ip = bool(self.collective_ip) and (
             "controller" in self.functions
             or (
@@ -54,7 +53,7 @@ class Target:
         )
         if use_cfg_ip and self.collective_ip not in out:
             out.append(self.collective_ip)
-        if not out and self.ssh_ip:
+        if self.ssh_ip and self.ssh_ip not in out:
             out.append(self.ssh_ip)
         return out
 

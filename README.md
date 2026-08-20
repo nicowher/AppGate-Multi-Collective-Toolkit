@@ -122,7 +122,7 @@ python -m unittest tests.test_snmp_hashgen
 | `SNMP_MIN_PASSPHRASE_LEN` | Raise to 15 for stricter sites |
 | `ENGINE_ID_TYPE` / `ETH_IFACE` | Type 3 + MAC source |
 | `SSH_CONCURRENCY` | Parallel SSH sessions (default 5) |
-| `APPLIANCE_SKIP_STATUS` | Health values skipped (offline / error / not active) |
+| `APPLIANCE_SKIP_STATUS` | Health values skipped (offline / not active / warning). `error` is still configured. |
 | `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` / `SSH_PORT` | Transport hardening |
 | `APPGATE_*` | API version, port, provider, machineId |
 | `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
