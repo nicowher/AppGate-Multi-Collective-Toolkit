@@ -400,8 +400,21 @@ class AppGateClient:
         response.raise_for_status()
         return response.json()
 
+    @staticmethod
+    def _sanitize_appliance_for_put(appliance: Dict[str, Any]) -> Dict[str, Any]:
+        """GET often expands site to an object; PUT wants a UUID or omits it."""
+        body = dict(appliance)
+        site = body.get("site")
+        if isinstance(site, dict):
+            site_id = site.get("id") or site.get("siteId")
+            if site_id:
+                body["site"] = site_id
+            else:
+                body.pop("site", None)
+        return body
+
     def _put_snmpd_conf(self, appliance: Dict[str, Any], new_conf: str, enabled: bool) -> None:
-        """PUT the whole appliance object with a replaced snmpd.conf blob."""
+        """PUT the appliance with a replaced snmpd.conf blob."""
         existing = appliance.get("snmpServer")
         if not isinstance(existing, dict):
             existing = {}
@@ -412,13 +425,17 @@ class AppGateClient:
             "tcpPort": existing.get("tcpPort", DEFAULT_SNMP_PORT),
             "udpPort": existing.get("udpPort", DEFAULT_SNMP_PORT),
         }
+        body = self._sanitize_appliance_for_put(appliance)
+        url = f"{self.base_url}/appliances/{appliance.get('id')}"
         put_response = requests.put(
-            f"{self.base_url}/appliances/{appliance.get('id')}",
-            headers=self.headers,
-            json=appliance,
-            verify=TLS_VERIFY,
-            timeout=API_TIMEOUT,
+            url, headers=self.headers, json=body, verify=TLS_VERIFY, timeout=API_TIMEOUT
         )
+        if put_response.status_code == 422 and "site" in (put_response.text or "").lower():
+            body.pop("site", None)
+            print("      Retrying PUT without site (422 site privilege/shape).", file=sys.stderr)
+            put_response = requests.put(
+                url, headers=self.headers, json=body, verify=TLS_VERIFY, timeout=API_TIMEOUT
+            )
         if put_response.status_code != 200:
             body_preview = (put_response.text or "")[:500]
             raise RuntimeError(
