@@ -83,7 +83,7 @@ SSH_PORT = 22
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
 # Print a JSON debug report at the end (no passwords/tokens). Paste it back for review.
-DEBUG = True
+DEBUG = False
 SNMPD_STOP_RETRIES = 5
 USM_SED_RETRIES = 3
 USM_RECREATE_WAITS = 5
