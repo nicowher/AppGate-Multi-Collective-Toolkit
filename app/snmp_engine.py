@@ -53,14 +53,19 @@ class SNMPEngineFetcher:
             return [host] if host else []
         return [h for h in host if h]
 
-    def get_engine_id(self, host: Union[str, Sequence[str]]) -> str:
-        """Step 4: SSH FQDN first, then IP. Restart snmpd, read oldEngineID, match MAC."""
+    def get_engine_id(
+        self, host: Union[str, Sequence[str]], *, restart_snmpd: bool = True
+    ) -> str:
+        """Step 4: SSH FQDN first, then IP. Read oldEngineID, match MAC.
+
+        restart_snmpd=False skips the snmpd bounce (used for DRY_RUN preview).
+        """
         if not self.ssh_user or not self.ssh_password:
             raise ValueError("SSH credentials are required to retrieve the Engine ID")
         addrs = self._hosts(host)
         last = None
         for i, addr in enumerate(addrs):
-            engine = self._ssh_query_engine_id(addr)
+            engine = self._ssh_query_engine_id(addr, restart_snmpd=restart_snmpd)
             if engine:
                 return engine
             last = addr
@@ -259,16 +264,27 @@ class SNMPEngineFetcher:
                     pass
         return None
 
-    def _ssh_query_engine_id(self, ip: str) -> Optional[str]:
-        return self._with_ssh(ip, self._configure_and_read_engine_id)
+    def _ssh_query_engine_id(self, ip: str, *, restart_snmpd: bool = True) -> Optional[str]:
+        def _reader(client: paramiko.SSHClient) -> Optional[str]:
+            return self._configure_and_read_engine_id(client, restart_snmpd=restart_snmpd)
 
-    def _configure_and_read_engine_id(self, client: paramiko.SSHClient) -> Optional[str]:
-        # 1) restart so snmpd picks up engineIDType 3 from cz-configd
-        print(f"      Restarting snmpd so it applies engineIDType {ENGINE_ID_TYPE}...", file=sys.stderr)
-        if not self._restart_snmpd(client):
-            print("      snmpd restart failed.", file=sys.stderr)
-            return None
-        time.sleep(SNMP_RELOAD_DELAY)
+        return self._with_ssh(ip, _reader)
+
+    def _configure_and_read_engine_id(
+        self, client: paramiko.SSHClient, *, restart_snmpd: bool = True
+    ) -> Optional[str]:
+        # 1) restart so snmpd picks up engineIDType 3 from cz-configd (skipped in DRY_RUN)
+        if restart_snmpd:
+            print(
+                f"      Restarting snmpd so it applies engineIDType {ENGINE_ID_TYPE}...",
+                file=sys.stderr,
+            )
+            if not self._restart_snmpd(client):
+                print("      snmpd restart failed.", file=sys.stderr)
+                return None
+            time.sleep(SNMP_RELOAD_DELAY)
+        else:
+            print("      Reading existing oldEngineID (no snmpd restart)...", file=sys.stderr)
 
         # 2) oldEngineID is written to persistent conf after a clean start
         raw = self._sudo(client, f"grep -E '^oldEngineID' {SNMP_PERSISTENT_CONF} | tail -n 1")

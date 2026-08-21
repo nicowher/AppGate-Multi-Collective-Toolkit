@@ -36,6 +36,7 @@ from config import (
     SNMP_RELOAD_DELAY,
     SSH_CONCURRENCY,
     TLS_VERIFY,
+    REPORTS_DIRNAME,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
@@ -269,12 +270,9 @@ def main() -> None:
 
         # Lab TLS/SSH defaults print a DISA warning; flip TLS_VERIFY at bottom of config.py.
         warn_insecure_transport()
-        if DRY_RUN:
-            print(
-                "\n*** DRY_RUN is ON — no API pin/push, no USM purge, no walk. "
-                "Login, inventory, engine-ID read, and hash preview still run. ***\n",
-                file=sys.stderr,
-            )
+        # DRY_RUN from config is the default; the prompt before exclude can override to True.
+        dry_run = DRY_RUN
+        # print(f"DEBUG step0: DRY_RUN={DRY_RUN} WRITE_RUN_REPORT={WRITE_RUN_REPORT}")
         engine_fetcher = SNMPEngineFetcher(ssh_user, ssh_pass)
         hashgen = SNMPHashGenerator()
         validator = SNMPValidator()
@@ -316,143 +314,94 @@ def main() -> None:
         if not inventory:
             raise ValueError("No activated appliances with an SSH address were found")
         print(f"      Found {len(inventory)} selectable appliance(s)")
+
+        # Dry-run choice before exclude so the operator sees the list first.
+        if dry_run:
+            print(
+                "\n      DRY_RUN is set in config.py — no pin/push/purge/walk will run.",
+                file=sys.stderr,
+            )
+        else:
+            answer = input(
+                "\n      Dry-run only (preview engine IDs/hashes, no changes)? [y/N]: "
+            ).strip().lower()
+            if answer in YES_ANSWERS:
+                dry_run = True
+        if dry_run:
+            print(
+                "\n*** DRY_RUN is ON — no API pin/push, no USM purge, no walk, "
+                "no snmpd restart. Login, inventory, engine-ID read, and hash preview still run. ***\n",
+                file=sys.stderr,
+            )
+
         selected = prompt_exclusions(inventory)
         if not selected:
             raise ValueError("Nothing left to configure after exclusions")
         print(f"      Selected {len(selected)} appliance(s)")
         # print("DEBUG step2:", [t.label() for t in selected])
 
-        # --- Step 3: PUT engineIDType 3 so SSH later reads a MAC-based engine ID ---
-        print("\n[3/8] Pinning engineIDType via API...")
-        if DRY_RUN:
-            for target in _ok(selected):
-                print(f"      {target.label()}: would set engineIDType {ENGINE_ID_TYPE}")
-        else:
-            def _pin(target: Target, client: AppGateClient) -> None:
-                client.ensure_engine_id_type3(target.appliance_id)
-                print(f"      {target.label()}: engineIDType set")
+        _run_phases_3_to_8(
+            selected=selected,
+            clients=clients,
+            engine_fetcher=engine_fetcher,
+            hashgen=hashgen,
+            validator=validator,
+            user=user,
+            snmp_auth=inputs["snmp_auth"],
+            snmp_priv=inputs["snmp_priv"],
+            rouser_line=rouser_line,
+            dry_run=dry_run,
+        )
 
-            _api_by_collective(_ok(selected), clients, _pin)
-            time.sleep(SNMP_RELOAD_DELAY)
-
-        # --- Step 4: restart snmpd, read oldEngineID, check RFC 3411 type 3 vs eth0 MAC ---
-        # Read-only enough for dry-run preview (engine ID + hash). Restarts snmpd briefly.
-        print(f"\n[4/8] SSH engine ID (up to {SSH_CONCURRENCY} at a time)...")
-
-        def _ssh_engine(target: Target) -> None:
-            if target.status == "failed":
-                return
-            engine_id = engine_fetcher.get_engine_id(target.ssh_endpoints())
-            if engine_id.lower().startswith("0x"):
-                engine_id = engine_id[2:]
-            target.engine_id = engine_id
-            print(f"      {target.label()}: engine {engine_id}")
-
-        _run_ssh_batch(_ok(selected), _ssh_engine, SSH_CONCURRENCY)
-        if not _ok(selected):
-            print("      No appliances left after SSH engine-ID pass.", file=sys.stderr)
-
-        # --- Step 5: RFC 3414 localize auth/priv against that box's engine ID ---
-        print("\n[5/8] Localizing SNMPv3 keys...")
-        for target in _ok(selected):
-            try:
-                data = hashgen.generate_hashes(
-                    user, inputs["snmp_auth"], inputs["snmp_priv"], target.engine_id
-                )
-                target.auth_hash = data["hashes"]["auth"]
-                target.priv_hash = data["hashes"]["priv"]
-                print(f"      {target.label()}: hashed")
-            except Exception as exc:
-                _fail(target, f"hash: {exc}")
-
-        # --- Step 6: deleteUser then createUser/rouser via the owning Controller ---
-        print("\n[6/8] Pushing SNMPv3 config via each Controller...")
-        if DRY_RUN:
-            for target in _ok(selected):
-                print(
-                    f"      {target.label()}: would deleteUser {user} then createUser "
-                    f"(engine {target.engine_id or '?'})"
-                )
-                target.status = "ok"
-        else:
-            def _push(target: Target, client: AppGateClient) -> None:
-                client.delete_snmp_user(user, appliance_id=target.appliance_id)
-                time.sleep(SNMP_RELOAD_DELAY)
-                client.update_snmp_config(
-                    user,
-                    target.auth_hash,
-                    target.priv_hash,
-                    rouser_line,
-                    appliance_id=target.appliance_id,
-                )
-                target.status = "ok"
-                print(f"      {target.label()}: config pushed")
-
-            _api_by_collective(_ok(selected), clients, _push)
-
-        # --- Step 7: delete persistent usmUser so snmpd applies createUser on restart ---
-        print(f"\n[7/8] SSH purge leftover usmUser (up to {SSH_CONCURRENCY} at a time)...")
-        if DRY_RUN:
-            for target in _ok(selected):
-                print(f"      {target.label()}: would purge persistent usmUser {user}")
-        else:
-            def _ssh_purge(target: Target) -> None:
-                engine_fetcher.purge_persistent_user(
-                    target.ssh_endpoints(), user, keep_hash=target.auth_hash
-                )
-                print(f"      {target.label()}: persistent USM purged")
-
-            _run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY)
-
-        # --- Step 8: authPriv walk; cz-configd may need SNMP_RELOAD_DELAY first ---
-        print("\n[8/8] Validating SNMP walks...")
-        if DRY_RUN:
-            for target in _ok(selected):
-                print(f"      {target.label()}: would walk {target.walk_endpoints()}")
-                target.walk_ok = None
-        else:
-            time.sleep(SNMP_RELOAD_DELAY)
-            for target in _ok(selected):
-                ok = validator.validate_snmp_walk(
-                    target.walk_endpoints(),
-                    user,
-                    inputs["snmp_auth"],
-                    inputs["snmp_priv"],
-                    engine_id=target.engine_id,
-                )
-                target.walk_ok = ok
-                print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
-                if not ok:
-                    _fail(target, "SNMP walk failed")
-
-        # Localized hashes are for ESXi USM, not the original passphrases.
-        print("\n" + "=" * 60)
-        print("DRY-RUN Preview" if DRY_RUN else "Configuration Summary")
-        print("=" * 60)
-        print(f"User:     {user}")
-        if DRY_RUN:
-            print("Mode:     DRY_RUN (no changes applied)")
-        if rouser_line:
-            print(f"Read-Only:{rouser_line}")
-        current_col: Optional[int] = None
-        for target in selected:
-            if target.collective != current_col:
-                current_col = target.collective
-                print(f"  --- collective {current_col} ---")
-            state = target.status.upper()
-            extra = target.engine_id or target.error
-            host = target.ssh_fqdn or target.ssh_ip
-            print(f"  [{state:<7}] {target.label():<32} {host:<22} {extra}")
-            if target.status == "ok" and target.auth_hash:
-                print(
-                    f"           ESXi: {user}/{target.auth_hash}/{target.priv_hash}/priv"
-                )
-        print("=" * 60)
+        _print_summary(selected, user=user, rouser_line=rouser_line, dry_run=dry_run)
         report = _build_run_report(
-            collectives, inventory, selected, user=user, dry_run=DRY_RUN, started_at=started_at
+            collectives, inventory, selected, user=user, dry_run=dry_run, started_at=started_at
         )
         if WRITE_RUN_REPORT or DEBUG:
             _emit_run_report(report)
+
+        # After dry-run preview, offer a live apply on the same selection (same session).
+        if dry_run and any(t.status == "preview" for t in selected):
+            # print(f"DEBUG: preview_count={sum(1 for t in selected if t.status == 'preview')}")
+            apply = input(
+                "\n      Push config to these appliances now? [y/N]: "
+            ).strip().lower()
+            if apply in YES_ANSWERS:
+                print(
+                    "\n*** Applying config (live run) — pin, push, purge, walk. ***\n",
+                    file=sys.stderr,
+                )
+                for target in selected:
+                    if target.status == "preview":
+                        target.status = "pending"
+                        target.error = ""
+                        target.walk_ok = None
+                live_started = datetime.now(timezone.utc).isoformat()
+                _run_phases_3_to_8(
+                    selected=selected,
+                    clients=clients,
+                    engine_fetcher=engine_fetcher,
+                    hashgen=hashgen,
+                    validator=validator,
+                    user=user,
+                    snmp_auth=inputs["snmp_auth"],
+                    snmp_priv=inputs["snmp_priv"],
+                    rouser_line=rouser_line,
+                    dry_run=False,
+                )
+                _print_summary(selected, user=user, rouser_line=rouser_line, dry_run=False)
+                live_report = _build_run_report(
+                    collectives,
+                    inventory,
+                    selected,
+                    user=user,
+                    dry_run=False,
+                    started_at=live_started,
+                )
+                if WRITE_RUN_REPORT or DEBUG:
+                    _emit_run_report(live_report)
+
+        # Exit 1 only if something failed (preview-only is success).
         if any(t.status == "failed" for t in selected):
             sys.exit(1)
 
@@ -462,6 +411,154 @@ def main() -> None:
     except Exception as exc:
         print(f"\nError: {exc}", file=sys.stderr)
         sys.exit(1)
+
+
+def _run_phases_3_to_8(
+    *,
+    selected: List[Target],
+    clients: ClientMap,
+    engine_fetcher: SNMPEngineFetcher,
+    hashgen: SNMPHashGenerator,
+    validator: SNMPValidator,
+    user: str,
+    snmp_auth: str,
+    snmp_priv: str,
+    rouser_line: str,
+    dry_run: bool,
+) -> None:
+    """Steps 3–8.
+
+    dry_run=True:  would-print for 3/6/7/8; step 4 reads engine ID without snmpd restart.
+    dry_run=False: pin, restart snmpd + read engine ID, hash, push, purge, walk.
+    """
+    # --- Step 3: PUT engineIDType 3 ---
+    print("\n[3/8] Pinning engineIDType via API...")
+    if dry_run:
+        for target in _ok(selected):
+            print(f"      {target.label()}: would set engineIDType {ENGINE_ID_TYPE}")
+    else:
+        def _pin(target: Target, client: AppGateClient) -> None:
+            client.ensure_engine_id_type3(target.appliance_id)
+            print(f"      {target.label()}: engineIDType set")
+
+        _api_by_collective(_ok(selected), clients, _pin)
+        time.sleep(SNMP_RELOAD_DELAY)
+
+    # --- Step 4: engine ID (no snmpd restart in dry-run) ---
+    print(f"\n[4/8] SSH engine ID (up to {SSH_CONCURRENCY} at a time)...")
+
+    def _ssh_engine(target: Target) -> None:
+        if target.status == "failed":
+            return
+        engine_id = engine_fetcher.get_engine_id(
+            target.ssh_endpoints(), restart_snmpd=not dry_run
+        )
+        if engine_id.lower().startswith("0x"):
+            engine_id = engine_id[2:]
+        target.engine_id = engine_id
+        print(f"      {target.label()}: engine {engine_id}")
+
+    _run_ssh_batch(_ok(selected), _ssh_engine, SSH_CONCURRENCY)
+    if not _ok(selected):
+        print("      No appliances left after SSH engine-ID pass.", file=sys.stderr)
+
+    # --- Step 5: localize keys ---
+    print("\n[5/8] Localizing SNMPv3 keys...")
+    for target in _ok(selected):
+        try:
+            data = hashgen.generate_hashes(user, snmp_auth, snmp_priv, target.engine_id)
+            target.auth_hash = data["hashes"]["auth"]
+            target.priv_hash = data["hashes"]["priv"]
+            print(f"      {target.label()}: hashed")
+        except Exception as exc:
+            _fail(target, f"hash: {exc}")
+
+    # --- Step 6: API push ---
+    print("\n[6/8] Pushing SNMPv3 config via each Controller...")
+    if dry_run:
+        for target in _ok(selected):
+            print(
+                f"      {target.label()}: would deleteUser {user} then createUser "
+                f"(engine {target.engine_id or '?'})"
+            )
+            target.status = "preview"
+    else:
+        def _push(target: Target, client: AppGateClient) -> None:
+            client.delete_snmp_user(user, appliance_id=target.appliance_id)
+            time.sleep(SNMP_RELOAD_DELAY)
+            client.update_snmp_config(
+                user,
+                target.auth_hash,
+                target.priv_hash,
+                rouser_line,
+                appliance_id=target.appliance_id,
+            )
+            target.status = "ok"
+            print(f"      {target.label()}: config pushed")
+
+        _api_by_collective(_ok(selected), clients, _push)
+
+    # --- Step 7: purge persistent USM ---
+    print(f"\n[7/8] SSH purge leftover usmUser (up to {SSH_CONCURRENCY} at a time)...")
+    if dry_run:
+        for target in _ok(selected):
+            print(f"      {target.label()}: would purge persistent usmUser {user}")
+    else:
+        def _ssh_purge(target: Target) -> None:
+            engine_fetcher.purge_persistent_user(
+                target.ssh_endpoints(), user, keep_hash=target.auth_hash
+            )
+            print(f"      {target.label()}: persistent USM purged")
+
+        _run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY)
+
+    # --- Step 8: walk ---
+    print("\n[8/8] Validating SNMP walks...")
+    if dry_run:
+        for target in _ok(selected):
+            print(f"      {target.label()}: would walk {target.walk_endpoints()}")
+            target.walk_ok = None
+    else:
+        time.sleep(SNMP_RELOAD_DELAY)
+        for target in _ok(selected):
+            ok = validator.validate_snmp_walk(
+                target.walk_endpoints(),
+                user,
+                snmp_auth,
+                snmp_priv,
+                engine_id=target.engine_id,
+            )
+            target.walk_ok = ok
+            print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
+            if not ok:
+                _fail(target, "SNMP walk failed")
+
+
+def _print_summary(
+    selected: List[Target], *, user: str, rouser_line: str, dry_run: bool
+) -> None:
+    print("\n" + "=" * 60)
+    print("DRY-RUN Preview" if dry_run else "Configuration Summary")
+    print("=" * 60)
+    print(f"User:     {user}")
+    if dry_run:
+        print("Mode:     DRY_RUN (no changes applied)")
+    if rouser_line:
+        print(f"Read-Only:{rouser_line}")
+    current_col: Optional[int] = None
+    for target in selected:
+        if target.collective != current_col:
+            current_col = target.collective
+            print(f"  --- collective {current_col} ---")
+        state = target.status.upper()
+        extra = target.engine_id or target.error
+        host = target.ssh_fqdn or target.ssh_ip
+        print(f"  [{state:<7}] {target.label():<32} {host:<22} {extra}")
+        if target.status == "ok" and target.auth_hash:
+            print(f"           ESXi: {user}/{target.auth_hash}/{target.priv_hash}/priv")
+        elif target.status == "preview" and target.auth_hash:
+            print(f"           ESXi: {user}/{target.auth_hash}/{target.priv_hash}/priv")
+    print("=" * 60)
 
 
 def _build_run_report(
@@ -507,39 +604,40 @@ def _build_run_report(
         "inventory_count": len(inventory),
         "selected_count": len(selected),
         "ok_count": sum(1 for t in selected if t.status == "ok"),
+        "preview_count": sum(1 for t in selected if t.status == "preview"),
         "failed_count": sum(1 for t in selected if t.status == "failed"),
         "targets": [],
     }
     for t in selected:
-        report["targets"].append(
-            {
-                "collective": t.collective,
-                "label": t.label(),
-                "appliance_id": t.appliance_id,
-                "hostname": t.hostname,
-                "ssh_fqdn": t.ssh_fqdn,
-                "ssh_ip": t.ssh_ip,
-                "walk_endpoints": t.walk_endpoints(),
-                "ssh_endpoints": t.ssh_endpoints(),
-                "functions": t.functions,
-                "health": t.health,
-                "engine_id": t.engine_id,
-                "engine_id_len": len(t.engine_id),
-                "auth_hash_len": len(t.auth_hash),
-                "priv_hash_len": len(t.priv_hash),
-                "auth_priv_hash_same": bool(t.auth_hash) and t.auth_hash == t.priv_hash,
-                "status": t.status,
-                "error": t.error,
-                "walk_ok": t.walk_ok,
-                "planned_actions": [
-                    f"engineIDType {ENGINE_ID_TYPE}",
-                    f"deleteUser {user}",
-                    f"createUser {user} {SNMP_AUTH_PROTOCOL}/AES (localized)",
-                    f"purge persistent usmUser {user}",
-                    f"walk {t.walk_endpoints()}",
-                ],
-            }
-        )
+        entry: Dict[str, Any] = {
+            "collective": t.collective,
+            "label": t.label(),
+            "appliance_id": t.appliance_id,
+            "hostname": t.hostname,
+            "ssh_fqdn": t.ssh_fqdn,
+            "ssh_ip": t.ssh_ip,
+            "walk_endpoints": t.walk_endpoints(),
+            "ssh_endpoints": t.ssh_endpoints(),
+            "functions": t.functions,
+            "health": t.health,
+            "engine_id": t.engine_id,
+            "engine_id_len": len(t.engine_id),
+            "auth_hash_len": len(t.auth_hash),
+            "priv_hash_len": len(t.priv_hash),
+            "auth_priv_hash_same": bool(t.auth_hash) and t.auth_hash == t.priv_hash,
+            "status": t.status,
+            "error": t.error,
+            "walk_ok": t.walk_ok,
+        }
+        if dry_run:
+            entry["planned_actions"] = [
+                f"engineIDType {ENGINE_ID_TYPE}",
+                f"deleteUser {user}",
+                f"createUser {user} {SNMP_AUTH_PROTOCOL}/AES (localized)",
+                f"purge persistent usmUser {user}",
+                f"walk {t.walk_endpoints()}",
+            ]
+        report["targets"].append(entry)
     return report
 
 
@@ -551,7 +649,7 @@ def _emit_run_report(report: Dict[str, Any]) -> None:
     print("----- END RUN REPORT -----")
     if not WRITE_RUN_REPORT:
         return
-    reports_dir = os.path.join(REPO_ROOT, "reports")
+    reports_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME)
     try:
         os.makedirs(reports_dir, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

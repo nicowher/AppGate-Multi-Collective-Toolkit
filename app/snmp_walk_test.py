@@ -15,6 +15,7 @@ from config import (
     SNMP_MIN_PASSPHRASE_LEN,
     SNMP_NAME_RE,
     SNMP_PRIV_PROTOCOL,
+    REPORTS_DIRNAME,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
@@ -179,7 +180,7 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
         print(text)
         print("----- END RUN REPORT -----")
         if WRITE_RUN_REPORT:
-            reports_dir = os.path.join(REPO_ROOT, "reports")
+            reports_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME)
             try:
                 os.makedirs(reports_dir, exist_ok=True)
                 stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

@@ -86,8 +86,10 @@ SSH_CONCURRENCY = 5
 DEBUG = False
 # Print + write a JSON end-of-run report (no passwords/tokens).
 WRITE_RUN_REPORT = True
-# When True: login/list/exclude + optional engine-ID read; no API pin/push, no USM purge, no walk.
+# When True: first pass is dry-run without asking. Prompt can still enable dry-run when False.
 DRY_RUN = False
+# Directory for run-*.json / dryrun-*.json / walk-*.json (under repo root).
+REPORTS_DIRNAME = "reports"
 SNMPD_STOP_RETRIES = 5
 USM_SED_RETRIES = 3
 USM_RECREATE_WAITS = 5
