@@ -4,12 +4,12 @@ Phase-aligned across collectives (array order = 1, 2, 3, ...):
 
   1. Login every Controller (own API account / token)
   2. Pull appliances from every successful login; one exclude prompt
-  3. API engineIDType 3 (serialized per Controller)
-  4. SSH engine IDs (shared pool)
-  5. Localize hashes
-  6. API deleteUser + createUser (owning client only, serialized per Controller)
-  7. SSH purge usmUser
-  8. Walk every pushed device
+  3. API engineIDType 3 (serialized per Controller)  [skipped if DRY_RUN]
+  4. SSH engine IDs (shared pool)                     [read-only; runs in dry-run]
+  5. Localize hashes                                 [runs in dry-run]
+  6. API deleteUser + createUser                     [skipped if DRY_RUN]
+  7. SSH purge usmUser                               [skipped if DRY_RUN]
+  8. Walk every pushed device                        [skipped if DRY_RUN]
 """
 import json
 import os
@@ -17,6 +17,7 @@ import platform
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from appgate import AppGateClient
@@ -24,6 +25,7 @@ from config import (
     APPGATE_API_VERSION,
     CREDENTIALS_FILENAME,
     DEBUG,
+    DRY_RUN,
     ENGINE_ID_TYPE,
     ETH_IFACE,
     SNMP_AUTH_PROTOCOL,
@@ -34,6 +36,7 @@ from config import (
     SNMP_RELOAD_DELAY,
     SSH_CONCURRENCY,
     TLS_VERIFY,
+    WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
 )
@@ -266,11 +269,18 @@ def main() -> None:
 
         # Lab TLS/SSH defaults print a DISA warning; flip TLS_VERIFY at bottom of config.py.
         warn_insecure_transport()
+        if DRY_RUN:
+            print(
+                "\n*** DRY_RUN is ON — no API pin/push, no USM purge, no walk. "
+                "Login, inventory, engine-ID read, and hash preview still run. ***\n",
+                file=sys.stderr,
+            )
         engine_fetcher = SNMPEngineFetcher(ssh_user, ssh_pass)
         hashgen = SNMPHashGenerator()
         validator = SNMPValidator()
         user = inputs["snmp_user"]
         rouser_line = f"rouser {inputs['rouser']} priv" if inputs.get("rouser") else ""
+        started_at = datetime.now(timezone.utc).isoformat()
 
         # --- Step 1: one POST /login per Controller; skip a site if login fails ---
         print("\n[1/8] Authenticating to Controller API(s)...")
@@ -314,16 +324,19 @@ def main() -> None:
 
         # --- Step 3: PUT engineIDType 3 so SSH later reads a MAC-based engine ID ---
         print("\n[3/8] Pinning engineIDType via API...")
+        if DRY_RUN:
+            for target in _ok(selected):
+                print(f"      {target.label()}: would set engineIDType {ENGINE_ID_TYPE}")
+        else:
+            def _pin(target: Target, client: AppGateClient) -> None:
+                client.ensure_engine_id_type3(target.appliance_id)
+                print(f"      {target.label()}: engineIDType set")
 
-        def _pin(target: Target, client: AppGateClient) -> None:
-            client.ensure_engine_id_type3(target.appliance_id)
-            print(f"      {target.label()}: engineIDType set")
-
-        _api_by_collective(_ok(selected), clients, _pin)
-        # print("DEBUG step3: pinned", [t.label() for t in _ok(selected)])
-        time.sleep(SNMP_RELOAD_DELAY)
+            _api_by_collective(_ok(selected), clients, _pin)
+            time.sleep(SNMP_RELOAD_DELAY)
 
         # --- Step 4: restart snmpd, read oldEngineID, check RFC 3411 type 3 vs eth0 MAC ---
+        # Read-only enough for dry-run preview (engine ID + hash). Restarts snmpd briefly.
         print(f"\n[4/8] SSH engine ID (up to {SSH_CONCURRENCY} at a time)...")
 
         def _ssh_engine(target: Target) -> None:
@@ -349,61 +362,76 @@ def main() -> None:
                 target.auth_hash = data["hashes"]["auth"]
                 target.priv_hash = data["hashes"]["priv"]
                 print(f"      {target.label()}: hashed")
-            # print(f"DEBUG step5: {target.label()} auth_len={len(target.auth_hash)}")
             except Exception as exc:
                 _fail(target, f"hash: {exc}")
 
         # --- Step 6: deleteUser then createUser/rouser via the owning Controller ---
         print("\n[6/8] Pushing SNMPv3 config via each Controller...")
+        if DRY_RUN:
+            for target in _ok(selected):
+                print(
+                    f"      {target.label()}: would deleteUser {user} then createUser "
+                    f"(engine {target.engine_id or '?'})"
+                )
+                target.status = "ok"
+        else:
+            def _push(target: Target, client: AppGateClient) -> None:
+                client.delete_snmp_user(user, appliance_id=target.appliance_id)
+                time.sleep(SNMP_RELOAD_DELAY)
+                client.update_snmp_config(
+                    user,
+                    target.auth_hash,
+                    target.priv_hash,
+                    rouser_line,
+                    appliance_id=target.appliance_id,
+                )
+                target.status = "ok"
+                print(f"      {target.label()}: config pushed")
 
-        def _push(target: Target, client: AppGateClient) -> None:
-            client.delete_snmp_user(user, appliance_id=target.appliance_id)
-            time.sleep(SNMP_RELOAD_DELAY)
-            client.update_snmp_config(
-                user,
-                target.auth_hash,
-                target.priv_hash,
-                rouser_line,
-                appliance_id=target.appliance_id,
-            )
-            target.status = "ok"
-            print(f"      {target.label()}: config pushed")
-
-        _api_by_collective(_ok(selected), clients, _push)
+            _api_by_collective(_ok(selected), clients, _push)
 
         # --- Step 7: delete persistent usmUser so snmpd applies createUser on restart ---
         print(f"\n[7/8] SSH purge leftover usmUser (up to {SSH_CONCURRENCY} at a time)...")
+        if DRY_RUN:
+            for target in _ok(selected):
+                print(f"      {target.label()}: would purge persistent usmUser {user}")
+        else:
+            def _ssh_purge(target: Target) -> None:
+                engine_fetcher.purge_persistent_user(
+                    target.ssh_endpoints(), user, keep_hash=target.auth_hash
+                )
+                print(f"      {target.label()}: persistent USM purged")
 
-        def _ssh_purge(target: Target) -> None:
-            engine_fetcher.purge_persistent_user(
-                target.ssh_endpoints(), user, keep_hash=target.auth_hash
-            )
-            print(f"      {target.label()}: persistent USM purged")
-
-        _run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY)
+            _run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY)
 
         # --- Step 8: authPriv walk; cz-configd may need SNMP_RELOAD_DELAY first ---
         print("\n[8/8] Validating SNMP walks...")
-        time.sleep(SNMP_RELOAD_DELAY)
-        for target in _ok(selected):
-            ok = validator.validate_snmp_walk(
-                target.walk_endpoints(),
-                user,
-                inputs["snmp_auth"],
-                inputs["snmp_priv"],
-                engine_id=target.engine_id,
-            )
-            target.walk_ok = ok
-            print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
-            # print(f"DEBUG step8: {target.label()} walk_ok={ok}")
-            if not ok:
-                _fail(target, "SNMP walk failed")
+        if DRY_RUN:
+            for target in _ok(selected):
+                print(f"      {target.label()}: would walk {target.walk_endpoints()}")
+                target.walk_ok = None
+        else:
+            time.sleep(SNMP_RELOAD_DELAY)
+            for target in _ok(selected):
+                ok = validator.validate_snmp_walk(
+                    target.walk_endpoints(),
+                    user,
+                    inputs["snmp_auth"],
+                    inputs["snmp_priv"],
+                    engine_id=target.engine_id,
+                )
+                target.walk_ok = ok
+                print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
+                if not ok:
+                    _fail(target, "SNMP walk failed")
 
         # Localized hashes are for ESXi USM, not the original passphrases.
         print("\n" + "=" * 60)
-        print("Configuration Summary")
+        print("DRY-RUN Preview" if DRY_RUN else "Configuration Summary")
         print("=" * 60)
         print(f"User:     {user}")
+        if DRY_RUN:
+            print("Mode:     DRY_RUN (no changes applied)")
         if rouser_line:
             print(f"Read-Only:{rouser_line}")
         current_col: Optional[int] = None
@@ -420,8 +448,11 @@ def main() -> None:
                     f"           ESXi: {user}/{target.auth_hash}/{target.priv_hash}/priv"
                 )
         print("=" * 60)
-        if DEBUG:
-            _print_debug_report(collectives, inventory, selected)
+        report = _build_run_report(
+            collectives, inventory, selected, user=user, dry_run=DRY_RUN, started_at=started_at
+        )
+        if WRITE_RUN_REPORT or DEBUG:
+            _emit_run_report(report)
         if any(t.status == "failed" for t in selected):
             sys.exit(1)
 
@@ -433,10 +464,23 @@ def main() -> None:
         sys.exit(1)
 
 
-def _print_debug_report(
-    collectives: List[Dict[str, str]], inventory: List[Target], selected: List[Target]
-) -> None:
+def _build_run_report(
+    collectives: List[Dict[str, str]],
+    inventory: List[Target],
+    selected: List[Target],
+    *,
+    user: str,
+    dry_run: bool,
+    started_at: str,
+) -> Dict[str, Any]:
+    """Structured end-of-run report. No passwords, tokens, or full localized keys."""
+    finished_at = datetime.now(timezone.utc).isoformat()
     report: Dict[str, Any] = {
+        "script": "main",
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "dry_run": dry_run,
+        "snmp_user": user,
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "collectives": [
@@ -458,6 +502,7 @@ def _print_debug_report(
             "eth_iface": ETH_IFACE,
             "ssh_concurrency": SSH_CONCURRENCY,
             "reload_delay": SNMP_RELOAD_DELAY,
+            "dry_run": dry_run,
         },
         "inventory_count": len(inventory),
         "selected_count": len(selected),
@@ -474,6 +519,8 @@ def _print_debug_report(
                 "hostname": t.hostname,
                 "ssh_fqdn": t.ssh_fqdn,
                 "ssh_ip": t.ssh_ip,
+                "walk_endpoints": t.walk_endpoints(),
+                "ssh_endpoints": t.ssh_endpoints(),
                 "functions": t.functions,
                 "health": t.health,
                 "engine_id": t.engine_id,
@@ -484,11 +531,38 @@ def _print_debug_report(
                 "status": t.status,
                 "error": t.error,
                 "walk_ok": t.walk_ok,
+                "planned_actions": [
+                    f"engineIDType {ENGINE_ID_TYPE}",
+                    f"deleteUser {user}",
+                    f"createUser {user} {SNMP_AUTH_PROTOCOL}/AES (localized)",
+                    f"purge persistent usmUser {user}",
+                    f"walk {t.walk_endpoints()}",
+                ],
             }
         )
-    print("\n----- BEGIN DEBUG REPORT -----")
-    print(json.dumps(report, indent=2))
-    print("----- END DEBUG REPORT -----")
+    return report
+
+
+def _emit_run_report(report: Dict[str, Any]) -> None:
+    """Print JSON report and optionally write reports/run-*.json."""
+    text = json.dumps(report, indent=2)
+    print("\n----- BEGIN RUN REPORT -----")
+    print(text)
+    print("----- END RUN REPORT -----")
+    if not WRITE_RUN_REPORT:
+        return
+    reports_dir = os.path.join(REPO_ROOT, "reports")
+    try:
+        os.makedirs(reports_dir, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        mode = "dryrun" if report.get("dry_run") else "run"
+        path = os.path.join(reports_dir, f"{mode}-{stamp}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.write("\n")
+        print(f"      Report written: {path}", file=sys.stderr)
+    except OSError as exc:
+        print(f"      Could not write report file: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

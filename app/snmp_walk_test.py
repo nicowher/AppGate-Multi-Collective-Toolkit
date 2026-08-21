@@ -15,6 +15,7 @@ from config import (
     SNMP_MIN_PASSPHRASE_LEN,
     SNMP_NAME_RE,
     SNMP_PRIV_PROTOCOL,
+    WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
 )
@@ -22,6 +23,7 @@ from inventory import prompt_exclusions
 from main import _parse_collectives, _require
 from snmp_validate import SNMPValidator
 from utils import REPO_ROOT, is_valid_host, load_credentials
+from datetime import datetime, timezone
 
 CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
 
@@ -145,10 +147,10 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
         if not ok:
             failed += 1
 
-    if DEBUG:
-        print("\n----- BEGIN DEBUG REPORT -----")
-        print(json.dumps({
+    if WRITE_RUN_REPORT or DEBUG:
+        report = {
             "script": "snmp_walk_test",
+            "finished_at": datetime.now(timezone.utc).isoformat(),
             "auth_protocol": SNMP_AUTH_PROTOCOL,
             "priv_protocol": SNMP_PRIV_PROTOCOL,
             "collectives": [
@@ -165,13 +167,28 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
                     "label": t.label(),
                     "ssh_fqdn": t.ssh_fqdn,
                     "ssh_ip": t.ssh_ip,
+                    "walk_endpoints": t.walk_endpoints(),
                     "walk_ok": t.walk_ok,
                 }
                 for t in selected
             ],
             "failed_count": failed,
-        }, indent=2))
-        print("----- END DEBUG REPORT -----")
+        }
+        text = json.dumps(report, indent=2)
+        print("\n----- BEGIN RUN REPORT -----")
+        print(text)
+        print("----- END RUN REPORT -----")
+        if WRITE_RUN_REPORT:
+            reports_dir = os.path.join(REPO_ROOT, "reports")
+            try:
+                os.makedirs(reports_dir, exist_ok=True)
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                path = os.path.join(reports_dir, f"walk-{stamp}.json")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text + "\n")
+                print(f"      Report written: {path}", file=sys.stderr)
+            except OSError as exc:
+                print(f"      Could not write report file: {exc}", file=sys.stderr)
 
     return 1 if failed else 0
 

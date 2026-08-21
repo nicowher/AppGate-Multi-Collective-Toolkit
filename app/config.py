@@ -84,6 +84,10 @@ SSH_PORT = 22
 SSH_CONCURRENCY = 5
 # Print a JSON debug report at the end (no passwords/tokens). Paste it back for review.
 DEBUG = False
+# Print + write a JSON end-of-run report (no passwords/tokens).
+WRITE_RUN_REPORT = True
+# When True: login/list/exclude + optional engine-ID read; no API pin/push, no USM purge, no walk.
+DRY_RUN = False
 SNMPD_STOP_RETRIES = 5
 USM_SED_RETRIES = 3
 USM_RECREATE_WAITS = 5

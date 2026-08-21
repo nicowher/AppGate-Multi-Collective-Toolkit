@@ -21,7 +21,7 @@ Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box;
 
 `SNMP-Walk-<OS>` asks **1) single FQDN/IP** (then *Walk another?*) or **2) pull list from Controller(s)** (same FQDN-first login / exclude as Passwordinator). No SSH and no config push. Health uses `GET /admin/appliances/status` (not the removed `/stats/appliances`).
 
-Set `DEBUG = True` in `app/config.py` to print JSON between `BEGIN DEBUG REPORT` and `END DEBUG REPORT`. Uncomment `# print("DEBUG ...")` for step traces.
+`WRITE_RUN_REPORT = True` (default) prints a JSON run report and writes `reports/run-*.json` (no passwords/tokens). Set `DRY_RUN = True` to preview: login, inventory, engine-ID read, and hashes run; pin/push/purge/walk are skipped. `DEBUG` still enables extra console dump.
 
 Missing Python packages install from `app/vendor/wheels` first (air-gapped), then offer online pip if you allow it.
 
@@ -126,7 +126,9 @@ python -m unittest tests.test_snmp_hashgen
 | `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` / `SSH_PORT` | Transport hardening |
 | `APPGATE_*` | API version, port, provider, machineId |
 | `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
-| `DEBUG` | JSON report at end (see `config.py`) |
+| `WRITE_RUN_REPORT` | Write `reports/run-*.json` at end (default on) |
+| `DRY_RUN` | Preview only: no pin/push/purge/walk |
+| `DEBUG` | Extra console dump (see `config.py`) |
 | `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per IP / per FQDN (default 2) |
 | `SNMPD_STOP_RETRIES` / `USM_SED_RETRIES` / `USM_RECREATE_WAITS` | Persistent USM purge timing |
 | `APPLIANCE_STATUS_PATH` | `GET /appliances/status` (6.3+) |
