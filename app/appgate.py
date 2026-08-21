@@ -321,13 +321,24 @@ class AppGateClient:
         for appliance in raw:
             name = str(appliance.get("name") or appliance.get("id") or "?")
             aid = appliance.get("id") or ""
-            if not aid or appliance.get("activated") is False:
+            if not aid:
+                continue
+            if appliance.get("activated") is False:
+                print(
+                    f"      skip {name}: not activated",
+                    file=sys.stderr,
+                )
                 continue
             health = appliance_health(appliance, status_by_id.get(aid, {}))
             if not is_selectable(health, APPLIANCE_SKIP_STATUS):
+                print(
+                    f"      skip {name}: not healthy (status={health!r})",
+                    file=sys.stderr,
+                )
                 continue
             ssh_fqdn, ssh_ip = appliance_hosts(appliance)
             if not ssh_fqdn and not ssh_ip:
+                print(f"      skip {name}: no FQDN or IP for SSH", file=sys.stderr)
                 continue
             targets.append(
                 Target(
