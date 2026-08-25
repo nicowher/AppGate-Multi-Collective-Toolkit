@@ -37,16 +37,18 @@ One launcher per OS. Keep `README.md` and credentials next to it; Python lives i
 | Linux | `./Passwordinator-Linux.sh` |
 | macOS | `Passwordinator-macOS.command` |
 
-Menu at launch (or pass the number as the first argument):
+Launchers only start `app/main.py`. The Python CLI shows the menu (or takes the first arg):
 
 1. **Passwordinator** — configure appliances  
 2. **Download deps** — prefetch `app/vendor/wheels`  
 3. **SNMP Walk** — validate only  
 
 ```bash
+Passwordinator-Windows.bat
 Passwordinator-Windows.bat 1
 ./Passwordinator-Linux.sh 3
-./Passwordinator-Linux.sh 1 --help   # extra args go to Python
+python app/main.py 2
+python app/main.py walk
 ```
 
 On Linux/macOS: `chmod +x Passwordinator-Linux.sh Passwordinator-macOS.command` once. On macOS, right-click → Open the first time.
@@ -179,7 +181,8 @@ Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algor
 
 | Path | Role |
 | --- | --- |
-| `Passwordinator-<OS>.*` | Unified menu (configure / download deps / walk) |
+| `Passwordinator-<OS>.*` | Starts `app/main.py` (menu + args live in Python) |
+| `app/main.py` | CLI menu + configure workflow (`cli()` / `main()`) |
 | `credentials.example.json` | Empty template |
 | `app/main.py` | Multi-appliance workflow |
 | `app/inventory.py` | Controller list + exclude prompt |

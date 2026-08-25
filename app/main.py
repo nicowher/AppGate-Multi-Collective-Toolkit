@@ -663,5 +663,105 @@ def _emit_run_report(report: Dict[str, Any]) -> None:
         print(f"      Could not write report file: {exc}", file=sys.stderr)
 
 
+def _normalize_menu_choice(raw: str) -> str:
+    text = (raw or "").strip().lower()
+    aliases = {
+        "1": "1",
+        "configure": "1",
+        "passwordinator": "1",
+        "main": "1",
+        "2": "2",
+        "deps": "2",
+        "download": "2",
+        "download-deps": "2",
+        "3": "3",
+        "walk": "3",
+        "snmp": "3",
+        "snmp-walk": "3",
+        "q": "q",
+        "quit": "q",
+        "exit": "q",
+    }
+    return aliases.get(text, "")
+
+
+def _prompt_menu_choice() -> str:
+    print("AppGate SNMPv3 Passwordinator")
+    print()
+    print("  1) Passwordinator  (configure appliances)")
+    print("  2) Download deps   (prefetch vendor wheels)")
+    print("  3) SNMP Walk       (validate only)")
+    print("  Q) Quit")
+    print()
+    while True:
+        choice = _normalize_menu_choice(input("Select 1, 2, 3, or Q: "))
+        if choice:
+            return choice
+        print("Invalid choice.")
+
+
+def _run_selected_tool(choice: str, rest: List[str]) -> int:
+    """Dispatch menu choice. rest is forwarded as sys.argv for the tool."""
+    old_argv = sys.argv[:]
+    try:
+        if choice == "1":
+            sys.argv = [old_argv[0]] + rest
+            main()
+            return 0
+        if choice == "2":
+            from download_deps import main as deps_main
+            sys.argv = [old_argv[0]] + rest
+            deps_main()
+            return 0
+        if choice == "3":
+            from snmp_walk_test import main as walk_main
+            sys.argv = [old_argv[0]] + rest
+            walk_main()
+            return 0
+        return 1
+    except SystemExit as exc:
+        code = exc.code
+        if code is None:
+            return 0
+        if isinstance(code, int):
+            return code
+        return 1
+    finally:
+        sys.argv = old_argv
+
+
+def cli(argv: Optional[List[str]] = None) -> None:
+    """Single entry point for OS launchers: menu or `1|2|3` plus Python args."""
+    args = list(sys.argv[1:] if argv is None else argv)
+    noninteractive = bool(args) and bool(_normalize_menu_choice(args[0]))
+    try:
+        while True:
+            if noninteractive:
+                choice = _normalize_menu_choice(args[0])
+                rest = args[1:]
+            else:
+                choice = _prompt_menu_choice()
+                rest = []
+            if choice == "q":
+                return
+            if not choice:
+                print("Invalid choice. Use 1, 2, 3, or Q.", file=sys.stderr)
+                if noninteractive:
+                    sys.exit(2)
+                continue
+            code = _run_selected_tool(choice, rest)
+            if noninteractive:
+                sys.exit(code)
+            print()
+            again = input("Return to menu? [Y/n]: ").strip().lower()
+            if again in ("n", "no"):
+                if code:
+                    sys.exit(code)
+                return
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user", file=sys.stderr)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    main()
+    cli()
