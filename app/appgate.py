@@ -300,8 +300,18 @@ class AppGateClient:
             return {}
         out: Dict[str, Dict[str, Any]] = {}
         for item in items:
-            if isinstance(item, dict) and item.get("id"):
-                out[item["id"]] = item
+            if not isinstance(item, dict):
+                continue
+            # API may key by id, applianceId, or nest under appliance.
+            aid = (
+                item.get("id")
+                or item.get("applianceId")
+                or item.get("appliance_id")
+            )
+            if not aid and isinstance(item.get("appliance"), dict):
+                aid = item["appliance"].get("id")
+            if aid:
+                out[str(aid)] = item
         return out
 
     def list_targets(
@@ -449,6 +459,20 @@ class AppGateClient:
             )
         if put_response.status_code != 200:
             body_preview = (put_response.text or "")[:500]
+            hint = ""
+            text_l = (put_response.text or "").lower()
+            if put_response.status_code == 422 and "site" in text_l:
+                hint = (
+                    " Hint: this API user can View the appliance but may lack "
+                    "Appliance Edit and/or Site access. In Admin UI check "
+                    "Admin Role → Appliances (Edit) and Sites for this box."
+                )
+            elif put_response.status_code in (401, 403):
+                hint = (
+                    " Hint: check Admin Role privileges (Appliance View + Edit) "
+                    "for this Controller login."
+                )
             raise RuntimeError(
-                f"Failed to update SNMP config (HTTP {put_response.status_code}): {body_preview}"
+                f"Failed to update SNMP config (HTTP {put_response.status_code}): "
+                f"{body_preview}{hint}"
             )

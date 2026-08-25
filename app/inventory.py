@@ -87,15 +87,84 @@ def appliance_functions(appliance: Dict[str, Any]) -> List[str]:
     return found
 
 
+def _first_status_string(obj: Any, depth: int = 0) -> str:
+    """Pull a human status string from nested /appliances/status JSON."""
+    if depth > 4 or obj is None:
+        return ""
+    if isinstance(obj, str) and obj.strip():
+        return obj.strip()
+    if isinstance(obj, dict):
+        for key in (
+            "status",
+            "health",
+            "overallStatus",
+            "applianceStatus",
+            "state",
+            "volume",
+        ):
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                nested = _first_status_string(value, depth + 1)
+                if nested:
+                    return nested
+        for value in obj.values():
+            if isinstance(value, (dict, list)):
+                nested = _first_status_string(value, depth + 1)
+                if nested:
+                    return nested
+    if isinstance(obj, list):
+        for item in obj:
+            nested = _first_status_string(item, depth + 1)
+            if nested:
+                return nested
+    return ""
+
+
 def appliance_health(appliance: Dict[str, Any], stats: Dict[str, Any]) -> str:
-    """Best-effort health from GET /appliances/status (not the removed /stats/appliances)."""
-    for key in ("status", "health"):
-        value = stats.get(key) or appliance.get(key)
-        if value:
-            return str(value)
+    """Map GET /appliances/status to Admin UI labels (6.7).
+
+    Docs: Healthy, Busy, Warning, Error, Offline, Not Active.
+    """
+    for source in (stats, appliance):
+        if not isinstance(source, dict):
+            continue
+        found = _first_status_string(source)
+        if found:
+            return _normalize_health_label(found)
     if appliance.get("activated") is False:
         return "not active"
-    return "unknown"
+    return "n/a"
+
+
+def _normalize_health_label(raw: str) -> str:
+    """Normalize API strings to short lowercase labels for the table."""
+    text = raw.strip().lower().replace("_", " ")
+    aliases = {
+        "healthy": "healthy",
+        "ok": "healthy",
+        "up": "healthy",
+        "busy": "busy",
+        "warning": "warning",
+        "warn": "warning",
+        "error": "error",
+        "unhealthy": "error",
+        "offline": "offline",
+        "down": "offline",
+        "not active": "not active",
+        "notactive": "not active",
+        "inactive": "not active",
+        "n/a": "n/a",
+        "unknown": "n/a",
+        "na": "n/a",
+    }
+    if text in aliases:
+        return aliases[text]
+    for key, label in aliases.items():
+        if key in text:
+            return label
+    return text[:24]
 
 
 def _is_ip(value: str) -> bool:

@@ -1,5 +1,8 @@
 #!/bin/sh
 # Unified launcher: Passwordinator, Download-Deps, or SNMP-Walk.
+# Usage (Terminal):
+#   ./Passwordinator-macOS.command              -> menu
+#   ./Passwordinator-macOS.command 1 [args...]  -> app/main.py args
 cd "$(dirname "$0")"
 
 run_py() {
@@ -9,6 +12,27 @@ run_py() {
     python "$@"
   fi
 }
+
+run_choice() {
+  choice=$1
+  shift
+  case "$choice" in
+    1) run_py app/main.py "$@" ;;
+    2) run_py app/download_deps.py "$@" ;;
+    3) run_py app/snmp_walk_test.py "$@" ;;
+    *)
+      echo "Invalid choice: $choice (use 1, 2, or 3)" >&2
+      return 1
+      ;;
+  esac
+}
+
+if [ -n "$1" ]; then
+  choice=$1
+  shift
+  run_choice "$choice" "$@"
+  exit $?
+fi
 
 while true; do
   clear 2>/dev/null || true
@@ -22,9 +46,7 @@ while true; do
   printf "Select 1, 2, 3, or Q: "
   read -r choice
   case "$choice" in
-    1) run_py app/main.py "$@" ;;
-    2) run_py app/download_deps.py "$@" ;;
-    3) run_py app/snmp_walk_test.py "$@" ;;
+    1|2|3) run_choice "$choice" ;;
     q|Q) break ;;
     *) echo "Invalid choice."; continue ;;
   esac

@@ -37,11 +37,17 @@ One launcher per OS. Keep `README.md` and credentials next to it; Python lives i
 | Linux | `./Passwordinator-Linux.sh` |
 | macOS | `Passwordinator-macOS.command` |
 
-Menu at launch:
+Menu at launch (or pass the number as the first argument):
 
 1. **Passwordinator** — configure appliances  
 2. **Download deps** — prefetch `app/vendor/wheels`  
 3. **SNMP Walk** — validate only  
+
+```bash
+Passwordinator-Windows.bat 1
+./Passwordinator-Linux.sh 3
+./Passwordinator-Linux.sh 1 --help   # extra args go to Python
+```
 
 On Linux/macOS: `chmod +x Passwordinator-Linux.sh Passwordinator-macOS.command` once. On macOS, right-click → Open the first time.
 
@@ -160,6 +166,7 @@ Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algor
 | --- | --- |
 | 401 login failed | API user, MFA exemption, `APPGATE_PROVIDER` (`local` / `saml` / `oidc`) |
 | 403 Forbidden | Admin role can edit appliances |
+| HTTP 422 site | API user needs Appliance **Edit** and Site access; script retries PUT without `site` then prints a hint |
 | Gateway missing from list | 6.7 lists only appliances this user can **View**. Edit without View is not enough. Grant Appliance View on all tags / All appliances. |
 | Engine ID not found | API `engineIDType 3`, SSH/sudo, `oldEngineID` after restart, MAC on `ETH_IFACE` |
 | Passphrase too short | Increase length or lower `SNMP_MIN_PASSPHRASE_LEN` |
