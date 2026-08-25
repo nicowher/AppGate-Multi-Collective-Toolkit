@@ -97,10 +97,10 @@ NO_ANSWERS = ("n", "no")
 MENU_CHOICE_ALIASES = {
     "1": "1",
     "configure": "1",
-    "passwordinator": "1",  # legacy alias
-    "snmp": "1",
     "credential": "1",
     "credentials": "1",
+    "snmp-credential": "1",
+    "snmp-credentials": "1",
     "main": "1",
     "2": "2",
     "deps": "2",
@@ -108,8 +108,8 @@ MENU_CHOICE_ALIASES = {
     "download-deps": "2",
     "3": "3",
     "walk": "3",
-    "snmp": "3",
     "snmp-walk": "3",
+    "snmpwalk": "3",
     "q": "q",
     "quit": "q",
     "exit": "q",
