@@ -21,7 +21,7 @@ Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box;
 
 `SNMP-Walk-<OS>` asks **1) single FQDN/IP** (then *Walk another?*) or **2) pull list from Controller(s)** (same FQDN-first login / exclude as Passwordinator). No SSH and no config push. Health uses `GET /admin/appliances/status` (not the removed `/stats/appliances`).
 
-**Reports:** `WRITE_RUN_REPORT = True` prints JSON and writes timestamped `reports/run-*.json` / `dryrun-*.json` / `walk-*.json` (no passwords/tokens; hash *lengths* only in the file).
+**Reports:** `WRITE_RUN_REPORT = True` writes timestamped `reports/run-*.json` / `dryrun-*.json` / `walk-*.json` (no passwords/tokens). Full JSON is printed only when `DEBUG = True`.
 
 **Dry-run flow:** After inventory loads → **Dry-run only?** → exclude appliances → preview (engine ID read without snmpd restart + hashes) → report → **Push config now?** (`y` = live pin/push/purge/walk + second report). `DRY_RUN = True` in `config.py` skips the first prompt.
 

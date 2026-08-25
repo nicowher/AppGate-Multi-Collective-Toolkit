@@ -674,11 +674,12 @@ def _build_run_report(
 
 
 def _emit_run_report(report: Dict[str, Any]) -> None:
-    """Print JSON report and optionally write reports/run-*.json."""
+    """Write reports/run-*.json. Full JSON dump only when DEBUG is on."""
     text = json.dumps(report, indent=2)
-    print("\n----- BEGIN RUN REPORT -----")
-    print(text)
-    print("----- END RUN REPORT -----")
+    if DEBUG:
+        print("\n----- BEGIN RUN REPORT -----")
+        print(text)
+        print("----- END RUN REPORT -----")
     if not WRITE_RUN_REPORT:
         return
     reports_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME)

@@ -179,9 +179,10 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
             "failed_count": failed,
         }
         text = json.dumps(report, indent=2)
-        print("\n----- BEGIN RUN REPORT -----")
-        print(text)
-        print("----- END RUN REPORT -----")
+        if DEBUG:
+            print("\n----- BEGIN RUN REPORT -----")
+            print(text)
+            print("----- END RUN REPORT -----")
         if WRITE_RUN_REPORT:
             reports_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME)
             try:

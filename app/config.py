@@ -79,9 +79,9 @@ def warn_insecure_transport() -> None:
 SSH_PORT = 22
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
-# Print a JSON debug report at the end (no passwords/tokens). Paste it back for review.
+# Full JSON dump to the console at end of run (no passwords/tokens).
 DEBUG = False
-# Print + write a JSON end-of-run report (no passwords/tokens).
+# Write timestamped reports/*.json; console dump only if DEBUG is on.
 WRITE_RUN_REPORT = True
 # When True: first pass is dry-run without asking. Prompt can still enable dry-run when False.
 DRY_RUN = False
