@@ -29,15 +29,21 @@ Missing Python packages install from `app/vendor/wheels` first (air-gapped), the
 
 ## Launchers
 
-Keep `README.md`, credentials files, and launchers in this folder. Python lives in `app/`.
+One launcher per OS. Keep `README.md` and credentials next to it; Python lives in `app/`.
 
-| OS | Configure appliance | Walk only | Prefetch wheels |
-| --- | --- | --- | --- |
-| Windows | `Passwordinator-Windows.bat` | `SNMP-Walk-Windows.bat` | `Download-Deps-Windows.bat` |
-| Linux | `./Passwordinator-Linux.sh` | `./SNMP-Walk-Linux.sh` | `./Download-Deps-Linux.sh` |
-| macOS | `Passwordinator-macOS.command` | `SNMP-Walk-macOS.command` | `Download-Deps-macOS.command` |
+| OS | Launcher |
+| --- | --- |
+| Windows | `Passwordinator-Windows.bat` |
+| Linux | `./Passwordinator-Linux.sh` |
+| macOS | `Passwordinator-macOS.command` |
 
-On Linux/macOS: `chmod +x *.sh *.command` once. On macOS, right-click → Open the first time.
+Menu at launch:
+
+1. **Passwordinator** — configure appliances  
+2. **Download deps** — prefetch `app/vendor/wheels`  
+3. **SNMP Walk** — validate only  
+
+On Linux/macOS: `chmod +x Passwordinator-Linux.sh Passwordinator-macOS.command` once. On macOS, right-click → Open the first time.
 
 Shared: `snmp_user`, `snmp_auth`, `snmp_priv`, `ssh_username`, `ssh_password`. `rouser` is optional.
 
@@ -52,9 +58,9 @@ A single-controller file still works (collective `1`) but you will be prompted f
 - AppGate admin API access (MFA-exempt local user recommended)
 
 ```bash
-Download-Deps-Windows.bat          # Windows
-./Download-Deps-Linux.sh           # Linux
-open Download-Deps-macOS.command   # macOS
+Passwordinator-Windows.bat              # Windows — pick 2) Download deps
+./Passwordinator-Linux.sh               # Linux
+open Passwordinator-macOS.command       # macOS
 ```
 
 Optional walk backend: Linux `snmp` / `net-snmp-utils`, macOS `brew install net-snmp`, or Windows Net-SNMP. Otherwise validation uses `pysnmp`.
@@ -83,7 +89,7 @@ Copy `credentials.example.json` to `credentials.json` next to the launchers. Mis
 On a **networked machine with the same OS and Python version**:
 
 ```bash
-./Download-Deps-Linux.sh
+./Passwordinator-Linux.sh   # choose 2) Download deps
 ```
 
 That fills `app/vendor/wheels/` (`requests`, `paramiko`, `pysnmp` and their dependencies). Copy the whole project folder to the air-gapped host. Launchers install from `app/vendor/` before any network pip.
@@ -160,15 +166,13 @@ Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algor
 | Walk timeout then pass | cz-configd may drop SNMP iptables briefly; retries usually recover |
 | SSH to Controller FQDN times out | NAT/DNS: set `agip` in that collective; SSH retries the configured IP |
 | Unknown ssh-rsa host key | Expected when `SSH_STRICT_HOST_KEY` is False |
-| Vendor install failed | Wheels built for another OS/Python — rerun Download-Deps on a matching host |
+| Vendor install failed | Wheels built for another OS/Python — rerun launcher option 2 on a matching host |
 
 ## Layout
 
 | Path | Role |
 | --- | --- |
-| `Passwordinator-<OS>.*` | Full configure + validate |
-| `SNMP-Walk-<OS>.*` | Walk only |
-| `Download-Deps-<OS>.*` | Prefetch `app/vendor/wheels` |
+| `Passwordinator-<OS>.*` | Unified menu (configure / download deps / walk) |
 | `credentials.example.json` | Empty template |
 | `app/main.py` | Multi-appliance workflow |
 | `app/inventory.py` | Controller list + exclude prompt |
