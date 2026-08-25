@@ -1,10 +1,16 @@
 """Controller inventory: GET /appliances, health labels, exclude prompt.
 
-  Target.label()          → 1.hostname (collective index + name)
-  Target.ssh_endpoints()  → FQDN first, then IP (Controller uses credentials agip)
-  Target.walk_endpoints() → IP first, then FQDN (gateway never uses Controller IP)
+  Target.label()          → 1.hostname so two sites can share a hostname safely
+  Target.ssh_endpoints()  → FQDN first (admin hostname best practice), then IP
+                            when DNS/NAT is wrong. Controllers also try credentials
+                            agip; gateways use their own ssh_ip — never the
+                            Controller IP (that would SSH the wrong box).
+  Target.walk_endpoints() → IP first for SNMP UDP. NAT FQDNs often answer
+                            HTTPS/SSH but not UDP/161; walking the name first
+                            wastes timeouts. Gateways must not walk Controller agip.
 
-Health comes from GET /appliances/status (6.7: healthy/busy/warning/error/offline).
+Health from GET /appliances/status (6.7 labels). error is still configurable;
+offline/not active/warning are skipped so we do not push to unreachable boxes.
 """
 import ipaddress
 from collections import Counter
@@ -39,10 +45,11 @@ class Target:
         return f"{self.collective}.{host}"
 
     def ssh_endpoints(self) -> List[str]:
-        """FQDN first, then IPs if SSH to the name fails (NAT/DNS).
+        """Ordered SSH targets: name first, private/admin IP if name fails.
 
-        Controller: credentials agip. Gateway: appliance ssh_ip (never the
-        Controller IP).
+        Why FQDN first: AppGate expects admin hostname for management access.
+        Why IP second: NAT/lab DNS may resolve the FQDN to an unreachable address
+        while credentials agip (Controller) or appliance ssh_ip (Gateway) works.
         """
         out: List[str] = []
         if self.ssh_fqdn:
@@ -61,10 +68,12 @@ class Target:
         )
 
     def walk_endpoints(self) -> List[str]:
-        """SNMP UDP: private IP first (NAT FQDNs often fail), then FQDN.
+        """Ordered SNMP walk targets: IP first, then FQDN.
 
-        Gateway: ssh_ip then FQDN. Never the Controller agip.
-        Controller: credentials agip then FQDN.
+        Why opposite of SSH: SNMPv3 is UDP/161; many NAT paths forward TCP
+        (API/SSH) but not SNMP, so FQDN-first walks time out even when the
+        private IP works. Controller walks use credentials agip first;
+        gateway walks use appliance ssh_ip only (never Controller agip).
         """
         out: List[str] = []
         # print(f"DEBUG walk_endpoints: controller={self._is_controller_box()} ip={self.ssh_ip} fqdn={self.ssh_fqdn}")

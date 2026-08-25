@@ -1,20 +1,25 @@
 """AppGate SNMPv3 Passwordinator — CLI entry + configure workflow.
 
-OS launchers only run this file. ``cli()`` shows the menu or dispatches
-``1`` / ``2`` / ``3`` (configure / download deps / SNMP walk).
+OS launchers only run this file so menu/args stay in one place (not duplicated
+in .bat/.sh). ``cli()`` shows the menu or dispatches 1/2/3.
 
-Configure flow (``main()``), phase-aligned across collectives:
+Configure flow is phase-aligned across collectives (finish a phase on every
+selected box before the next phase) so logs stay readable and one slow site
+does not interleave with another mid-step.
 
-  0. Load credentials; prompt gaps; optional dry-run choice
-  1. Login every Controller (own API account / token)
-  2. Pull appliances; exclude prompt
-  3. API engineIDType 3          [skipped if dry-run]
-  4. SSH engine IDs              [no snmpd restart if dry-run]
-  5. Localize hashes
-  6. API deleteUser + createUser [skipped if dry-run]
-  7. SSH purge usmUser           [skipped if dry-run]
-  8. Walk                        [skipped if dry-run]
-  After dry-run: optional live push on the same selection
+  0. Credentials + dry-run choice — fail early on bad input; preview before mutate
+  1. Login each Controller — separate tokens; never reuse bearer across sites
+  2. Inventory + exclude — API is source of truth; operator still controls scope
+  3. engineIDType 3 via API — type-3 MAC engine IDs are stable and ESXi-friendly;
+     must be API (cz-configd owns /etc/snmp/snmpd.conf)
+  4. SSH engine ID — localization needs the real engine ID; dry-run skips snmpd
+     restart so preview does not bounce production daemons
+  5. Localize hashes — createUser stores Kul, not plaintext; each engine ID differs
+  6. deleteUser then createUser — two PUTs so final conf has no deleteUser line
+  7. Purge persistent usmUser — see snmp_engine (net-snmp ignores createUser if
+     the user already exists under /var/lib/snmp)
+  8. Walk — proves authPriv with the new passphrases (not the hashes)
+  After dry-run: optional live apply on the same selection (no re-login)
 """
 import json
 import os
@@ -322,7 +327,8 @@ def main() -> None:
             raise ValueError("No activated appliances with an SSH address were found")
         print(f"      Found {len(inventory)} selectable appliance(s)")
 
-        # Dry-run choice before exclude so the operator sees the list first.
+        # Ask dry-run after inventory is known so the operator can decide with
+        # the real appliance list in mind, then still pick excludes.
         if dry_run:
             print(
                 "\n      DRY_RUN is set in config.py — no pin/push/purge/walk will run.",
@@ -367,7 +373,8 @@ def main() -> None:
         if WRITE_RUN_REPORT or DEBUG:
             _emit_run_report(report)
 
-        # After dry-run preview, offer a live apply on the same selection (same session).
+        # Same session apply: reuse logins, selection, and credentials so the
+        # operator does not re-type everything after a successful preview.
         if dry_run and any(t.status == "preview" for t in selected):
             # print(f"DEBUG: preview_count={sum(1 for t in selected if t.status == 'preview')}")
             apply = input(
@@ -378,6 +385,8 @@ def main() -> None:
                     "\n*** Applying config (live run) — pin, push, purge, walk. ***\n",
                     file=sys.stderr,
                 )
+                # Re-run 3–8 for real: pin + snmpd restart may refresh engine IDs,
+                # so hashes are recomputed rather than trusting dry-run values only.
                 for target in selected:
                     if target.status == "preview":
                         target.status = "pending"
@@ -433,12 +442,14 @@ def _run_phases_3_to_8(
     rouser_line: str,
     dry_run: bool,
 ) -> None:
-    """Steps 3–8.
+    """Steps 3–8 (shared by dry-run preview and live apply).
 
-    dry_run=True:  would-print for 3/6/7/8; step 4 reads engine ID without snmpd restart.
-    dry_run=False: pin, restart snmpd + read engine ID, hash, push, purge, walk.
+    dry_run=True:  print planned actions; step 4 greps engine ID without snmpd bounce.
+    dry_run=False: mutate via API + SSH, then prove with a walk.
     """
-    # --- Step 3: PUT engineIDType 3 ---
+    # --- Step 3: engineIDType 3 via API ---
+    # Why API not SSH /etc edit: cz-configd regenerates snmpd.conf from the
+    # appliance object; SSH edits get overwritten on the next config push.
     print("\n[3/8] Pinning engineIDType via API...")
     if dry_run:
         for target in _ok(selected):
@@ -451,7 +462,9 @@ def _run_phases_3_to_8(
         _api_by_collective(_ok(selected), clients, _pin)
         time.sleep(SNMP_RELOAD_DELAY)
 
-    # --- Step 4: engine ID (no snmpd restart in dry-run) ---
+    # --- Step 4: engine ID ---
+    # Why: RFC 3414 Kul depends on engine ID; wrong ID → Wrong SNMP PDU digest.
+    # Live run restarts snmpd so type-3 is active before we read oldEngineID.
     print(f"\n[4/8] SSH engine ID (up to {SSH_CONCURRENCY} at a time)...")
 
     def _ssh_engine(target: Target) -> None:
@@ -470,6 +483,8 @@ def _run_phases_3_to_8(
         print("      No appliances left after SSH engine-ID pass.", file=sys.stderr)
 
     # --- Step 5: localize keys ---
+    # Why hashes not plaintext in createUser: AppGate/net-snmp expect Kul;
+    # each appliance engine ID produces different hex for the same passphrase.
     print("\n[5/8] Localizing SNMPv3 keys...")
     for target in _ok(selected):
         try:
@@ -481,6 +496,8 @@ def _run_phases_3_to_8(
             _fail(target, f"hash: {exc}")
 
     # --- Step 6: API push ---
+    # Why delete then create (two PUTs): final snmpd.conf must not keep a
+    # deleteUser line; owning client only so tokens never cross collectives.
     print("\n[6/8] Pushing SNMPv3 config via each Controller...")
     if dry_run:
         for target in _ok(selected):
@@ -506,6 +523,11 @@ def _run_phases_3_to_8(
         _api_by_collective(_ok(selected), clients, _push)
 
     # --- Step 7: purge persistent USM ---
+    # Why: API createUser only updates /etc via cz-configd. net-snmp keeps the
+    # live USM DB in /var/lib/snmp/snmpd.conf and IGNORES createUser when a
+    # usmUser row already exists — password changes never take effect and walks
+    # fail with Wrong SNMP PDU digest. Must delete persistent rows then let
+    # snmpd recreate from createUser on start.
     print(f"\n[7/8] SSH purge leftover usmUser (up to {SSH_CONCURRENCY} at a time)...")
     if dry_run:
         for target in _ok(selected):
@@ -520,6 +542,9 @@ def _run_phases_3_to_8(
         _run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY)
 
     # --- Step 8: walk ---
+    # Why walk with passphrases not hashes: USM clients authenticate with the
+    # original secrets; hashes are only what the agent stores. IP-first endpoints
+    # avoid NAT FQDNs that answer SSH/API but not UDP/161.
     print("\n[8/8] Validating SNMP walks...")
     if dry_run:
         for target in _ok(selected):

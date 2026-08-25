@@ -1,16 +1,20 @@
 """AppGate admin API: login, inventory, snmpd.conf push.
 
-One AppGateClient per collective (own bearer token). Used from main.py:
+One AppGateClient per collective (own bearer token) so a token from site A
+is never sent to site B (403 / wrong collective).
 
-   1  login() — FQDN first, credentials agip on connect/HTTP failure (not 401/403)
-   2  list_targets() — GET /appliances + GET /appliances/status
-   3  ensure_engine_id_type3()
-   6  delete_snmp_user() / update_snmp_config()
+   1  login() — FQDN first (Controller admin-hostname guidance); agip only when
+      the name does not connect. Never fall back on 401/403 (that is auth, not DNS).
+   2  list_targets() — Controller inventory is source of truth; status endpoint
+      is 6.3+ /appliances/status (not removed /stats/appliances).
+   3  ensure_engine_id_type3() — type-3 MAC engine IDs are stable for ESXi USM.
+   6  delete_snmp_user / update_snmp_config — full appliance PUT because
+      cz-configd owns /etc/snmp/snmpd.conf; SSH edits get overwritten.
 
-cz-configd owns /etc/snmp/snmpd.conf, so every snmpd change is a full
-appliance PUT. Never push exactEngineID (truncated type-3 IDs).
-PUT sanitizes site to a UUID; on 422 site errors, retries without site
-and prints an Appliance Edit/Site privilege hint.
+Why no exactEngineID: cz-configd has truncated type-3 IDs and broken localization.
+Why site sanitize/retry: GET often expands site to an object; PUT wants a UUID.
+  422 on site usually means View without Edit/Site — hint the operator, don't
+  only dump raw JSON.
 """
 from utils import ensure_package
 

@@ -1,14 +1,23 @@
 """SSH helpers for configure steps 4 and 7.
 
   get_engine_id(host, restart_snmpd=True)   — step 4
-      FQDN first, then IP fallback. Live run restarts snmpd so type-3 applies;
-      dry-run sets restart_snmpd=False and only greps existing oldEngineID.
-      Checks RFC 3411 type 3 against ETH_IFACE MAC.
+      Why: localized USM keys (Kul) bind to the SNMP engine ID. FQDN first for
+      admin-hostname best practice; IP fallback when DNS/NAT is wrong.
+      Live run restarts snmpd so engineIDType 3 is active before reading
+      oldEngineID. Dry-run skips restart so preview does not bounce snmpd.
+      MAC check proves type-3 (enterprise + 0x03 + eth MAC) per RFC 3411.
 
   purge_persistent_user(host, user, keep_hash)  — step 7
-      Stop snmpd, delete ALL persistent usmUser rows for the user, start snmpd
-      so /etc createUser writes new keys (net-snmp will not update an existing
-      usmUser password). Waits until keep_hash appears when provided.
+      Why this exists at all:
+        - AppGate API createUser only lands in /etc/snmp/snmpd.conf (via cz-configd).
+        - net-snmp's *running* user DB is /var/lib/snmp/snmpd.conf (usmUser lines).
+        - If a usmUser row already exists, snmpd ignores createUser on reload —
+          so password rotations never apply and walks get Wrong SNMP PDU digest.
+      Why stop → sed → start (not sed while running):
+        - A live snmpd rewrites persistent conf on shutdown and undoes sed.
+      Why wait for keep_hash:
+        - createUser is applied asynchronously on start; walking too early
+          still sees the old key or an empty DB.
 """
 from utils import ensure_package
 
@@ -80,11 +89,10 @@ class SNMPEngineFetcher:
     def purge_persistent_user(
         self, host: Union[str, Sequence[str]], user: str, keep_hash: str = ""
     ) -> None:
-        """Delete every persistent usmUser for *user*, then restart snmpd.
+        """Force snmpd to honor the new createUser by clearing persistent USM.
 
-        net-snmp ignores createUser in /etc/snmp/snmpd.conf when a usmUser
-        already exists in /var/lib/snmp. Always strip those rows so the
-        new createUser (already pushed via API) is applied on restart.
+        keep_hash: after start, wait until this hex appears in usmUser (proves
+        the new localized key was written, not a stale row).
         """
         if not re.fullmatch(SNMP_NAME_RE, user):
             raise ValueError(f"Unsafe SNMP username for remote edit: {user!r}")
@@ -93,8 +101,8 @@ class SNMPEngineFetcher:
             keep = ""
 
         def _purge(client: paramiko.SSHClient) -> bool:
-            # Stop first. A running snmpd rewrites persistent conf on exit
-            # and would undo sed (Wrong SNMP PDU digest on the next walk).
+            # Must stop first — running snmpd flushes USM back to disk on exit
+            # and would resurrect the rows we are about to delete.
             print(f"      Stopping snmpd before editing persistent USM...", file=sys.stderr)
             if not self._stop_snmpd(client):
                 return False

@@ -1,8 +1,12 @@
-"""Step 8 / SNMP-Walk: authPriv walk with IP-first endpoints (NAT-friendly).
+"""Step 8 / SNMP-Walk: prove the new USM user works (authPriv).
 
-Backends, in order: Net-SNMP snmpwalk → SnmpSoft SnmpWalk.exe → pysnmp.
-Walks use original passphrases (localized hashes live only on the appliance).
-Per-address attempts: WALK_IP_ATTEMPTS / WALK_FQDN_ATTEMPTS in config.py.
+Why walk at all: pin/push can succeed while snmpd still has stale usmUser
+keys; a walk with the *passphrases* is the real acceptance test.
+
+Why IP before FQDN: UDP/161 often fails on NAT names that still answer SSH.
+Attempts per address are tunable (WALK_IP_ATTEMPTS / WALK_FQDN_ATTEMPTS).
+
+Backends: Net-SNMP snmpwalk → SnmpSoft → pysnmp (auto-install vendor/pip).
 """
 import asyncio
 import ipaddress

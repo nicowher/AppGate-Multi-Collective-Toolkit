@@ -1,15 +1,18 @@
-"""Step 5: RFC 3414 USM key localization. No external hashgen binary.
+"""Step 5: RFC 3414 USM key localization (in-process, no external binary).
+
+Why localize at all: net-snmp createUser with -l expects Kul (localized key),
+not the human passphrase. Kul is bound to that appliance's engine ID, so the
+same password yields different hex on every box — required for multi-appliance.
 
 For each passphrase (auth, then priv):
 
-  1. Reject passphrases shorter than SNMP_MIN_PASSPHRASE_LEN
-  2. Repeat the passphrase until it fills 1 MiB (RFC3414_KDF_LEN)
-  3. Ku  = H(that 1 MiB buffer)
-  4. Kul = H(Ku || engineID || Ku)   ← this hex string is the USM key
+  1. Reject short passphrases (DISA/CNSA floor via SNMP_MIN_PASSPHRASE_LEN)
+  2. Expand passphrase to 1 MiB (RFC 3414)
+  3. Ku  = H(expanded)
+  4. Kul = H(Ku || engineID || Ku)  ← hex stored in createUser
 
-H is SHA-256 by default (CNSA 2.0). MD5 / SHA-1 are rejected.
-createUser on the appliance stores Kul; walks use the original
-passphrases, not these hashes.
+H defaults to SHA-256 (CNSA 2.0). MD5/SHA-1 rejected. Walks still use the
+original passphrases; only the agent stores Kul.
 """
 import hashlib
 import sys

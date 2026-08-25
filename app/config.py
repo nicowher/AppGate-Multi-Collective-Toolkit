@@ -3,19 +3,16 @@ import warnings
 # ============================================================================
 # SNMPv3 Algorithm Configuration
 # ============================================================================
-# CNSA 2.0 (Commercial National Security Algorithm Suite 2.0) compliant:
-#   - Authentication: SHA-256 (usmHMAC192SHA256AuthProtocol)
-#   - Privacy:       AES-256 (usmAesCfb256Protocol)
+# Why SHA-256 + AES-256: CNSA 2.0 / DISA baseline for SNMPv3 authPriv.
+# All three paths must use the same trio or walks fail with digest errors:
+#   1. createUser line (appgate.py)
+#   2. RFC 3414 localization (snmp_hashgen.py)
+#   3. walk client (snmp_validate.py / snmp_walk_test.py)
 #
-# These must match between:
-#   1. The createUser line pushed to the appliance (appgate.py)
-#   2. In-process RFC 3414 localization (snmp_hashgen.py)
-#   3. The SNMP walk validation tools (snmp_validate.py, snmp_walk_test.py)
-#
-# NOTE: Some older AppGate appliance versions only support SHA-1/AES-128.
-# If validation fails with "Wrong SNMP PDU digest", check the appliance's
-# persistent data in /var/lib/snmp/snmpd.conf to see which algorithms
-# it actually supports.
+# If you still see "Wrong SNMP PDU digest" after a password change, it is
+# usually stale usmUser in /var/lib/snmp (step 7), not these algorithm names.
+# Older appliances that only do SHA-1/AES-128 need a coordinated change of
+# all three values below (not recommended for regulated environments).
 # ============================================================================
 SNMP_HASH_ALGO = "sha256"
 SNMP_AUTH_PROTOCOL = "SHA256"
@@ -214,7 +211,8 @@ VENDOR_PACKAGES = ("requests", "paramiko", "pysnmp")
 # ============================================================================
 # Lab / production transport switch (keep at the bottom)
 # ============================================================================
-# Lab (no CA / no known_hosts): leave both False. Passwordinator warns at start.
-# Production: set both True after you trust the Controller cert and pin SSH keys.
+# Why defaults are False: lab Controllers use self-signed certs and first-run
+# SSH host keys. That is a MITM risk on untrusted networks — warn_insecure_transport()
+# prints at start. Production: set both True after trusting the CA and known_hosts.
 TLS_VERIFY = False
 SSH_STRICT_HOST_KEY = False
