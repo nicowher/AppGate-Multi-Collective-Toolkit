@@ -1,4 +1,4 @@
-"""RFC 3414 / CNSA checks for in-process USM localization."""
+"""Unit tests for app/snmp_hashgen.py (RFC 3414 / CNSA SHA-256 vectors)."""
 import os
 import sys
 import unittest

@@ -95,6 +95,25 @@ USM_SED_RETRIES = 3
 USM_RECREATE_WAITS = 5
 # Accepted answers for yes/no prompts (Add another Controller, Walk another IP).
 YES_ANSWERS = ("y", "yes")
+NO_ANSWERS = ("n", "no")
+# CLI menu first-arg aliases → 1 configure | 2 deps | 3 walk | q quit
+MENU_CHOICE_ALIASES = {
+    "1": "1",
+    "configure": "1",
+    "passwordinator": "1",
+    "main": "1",
+    "2": "2",
+    "deps": "2",
+    "download": "2",
+    "download-deps": "2",
+    "3": "3",
+    "walk": "3",
+    "snmp": "3",
+    "snmp-walk": "3",
+    "q": "q",
+    "quit": "q",
+    "exit": "q",
+}
 # 6.7 health values we will not SSH or configure. "error" is allowed (still push).
 APPLIANCE_SKIP_STATUS = (
     "offline",
@@ -105,6 +124,14 @@ APPLIANCE_SKIP_STATUS = (
 )
 # Safe for snmpd.conf lines and remote sed (DISA: no metacharacters).
 SNMP_NAME_RE = r"^[A-Za-z0-9_.-]+$"
+# Keys searched in GET /appliances/status JSON (not metrics like volume).
+HEALTH_STATUS_KEYS = (
+    "status",
+    "health",
+    "overallStatus",
+    "applianceStatus",
+    "state",
+)
 
 # ============================================================================
 # SNMP Defaults
@@ -181,7 +208,7 @@ PKG_INSTALL_TIMEOUT = 300
 # ============================================================================
 # Offline vendor cache (relative to this repo)
 # ============================================================================
-# Download-Deps-<OS> — run on a networked box, then copy app/vendor/ over.
+# Menu option 2 / python app/main.py 2 — then copy app/vendor/ to air-gap hosts.
 VENDOR_PACKAGES = ("requests", "paramiko", "pysnmp")
 
 # ============================================================================

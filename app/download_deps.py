@@ -1,9 +1,9 @@
-"""Prefetch Python wheels into app/vendor/wheels for air-gapped installs.
+"""Menu option 2: prefetch Python wheels into app/vendor/wheels.
 
-Not part of the 8-step configure flow. Run on a networked machine that
-matches the target OS and Python, then copy the whole project
-(including app/vendor/) to the air-gapped host. Launchers install from
-vendor/ before any network pip.
+Not part of the configure 8-step flow. Run on a networked machine that
+matches the target OS and Python, then copy the project (including
+app/vendor/) to the air-gapped host. ensure_package() installs from
+vendor/ before offering online pip.
 """
 import sys
 
@@ -17,7 +17,7 @@ def main() -> None:
         print(f"Download failed: {exc}", file=sys.stderr)
         sys.exit(1)
     print(f"Vendor cache ready in {VENDOR_DIR}", file=sys.stderr)
-    print("Copy this folder to the air-gapped machine, then run Passwordinator-<OS>.")
+    print("Copy this folder to the air-gapped machine, then run the Passwordinator launcher.")
 
 
 if __name__ == "__main__":

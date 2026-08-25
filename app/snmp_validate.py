@@ -1,3 +1,9 @@
+"""Step 8 / SNMP-Walk: authPriv walk with IP-first endpoints (NAT-friendly).
+
+Backends, in order: Net-SNMP snmpwalk → SnmpSoft SnmpWalk.exe → pysnmp.
+Walks use original passphrases (localized hashes live only on the appliance).
+Per-address attempts: WALK_IP_ATTEMPTS / WALK_FQDN_ATTEMPTS in config.py.
+"""
 import asyncio
 import ipaddress
 import platform
@@ -29,11 +35,7 @@ from config import (
 
 
 class SNMPValidator:
-    """Walk an appliance with the new SNMPv3 user (final workflow step).
-
-    Backends, in order: Net-SNMP snmpwalk → SnmpSoft SnmpWalk.exe → pysnmp.
-    Walks use the original passphrases (hashes live only on the appliance).
-    """
+    """Walk one host list (IPs then FQDNs) until one endpoint succeeds."""
 
     def __init__(self) -> None:
         self._tool: Optional[Tuple[Optional[str], Optional[str]]] = None

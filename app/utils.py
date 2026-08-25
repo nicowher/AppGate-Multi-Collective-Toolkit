@@ -1,13 +1,16 @@
-"""Shared helpers used before and during the 8-step workflow.
+"""Shared helpers for credentials, host validation, and pip packages.
 
-  vendor_has_wheels / install_from_vendor / ensure_package
-      Launchers and API/SSH modules call these when a pip package is
-      missing. Vendor wheels (air-gapped) are tried first; online pip
-      only if the operator allows it.
+  is_valid_host / prompt_until_valid
+      Step 0 prompts: IPv4/IPv6/FQDN and re-ask on bad input.
 
   load_credentials
-      Step 0: read optional credentials.json next to the launchers.
-      Missing or invalid files become {} so the prompts still work.
+      Read optional credentials.json next to the OS launcher (repo root).
+      Missing or invalid files become {} so prompts still work.
+      collectives[] is kept as a list of objects (not stringified).
+
+  vendor_has_wheels / install_from_vendor / ensure_package / download_vendor_wheels
+      Used when requests/paramiko/pysnmp are missing. Vendor wheels first
+      (air-gapped); online pip only if the operator allows it.
 """
 import importlib.util
 import ipaddress
@@ -115,7 +118,7 @@ def ensure_package(package: str, import_name: str) -> None:
         )
         return
     print(
-        f"Please install {package} (or run Download-Deps) and rerun.",
+        f"Please install {package} (or run launcher option 2 / python app/main.py 2) and rerun.",
         file=sys.stderr,
     )
     sys.exit(1)

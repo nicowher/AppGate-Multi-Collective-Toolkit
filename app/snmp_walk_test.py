@@ -1,7 +1,10 @@
 """Walk-only check (no SSH, no config push).
 
+Reached via ``python app/main.py 3`` or launcher menu option 3.
+
   1) Single IP / FQDN — walk, then ask to walk another
-  2) Controller list — same login / exclude flow as Passwordinator steps 1–2, then walk
+  2) Controller list — same login / exclude as configure steps 1–2, then walk
+     (IP first for NAT; gateway never uses Controller agip)
 """
 import json
 import os

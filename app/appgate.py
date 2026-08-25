@@ -1,15 +1,16 @@
-"""AppGate admin API: login, appliance lookup, snmpd.conf push.
+"""AppGate admin API: login, inventory, snmpd.conf push.
 
-One AppGateClient per collective (own login token). main.py steps:
+One AppGateClient per collective (own bearer token). Used from main.py:
 
-   1 login() each Controller
-   2 list_targets(collective=N)
-   3 ensure_engine_id_type3(id) via that client
-   6 delete_snmp_user / update_snmp_config via that client only
+   1  login() — FQDN first, credentials agip on connect/HTTP failure (not 401/403)
+   2  list_targets() — GET /appliances + GET /appliances/status
+   3  ensure_engine_id_type3()
+   6  delete_snmp_user() / update_snmp_config()
 
-cz-configd owns /etc/snmp/snmpd.conf, so every snmpd change is a PUT
-of the appliance object. Never push exactEngineID — cz-configd
-truncates it and breaks RFC 3411 type-3 (11-byte) IDs.
+cz-configd owns /etc/snmp/snmpd.conf, so every snmpd change is a full
+appliance PUT. Never push exactEngineID (truncated type-3 IDs).
+PUT sanitizes site to a UUID; on 422 site errors, retries without site
+and prints an Appliance Edit/Site privilege hint.
 """
 from utils import ensure_package
 
@@ -389,7 +390,7 @@ class AppGateClient:
         enabled: bool = True,
         appliance_id: Optional[str] = None,
     ) -> bool:
-        """Step 6: PUT createUser + optional rouser + engineIDType 3.
+        """Step 6: PUT createUser + optional rouser + engineIDType 3 (live run only).
 
         Call after delete_snmp_user so the final blob has no deleteUser line.
         Auth/priv algorithms must match snmp_hashgen.py / config.py.

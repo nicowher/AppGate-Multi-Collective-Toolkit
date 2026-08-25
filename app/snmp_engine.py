@@ -1,12 +1,14 @@
-"""SSH: engine-ID read (after API type-3 pin) and later USM purge.
+"""SSH helpers for configure steps 4 and 7.
 
-  get_engine_id()
-      restart snmpd, read oldEngineID, check RFC 3411 type 3 vs ETH_IFACE MAC
+  get_engine_id(host, restart_snmpd=True)   — step 4
+      FQDN first, then IP fallback. Live run restarts snmpd so type-3 applies;
+      dry-run sets restart_snmpd=False and only greps existing oldEngineID.
+      Checks RFC 3411 type 3 against ETH_IFACE MAC.
 
-  purge_persistent_user()
-      after API createUser: delete ALL persistent usmUser rows for the user,
-      restart snmpd so /etc createUser writes new keys (net-snmp will not
-      update an existing usmUser password)
+  purge_persistent_user(host, user, keep_hash)  — step 7
+      Stop snmpd, delete ALL persistent usmUser rows for the user, start snmpd
+      so /etc createUser writes new keys (net-snmp will not update an existing
+      usmUser password). Waits until keep_hash appears when provided.
 """
 from utils import ensure_package
 

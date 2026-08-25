@@ -1,13 +1,17 @@
-"""Controller inventory: parse GET /appliances and prompt which boxes to skip.
+"""Controller inventory: GET /appliances, health labels, exclude prompt.
 
-SSH uses the 6.7 admin hostname/IP (management path), not a data-plane NIC.
+  Target.label()          → 1.hostname (collective index + name)
+  Target.ssh_endpoints()  → FQDN first, then IP (Controller uses credentials agip)
+  Target.walk_endpoints() → IP first, then FQDN (gateway never uses Controller IP)
+
+Health comes from GET /appliances/status (6.7: healthy/busy/warning/error/offline).
 """
 import ipaddress
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import APPLIANCE_FUNCTION_NAMES
+from config import APPLIANCE_FUNCTION_NAMES, HEALTH_STATUS_KEYS
 
 
 @dataclass
@@ -94,14 +98,8 @@ def _first_status_string(obj: Any, depth: int = 0) -> str:
     if isinstance(obj, str) and obj.strip():
         return obj.strip()
     if isinstance(obj, dict):
-        for key in (
-            "status",
-            "health",
-            "overallStatus",
-            "applianceStatus",
-            "state",
-            "volume",
-        ):
+        # Prefer explicit health fields (6.7 UI: Healthy/Busy/Warning/Error/Offline).
+        for key in HEALTH_STATUS_KEYS:
             value = obj.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()

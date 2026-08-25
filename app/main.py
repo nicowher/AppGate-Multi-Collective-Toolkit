@@ -1,15 +1,20 @@
-"""Multi-collective SNMPv3 configure-and-validate.
+"""AppGate SNMPv3 Passwordinator — CLI entry + configure workflow.
 
-Phase-aligned across collectives (array order = 1, 2, 3, ...):
+OS launchers only run this file. ``cli()`` shows the menu or dispatches
+``1`` / ``2`` / ``3`` (configure / download deps / SNMP walk).
 
+Configure flow (``main()``), phase-aligned across collectives:
+
+  0. Load credentials; prompt gaps; optional dry-run choice
   1. Login every Controller (own API account / token)
-  2. Pull appliances from every successful login; one exclude prompt
-  3. API engineIDType 3 (serialized per Controller)  [skipped if DRY_RUN]
-  4. SSH engine IDs (shared pool)                     [read-only; runs in dry-run]
-  5. Localize hashes                                 [runs in dry-run]
-  6. API deleteUser + createUser                     [skipped if DRY_RUN]
-  7. SSH purge usmUser                               [skipped if DRY_RUN]
-  8. Walk every pushed device                        [skipped if DRY_RUN]
+  2. Pull appliances; exclude prompt
+  3. API engineIDType 3          [skipped if dry-run]
+  4. SSH engine IDs              [no snmpd restart if dry-run]
+  5. Localize hashes
+  6. API deleteUser + createUser [skipped if dry-run]
+  7. SSH purge usmUser           [skipped if dry-run]
+  8. Walk                        [skipped if dry-run]
+  After dry-run: optional live push on the same selection
 """
 import json
 import os
@@ -38,6 +43,8 @@ from config import (
     TLS_VERIFY,
     REPORTS_DIRNAME,
     WRITE_RUN_REPORT,
+    MENU_CHOICE_ALIASES,
+    NO_ANSWERS,
     YES_ANSWERS,
     warn_insecure_transport,
 )
@@ -664,28 +671,12 @@ def _emit_run_report(report: Dict[str, Any]) -> None:
 
 
 def _normalize_menu_choice(raw: str) -> str:
-    text = (raw or "").strip().lower()
-    aliases = {
-        "1": "1",
-        "configure": "1",
-        "passwordinator": "1",
-        "main": "1",
-        "2": "2",
-        "deps": "2",
-        "download": "2",
-        "download-deps": "2",
-        "3": "3",
-        "walk": "3",
-        "snmp": "3",
-        "snmp-walk": "3",
-        "q": "q",
-        "quit": "q",
-        "exit": "q",
-    }
-    return aliases.get(text, "")
+    """Map user/argv token to 1|2|3|q (empty if unknown)."""
+    return MENU_CHOICE_ALIASES.get((raw or "").strip().lower(), "")
 
 
 def _prompt_menu_choice() -> str:
+    """Interactive 1/2/3/Q menu (launchers only start this file)."""
     print("AppGate SNMPv3 Passwordinator")
     print()
     print("  1) Passwordinator  (configure appliances)")
@@ -701,21 +692,24 @@ def _prompt_menu_choice() -> str:
 
 
 def _run_selected_tool(choice: str, rest: List[str]) -> int:
-    """Dispatch menu choice. rest is forwarded as sys.argv for the tool."""
+    """Run configure (1), download_deps (2), or snmp_walk_test (3).
+
+    rest becomes sys.argv[1:] for that tool. SystemExit from tools is converted
+    to a return code so the interactive menu can continue.
+    """
     old_argv = sys.argv[:]
     try:
+        sys.argv = [old_argv[0]] + rest
+        # print(f"DEBUG cli: choice={choice} argv={sys.argv!r}")
         if choice == "1":
-            sys.argv = [old_argv[0]] + rest
             main()
             return 0
         if choice == "2":
             from download_deps import main as deps_main
-            sys.argv = [old_argv[0]] + rest
             deps_main()
             return 0
         if choice == "3":
             from snmp_walk_test import main as walk_main
-            sys.argv = [old_argv[0]] + rest
             walk_main()
             return 0
         return 1
@@ -731,7 +725,11 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
 
 
 def cli(argv: Optional[List[str]] = None) -> None:
-    """Single entry point for OS launchers: menu or `1|2|3` plus Python args."""
+    """Entry for OS launchers.
+
+    No args  → interactive menu (return to menu after each tool).
+    First arg 1|2|3|walk|deps → run that tool once; remaining args go to Python.
+    """
     args = list(sys.argv[1:] if argv is None else argv)
     noninteractive = bool(args) and bool(_normalize_menu_choice(args[0]))
     try:
@@ -754,7 +752,7 @@ def cli(argv: Optional[List[str]] = None) -> None:
                 sys.exit(code)
             print()
             again = input("Return to menu? [Y/n]: ").strip().lower()
-            if again in ("n", "no"):
+            if again in NO_ANSWERS:
                 if code:
                     sys.exit(code)
                 return

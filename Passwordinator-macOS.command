@@ -1,6 +1,7 @@
 #!/bin/sh
-# All menu/args handled in app/main.py (cli).
-#   open Passwordinator-macOS.command
+# Thin OS wrapper only. Menu, dry-run, and tool dispatch live in app/main.py (cli).
+# Double-click in Finder, or from Terminal:
+#   ./Passwordinator-macOS.command
 #   ./Passwordinator-macOS.command 1
 cd "$(dirname "$0")"
 if command -v python3 >/dev/null 2>&1; then
@@ -10,7 +11,9 @@ else
   python app/main.py "$@"
   rc=$?
 fi
-echo
-printf "Press Enter to close..."
-read -r _
+if [ -z "$1" ]; then
+  echo
+  printf "Press Enter to close..."
+  read -r _
+fi
 exit "$rc"

@@ -1,4 +1,4 @@
-"""Step 4: RFC 3414 USM key localization. No external hashgen binary.
+"""Step 5: RFC 3414 USM key localization. No external hashgen binary.
 
 For each passphrase (auth, then priv):
 

@@ -149,7 +149,9 @@ python -m unittest tests.test_snmp_hashgen
 | `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per IP / per FQDN (default 2) |
 | `SNMPD_STOP_RETRIES` / `USM_SED_RETRIES` / `USM_RECREATE_WAITS` | Persistent USM purge timing |
 | `APPLIANCE_STATUS_PATH` | `GET /appliances/status` (6.3+) |
-| `YES_ANSWERS` | Accepted yes replies (`y`, `yes`) |
+| `YES_ANSWERS` / `NO_ANSWERS` | Prompt replies |
+| `MENU_CHOICE_ALIASES` | CLI `1`/`walk`/`deps` → tool |
+| `HEALTH_STATUS_KEYS` | Fields read from `/appliances/status` |
 | Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention and cz-configd wait |
 
 Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algorithms is a policy exception, not the default.
@@ -169,6 +171,7 @@ Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algor
 | 401 login failed | API user, MFA exemption, `APPGATE_PROVIDER` (`local` / `saml` / `oidc`) |
 | 403 Forbidden | Admin role can edit appliances |
 | HTTP 422 site | API user needs Appliance **Edit** and Site access; script retries PUT without `site` then prints a hint |
+| Health always `n/a` | `/appliances/status` empty or 403 for this API user; when present, mapped to healthy/busy/warning/error/offline/not active |
 | Gateway missing from list | 6.7 lists only appliances this user can **View**. Edit without View is not enough. Grant Appliance View on all tags / All appliances. |
 | Engine ID not found | API `engineIDType 3`, SSH/sudo, `oldEngineID` after restart, MAC on `ETH_IFACE` |
 | Passphrase too short | Increase length or lower `SNMP_MIN_PASSPHRASE_LEN` |
