@@ -1,7 +1,11 @@
-"""AppGate SNMPv3 Passwordinator — CLI entry + configure workflow.
+"""AppGate Multi-Collective Toolkit — CLI entry + tools.
 
 OS launchers only run this file so menu/args stay in one place (not duplicated
 in .bat/.sh). ``cli()`` shows the menu or dispatches 1/2/3.
+
+  1) SNMP Credential Tool — configure SNMPv3 USM across collectives
+  2) Download deps
+  3) SNMP Walk
 
 Configure flow is phase-aligned across collectives (finish a phase on every
 selected box before the next phase) so logs stay readable and one slow site
@@ -703,11 +707,11 @@ def _normalize_menu_choice(raw: str) -> str:
 
 def _prompt_menu_choice() -> str:
     """Interactive 1/2/3/Q menu (launchers only start this file)."""
-    print("AppGate SNMPv3 Passwordinator")
+    print("AppGate Multi-Collective Toolkit")
     print()
-    print("  1) Passwordinator  (configure appliances)")
-    print("  2) Download deps   (prefetch vendor wheels)")
-    print("  3) SNMP Walk       (validate only)")
+    print("  1) SNMP Credential Tool  (configure SNMPv3 USM)")
+    print("  2) Download deps         (prefetch vendor wheels)")
+    print("  3) SNMP Walk             (validate only)")
     print("  Q) Quit")
     print()
     while True:

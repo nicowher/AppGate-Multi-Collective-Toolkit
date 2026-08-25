@@ -1,25 +1,33 @@
-# AppGate SNMPv3 Passwordinator
+# AppGate Multi-Collective Toolkit
 
-Generates localized SNMPv3 USM keys and pushes them to an AppGate SDP appliance. Designed for lab and production use, including air-gapped networks.
+Push and validate configuration across multiple AppGate SDP collectives from one launcher. Designed for lab and production, including air-gapped networks.
 
 Repository: https://github.com/nicowher/AppGate-SNMPv3-Passwordinator
 
-## What it does
+## Tools (menu)
 
-Double-click a launcher (or run it from a terminal). It reads `credentials.json`, prompts for any missing fields, then:
+1. **SNMP Credential Tool** — localized SNMPv3 USM keys (SHA-256 / AES-256) to selected appliances  
+2. **Download deps** — prefetch `app/vendor/wheels`  
+3. **SNMP Walk** — validate authPriv only (no SSH / no config push)  
 
-1. Logs in to **every** Controller in `collectives[]` (array order = collective `1`, `2`, …). Each has its own API account and bearer token. A failed login skips that collective
-2. Pulls appliances from each successful login. One exclude list; handles are `1.hostname` (avoids name clashes across sites)
-3. Pushes `engineIDType 3` via the Controller API for each selected appliance, then waits for cz-configd
-4. SSHes in batches (`SSH_CONCURRENCY`, default 5): restart snmpd, read `oldEngineID`, check MAC (RFC 3411 type 3)
-5. Localizes auth/priv per engine ID (RFC 3414, SHA-256)
-6. Pushes `deleteUser` then `createUser` / `rouser` / `engineIDType 3` one appliance at a time. No `exactEngineID`. v1/v2c communities stripped
-7. SSH: **stop snmpd**, delete persistent `usmUser` (net-snmp will not update an existing user’s password), **start snmpd** so `/etc` `createUser` writes the new keys
-8. Walks every pushed appliance: **IP first** (NAT), then FQDN. Attempts are `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` (default 2 each). Gateways never use the Controller IP.
+Future menu items (e.g. ACAS harden/deharden) will land here the same way.
 
-Same SNMP user/auth/priv for every device. SSH/engine-ID failures skip that box; the rest still get pushed and walked.
+## SNMP Credential Tool — what it does
 
-`SNMP-Walk-<OS>` asks **1) single FQDN/IP** (then *Walk another?*) or **2) pull list from Controller(s)** (same FQDN-first login / exclude as Passwordinator). No SSH and no config push. Health uses `GET /admin/appliances/status` (not the removed `/stats/appliances`).
+Reads `credentials.json`, prompts for gaps, then:
+
+1. Logs in to **every** Controller in `collectives[]` (array order = collective `1`, `2`, …). Each has its own API account and bearer token. A failed login skips that collective  
+2. Pulls appliances from each successful login. One exclude list; handles are `1.hostname` (avoids name clashes across collectives)  
+3. Pushes `engineIDType 3` via the Controller API for each selected appliance, then waits for cz-configd  
+4. SSHes in batches (`SSH_CONCURRENCY`, default 5): restart snmpd, read `oldEngineID`, check MAC (RFC 3411 type 3)  
+5. Localizes auth/priv per engine ID (RFC 3414, SHA-256)  
+6. Pushes `deleteUser` then `createUser` / `rouser` / `engineIDType 3` one appliance at a time. No `exactEngineID`. v1/v2c communities stripped  
+7. SSH: **stop snmpd**, delete persistent `usmUser` (net-snmp will not update an existing user’s password), **start snmpd** so `/etc` `createUser` writes the new keys  
+8. Walks every pushed appliance: **IP first** (NAT), then FQDN. Attempts are `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` (default 2 each). Gateways never use the Controller IP  
+
+Same SNMP user/auth/priv for every device by default. SSH/engine-ID failures skip that box; the rest still get pushed and walked.
+
+**SNMP Walk** asks **1) single FQDN/IP** (then *Walk another?*) or **2) pull list from Controller(s)** (same login / exclude as the credential tool). Health uses `GET /admin/appliances/status` (not the removed `/stats/appliances`).
 
 **Reports:** `WRITE_RUN_REPORT = True` writes timestamped `reports/run-*.json` / `dryrun-*.json` / `walk-*.json` (no passwords/tokens). Full JSON is printed only when `DEBUG = True`.
 
@@ -33,29 +41,25 @@ One launcher per OS. Keep `README.md` and credentials next to it; Python lives i
 
 | OS | Launcher |
 | --- | --- |
-| Windows | `Passwordinator-Windows.bat` |
-| Linux | `./Passwordinator-Linux.sh` |
-| macOS | `Passwordinator-macOS.command` |
+| Windows | `MultiCollectiveToolkit-Windows.bat` |
+| Linux | `./MultiCollectiveToolkit-Linux.sh` |
+| macOS | `MultiCollectiveToolkit-macOS.command` |
 
 Launchers only start `app/main.py`. The Python CLI shows the menu (or takes the first arg):
 
-1. **Passwordinator** — configure appliances  
-2. **Download deps** — prefetch `app/vendor/wheels`  
-3. **SNMP Walk** — validate only  
-
 ```bash
-Passwordinator-Windows.bat
-Passwordinator-Windows.bat 1
-./Passwordinator-Linux.sh 3
+MultiCollectiveToolkit-Windows.bat
+MultiCollectiveToolkit-Windows.bat 1
+./MultiCollectiveToolkit-Linux.sh 3
 python app/main.py 2
 python app/main.py walk
 ```
 
-On Linux/macOS: `chmod +x Passwordinator-Linux.sh Passwordinator-macOS.command` once. On macOS, right-click → Open the first time.
+On Linux/macOS: `chmod +x MultiCollectiveToolkit-Linux.sh MultiCollectiveToolkit-macOS.command` once. On macOS, right-click → Open the first time.
 
 Shared: `snmp_user`, `snmp_auth`, `snmp_priv`, `ssh_username`, `ssh_password`. `rouser` is optional.
 
-Per collective: required `fqdn`, optional `agip`, `admin_username`, `admin_password`. API: FQDN then IP (not on 401/403). SSH: FQDN then IP (Controller uses credentials `agip`; gateway uses appliance `ssh_ip`). SNMP walk: **IP first**, then FQDN (`WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS`). Gateways never walk the Controller IP.
+Per collective: required `fqdn`, optional `agip`, `admin_username`, `admin_password`. API: FQDN then IP (not on 401/403). SSH: FQDN then IP (Controller uses credentials `agip`; gateway uses appliance `ssh_ip`). SNMP walk: **IP first**, then FQDN. Gateways never walk the Controller IP.
 
 A single-controller file still works (collective `1`) but you will be prompted for `fqdn` if it is missing.
 
@@ -66,16 +70,16 @@ A single-controller file still works (collective `1`) but you will be prompted f
 - AppGate admin API access (MFA-exempt local user recommended)
 
 ```bash
-Passwordinator-Windows.bat              # Windows — pick 2) Download deps
-./Passwordinator-Linux.sh               # Linux
-open Passwordinator-macOS.command       # macOS
+MultiCollectiveToolkit-Windows.bat       # pick 2) Download deps
+./MultiCollectiveToolkit-Linux.sh
+open MultiCollectiveToolkit-macOS.command
 ```
 
 Optional walk backend: Linux `snmp` / `net-snmp-utils`, macOS `brew install net-snmp`, or Windows Net-SNMP. Otherwise validation uses `pysnmp`.
 
 ## credentials.json (optional, gitignored)
 
-Copy `credentials.example.json` to `credentials.json` next to the launchers. Missing keys are prompted. Secrets use `getpass`. `agip` is the **Controller** IP for Passwordinator. SNMP-Walk uses it as the single walk target. Do not commit this file.
+Copy `credentials.example.json` to `credentials.json` next to the launchers. Missing keys are prompted. Secrets use `getpass`. Do not commit this file.
 
 ```json
 {
@@ -97,16 +101,12 @@ Copy `credentials.example.json` to `credentials.json` next to the launchers. Mis
 On a **networked machine with the same OS and Python version**:
 
 ```bash
-./Passwordinator-Linux.sh   # choose 2) Download deps
+./MultiCollectiveToolkit-Linux.sh   # choose 2) Download deps
 ```
 
-That fills `app/vendor/wheels/` (`requests`, `paramiko`, `pysnmp` and their dependencies). Copy the whole project folder to the air-gapped host. Launchers install from `app/vendor/` before any network pip.
+That fills `app/vendor/wheels/`. Copy the whole project folder to the air-gapped host. The toolkit installs from `app/vendor/` before any network pip.
 
-Wheels are gitignored. A GitHub ZIP has no wheels until you run Download-Deps. This repo’s cache (if you copy it) is only valid for that OS/Python.
-
-Hashing is in-process. No `snmpv3-hashgen` binary is required.
-
-RFC 3414 / CNSA checks:
+Wheels are gitignored. Hashing is in-process (no external `snmpv3-hashgen`).
 
 ```bash
 python -m unittest tests.test_snmp_hashgen
@@ -137,29 +137,27 @@ python -m unittest tests.test_snmp_hashgen
 | `ALLOWED_HASH_ALGOS` | CNSA-allowed localization hashes |
 | `SNMP_MIN_PASSPHRASE_LEN` | Raise to 15 for stricter sites |
 | `ENGINE_ID_TYPE` / `ETH_IFACE` | Type 3 + MAC source |
-| `SSH_CONCURRENCY` | Parallel SSH sessions (default 5) |
-| `APPLIANCE_SKIP_STATUS` | Health values skipped (offline / not active / warning). `error` is still configured. |
 | `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` / `SSH_PORT` | Transport hardening |
 | `APPGATE_*` | API version, port, provider, machineId |
 | `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
 | `WRITE_RUN_REPORT` | Write `reports/run-*.json` at end (default on) |
 | `REPORTS_DIRNAME` | Report folder under repo root (`reports`) |
 | `DRY_RUN` | Preview: no pin/push/purge/walk/snmpd restart |
-| `DEBUG` | Extra console dump (off) |
-| `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per IP / per FQDN (default 2) |
-| `SNMPD_STOP_RETRIES` / `USM_SED_RETRIES` / `USM_RECREATE_WAITS` | Persistent USM purge timing |
-| `APPLIANCE_STATUS_PATH` | `GET /appliances/status` (6.3+) |
+| `DEBUG` | Full JSON dump to console (off) |
 | `YES_ANSWERS` / `NO_ANSWERS` | Prompt replies |
 | `MENU_CHOICE_ALIASES` | CLI `1`/`walk`/`deps` → tool |
 | `HEALTH_STATUS_KEYS` | Fields read from `/appliances/status` |
+| `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per IP / per FQDN (default 2) |
+| `SSH_CONCURRENCY` | Parallel SSH sessions (default 5) |
+| `APPLIANCE_SKIP_STATUS` | Health values skipped (offline / not active / warning). `error` is still configured. |
+| `APPLIANCE_STATUS_PATH` | `GET /appliances/status` (6.3+) |
+| `SNMPD_STOP_RETRIES` / `USM_SED_RETRIES` / `USM_RECREATE_WAITS` | Persistent USM purge timing |
 | Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention and cz-configd wait |
-
-Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algorithms is a policy exception, not the default.
 
 ## Security notes
 
 - API tokens and walk passphrases are not printed.
-- Localized hashes in the summary are USM keys for ESXi, not the original passwords.
+- Localized hashes in the live summary are USM keys for ESXi, not the original passwords.
 - Windows never downloads a Net-SNMP installer.
 - Persistent USM edits stay under `/var/lib/snmp` and `/var/net-snmp` (no `find /`).
 - `credentials.json` is gitignored.
@@ -173,10 +171,11 @@ Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algor
 | HTTP 422 site | API user needs Appliance **Edit** and Site access; script retries PUT without `site` then prints a hint |
 | Health always `n/a` | `/appliances/status` empty or 403 for this API user; when present, mapped to healthy/busy/warning/error/offline/not active |
 | Gateway missing from list | 6.7 lists only appliances this user can **View**. Edit without View is not enough. Grant Appliance View on all tags / All appliances. |
-| Engine ID not found | API `engineIDType 3`, SSH/sudo, `oldEngineID` after restart, MAC on `ETH_IFACE` |
+| Engine ID not found | API `engineIDType 3`, SSH/sudo, `oldEngineID` after snmpd restart, MAC on `ETH_IFACE` |
 | Passphrase too short | Increase length or lower `SNMP_MIN_PASSPHRASE_LEN` |
 | Walk timeout then pass | cz-configd may drop SNMP iptables briefly; retries usually recover |
 | SSH to Controller FQDN times out | NAT/DNS: set `agip` in that collective; SSH retries the configured IP |
+| Walk / digest error | Leftover `usmUser` in persistent conf, algorithm mismatch, short reload wait |
 | Unknown ssh-rsa host key | Expected when `SSH_STRICT_HOST_KEY` is False |
 | Vendor install failed | Wheels built for another OS/Python — rerun launcher option 2 on a matching host |
 
@@ -184,14 +183,13 @@ Older boxes that only speak SHA-1 / AES-128 will fail validation. Changing algor
 
 | Path | Role |
 | --- | --- |
-| `Passwordinator-<OS>.*` | Starts `app/main.py` (menu + args live in Python) |
-| `app/main.py` | CLI menu + configure workflow (`cli()` / `main()`) |
-| `credentials.example.json` | Empty template |
-| `app/main.py` | Multi-appliance workflow |
-| `app/inventory.py` | Controller list + exclude prompt |
+| `MultiCollectiveToolkit-<OS>.*` | Starts `app/main.py` (menu + args live in Python) |
+| `app/main.py` | CLI menu + SNMP Credential Tool workflow (`cli()` / `main()`) |
+| `credentials.example.json` | Empty credentials template |
+| `app/` | Python sources and optional `vendor/` wheel cache |
 | `app/config.py` | Algorithms, timeouts, paths |
 | `app/appgate.py` | Admin API |
-| `app/snmp_engine.py` | SSH engine ID + USM purge |
+| `app/snmp_engine.py` | SSH Engine ID + USM purge |
 | `app/snmp_hashgen.py` | RFC 3414 localization |
 | `app/snmp_validate.py` | Walk + optional tool install |
 | `app/snmp_walk_test.py` | Standalone walk |

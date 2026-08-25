@@ -238,7 +238,7 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
             f"     {i:2d}  {t.collective:<10}  {t.hostname[:30]:<30}  {host:<22}  {funcs:<22}  {t.health}"
         )
     raw = input(
-        "\n      Exclude (numbers, 1.hostname, hostnames, or IPs; Enter for all): "
+        "\n      Exclude (comma-separated numbers, e.g. 1,3 or 1.hostname; Enter for all): "
     ).strip()
     if not raw:
         return list(targets)

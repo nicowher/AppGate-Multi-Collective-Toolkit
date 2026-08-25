@@ -1,8 +1,8 @@
 #!/bin/sh
-# Thin wrapper: menu/dry-run/dispatch live in app/main.py so shells do not drift.
-#   ./Passwordinator-Linux.sh
-#   ./Passwordinator-Linux.sh 1
-#   ./Passwordinator-Linux.sh walk
+# AppGate Multi-Collective Toolkit — thin OS wrapper (Finder double-click OK).
+# Menu/dispatch live in app/main.py (cli).
+#   ./MultiCollectiveToolkit-macOS.command
+#   ./MultiCollectiveToolkit-macOS.command 1
 cd "$(dirname "$0")"
 if command -v python3 >/dev/null 2>&1; then
   python3 app/main.py "$@"
@@ -11,7 +11,6 @@ else
   python app/main.py "$@"
   rc=$?
 fi
-# Pause only for interactive launches (no args).
 if [ -z "$1" ]; then
   echo
   printf "Press Enter to close..."

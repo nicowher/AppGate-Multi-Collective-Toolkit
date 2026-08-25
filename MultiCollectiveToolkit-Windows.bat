@@ -1,11 +1,11 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-rem Why so thin: menu/dry-run/dispatch stay in Python so .bat/.sh/.command
-rem never drift. This file only picks a Python and forwards args.
-rem   Passwordinator-Windows.bat
-rem   Passwordinator-Windows.bat 1
-rem   Passwordinator-Windows.bat walk
+rem AppGate Multi-Collective Toolkit — thin OS wrapper.
+rem Menu/dispatch live in app\main.py (cli).
+rem   MultiCollectiveToolkit-Windows.bat
+rem   MultiCollectiveToolkit-Windows.bat 1
+rem   MultiCollectiveToolkit-Windows.bat walk
 where py >nul 2>&1
 if %ERRORLEVEL%==0 (
   py -3 "app\main.py" %*

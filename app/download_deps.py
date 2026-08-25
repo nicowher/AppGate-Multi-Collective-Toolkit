@@ -17,7 +17,7 @@ def main() -> None:
         print(f"Download failed: {exc}", file=sys.stderr)
         sys.exit(1)
     print(f"Vendor cache ready in {VENDOR_DIR}", file=sys.stderr)
-    print("Copy this folder to the air-gapped machine, then run the Passwordinator launcher.")
+    print("Copy this folder to the air-gapped machine, then run the Multi-Collective Toolkit launcher.")
 
 
 if __name__ == "__main__":
