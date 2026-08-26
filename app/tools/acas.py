@@ -194,13 +194,13 @@ def _apply(
         for target in selected:
             if mode == "unharden":
                 print(
-                    f"      {target.label()}: would iptables -F SSHBRUTE, "
-                    "append NOPASSWD to /etc/sudoers, wrap banner read -p"
+                    f"      {target.label()}: would flush SSHBRUTE, "
+                    "cz-config nopasswd true, write sudoers drop-in, wrap ssh_confirm.sh"
                 )
             else:
                 print(
-                    f"      {target.label()}: would restore /etc/sudoers "
-                    f"and restart {ACAS_CZCONFIGD_UNIT}"
+                    f"      {target.label()}: would cz-config nopasswd false, "
+                    f"restore backups, rm drop-in, restart {ACAS_CZCONFIGD_UNIT}"
                 )
             target.status = "preview"
         return

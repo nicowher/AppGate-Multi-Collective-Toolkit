@@ -37,25 +37,27 @@ python app/main.py u
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **`DEBUG` and `DRY_RUN` are separate.**
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
 - **SSH keys:** unknown hosts are prompted **on the main thread** before parallel SSH (`Trust and save this host key?`) into `~/.ssh/known_hosts` (`0600`). Workers never call `input()`.
-- **Reports:** `reports/*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
+- **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
 - Missing packages install from `app/vendor/wheels` first, then optional online pip.
 
 ## 1) SNMP Credential Tool
 
-Logs in to every Controller, pulls appliances, then:
+Same 8 steps as the CLI (`[1/8]` … `[8/8]`):
 
-1. Pin `engineIDType 3` via API  
-2. SSH: read `oldEngineID`, check MAC (RFC 3411 type 3)  
-3. Localize auth/priv per engine ID (RFC 3414, SHA-256)  
-4. API `deleteUser` / `createUser` / `rouser` (no `exactEngineID`; v1/v2c stripped)  
-5. SSH: stop snmpd, purge persistent `usmUser`, start snmpd  
-6. Parallel SNMP walk (FQDN then IP)
+1. Authenticate to every Controller API  
+2. Pull appliances; **Dry-run only?** then exclude table  
+3. Pin `engineIDType 3` via API (dry-run: print only)  
+4. SSH host-key prime (main thread), then read `oldEngineID` + MAC check. Live run restarts snmpd; dry-run does not  
+5. Localize auth/priv per engine ID (RFC 3414, SHA-256). Per-collective SNMP secrets if set  
+6. API `deleteUser` / `createUser` / `rouser` (no `exactEngineID`; v1/v2c stripped)  
+7. SSH: stop snmpd, purge persistent `usmUser`, start snmpd  
+8. Parallel SNMP walk (`WALK_CONCURRENCY`; FQDN then IP)
 
-Dry-run: preview engine IDs/hashes (no snmpd restart), then optional live apply. Failures skip that box; the rest continue.
+After a dry-run preview: **Push config to these appliances now?** runs 3–8 live. Failures skip that box; the rest continue.
 
 ## 2) ACAS scan prep
 
-Unharden or harden. API is **inventory only** (a PUT would persist STIG-hostile state). Check the **same hostname** you selected.
+CLI is `[1/3]` API login, `[2/3]` inventory / exclude, `[3/3]` unharden or harden. API is **inventory only**. Check the **same hostname** you selected.
 
 **Unharden (SSH):**
 
@@ -67,11 +69,11 @@ Unharden or harden. API is **inventory only** (a PUT would persist STIG-hostile 
 
 ## 3) SNMP Walk
 
-**1) single FQDN/IP** (then *Walk another?*) or **2) pull list from Controller(s)** (same login / exclude). Validate-only. Health from `GET /admin/appliances/status`. Parallel walks: `WALK_CONCURRENCY`.
+**1) single FQDN/IP** (then *Walk another?*) or **2) Controller list**: `[1/3]` login, `[2/3]` inventory / exclude, `[3/3]` parallel walks. No SSH and no config push. SSH/API secrets are still required for inventory mode. Health from `GET /admin/appliances/status`.
 
 ## 4) Update cz SSH password
 
-Uses current `ssh_password` to log in. On each box: `openssl passwd -6` (new password on **stdin**, not argv), `cz-config set users/0/encrypted-password`, `nopasswd false`, then SSH login-verify (`PASS` / `FAIL`). Warns if `ssh_password_new` is only global. Does not rewrite `credentials.json`.
+`[1/3]` login, `[2/3]` inventory / exclude, `[3/3]` SSH. Uses current `ssh_password`. On each box: host-key prime, `openssl passwd -6` (new password on **stdin**), `cz-config set users/0/encrypted-password`, `nopasswd false`, then SSH login-verify (`PASS` / `FAIL`). Warns if `ssh_password_new` is only global. Does not rewrite `credentials.json`.
 
 ## D / U) Dependencies
 
