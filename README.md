@@ -1,60 +1,84 @@
 # AppGate Multi-Collective Toolkit
 
-Push and validate configuration across multiple AppGate SDP collectives from one launcher. Designed for lab and production, including air-gapped networks.
+One launcher for **several AppGate SDP collectives** at once: SNMPv3 USM, ACAS scan prep, cz SSH password, and walks. Not just an SNMP script. Works in lab and production, including air-gapped hosts.
 
 GitHub: https://github.com/nicowher/AppGate-Multi-Collective-Toolkit
 
-## Tools (menu)
+This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for backup/upgrade. This toolkit is SNMP, ACAS overlays, cz passwords, and multi-collective fan-out in one run.
 
-1. **SNMP Credential Tool** — localized SNMPv3 USM keys (SHA-256 / AES-256) to selected appliances  
-2. **ACAS scan prep** — unharden for scanning, then harden (restart cz-configd)  
-3. **SNMP Walk** — validate authPriv only (no SSH / no config push)  
-4. **Update cz SSH password** — `openssl passwd -6` + `cz-config`  
-D. **Download deps** — `pip download` into `app/vendor/wheels` (air-gap; does not install)  
-U. **Update deps** — `pip install --upgrade` into this Python (needs network; does not refresh wheels)
+## Menu
 
-## SNMP Credential Tool — what it does
+| Key | Tool |
+| --- | --- |
+| **1** | SNMP Credential Tool — localize and push SNMPv3 USM (SHA-256 / AES-256) |
+| **2** | ACAS scan prep — unharden for scanning, then harden (`cz-configd`) |
+| **3** | SNMP Walk — validate authPriv only (no SSH / no config push) |
+| **4** | Update cz SSH password — `openssl passwd -6` + `cz-config` + login verify |
+| **D** | Download deps — `pip download` into `app/vendor/wheels` (air-gap; does not install) |
+| **U** | Update deps — `pip install --upgrade` (needs network; does not refresh wheels) |
+| **Q** | Quit |
 
-Reads `credentials.json`, prompts for gaps, then:
+```bash
+MultiCollectiveToolkit-Windows.bat
+python app/main.py 1
+python app/main.py 2 unharden
+python app/main.py walk
+python app/main.py 4
+python app/main.py d
+python app/main.py u
+```
 
-1. Logs in to **every** Controller in `collectives[]` (array order = collective `1`, `2`, …). Each has its own API account and bearer token. A failed login skips that collective  
-2. Pulls appliances from each successful login. One exclude list; handles are `1.hostname` (avoids name clashes across collectives)  
-3. Pushes `engineIDType 3` via the Controller API for each selected appliance, then waits for cz-configd  
-4. SSHes in batches (`SSH_CONCURRENCY`, default 5): restart snmpd, read `oldEngineID`, check MAC (RFC 3411 type 3)  
-5. Localizes auth/priv per engine ID (RFC 3414, SHA-256)  
-6. Pushes `deleteUser` then `createUser` / `rouser` / `engineIDType 3` one appliance at a time. No `exactEngineID`. v1/v2c communities stripped  
-7. SSH: **stop snmpd**, delete persistent `usmUser` (net-snmp will not update an existing user’s password), **start snmpd** so `/etc` `createUser` writes the new keys  
-8. Walks every pushed appliance: **FQDN first**, then IP. Attempts are `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` (default 2 each). Gateways never use the Controller IP  
+## Shared behavior (all mutating / inventory tools)
 
-Same SNMP user/auth/priv for every device by default. SSH/engine-ID failures skip that box; the rest still get pushed and walked.
+- **`credentials.json`** (gitignored): global defaults plus `collectives[]`. Required per collective: `fqdn` (`agip` recommended). SSH user/pass and API user/pass are required for every tool; SNMP only for 1 and 3; `ssh_password_new` only for 4; `mibs` never required. Old `admin_*` keys still load as `api_*`.
+- **Credential entry** (2+ collectives): **1) global**, **2) per collective**, **3) global then override** selected rows. Short file secrets are discarded; typed replacements are kept. Short/missing `snmp_priv` reuses `snmp_auth`.
+- **Exclude collectives** (number or FQDN) then **exclude appliances** (`1.hostname`).
+- **FQDN first**, then IP. Gateways never use the Controller IP.
+- **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **`DEBUG` and `DRY_RUN` are separate.**
+- **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
+- **SSH keys:** unknown hosts are prompted **on the main thread** before parallel SSH (`Trust and save this host key?`) into `~/.ssh/known_hosts` (`0600`). Workers never call `input()`.
+- **Reports:** `reports/*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
+- Missing packages install from `app/vendor/wheels` first, then optional online pip.
 
-**SNMP Walk** asks **1) single FQDN/IP** (then *Walk another?*) or **2) pull list from Controller(s)** (same login / exclude as the credential tool). Health uses `GET /admin/appliances/status` (not the removed `/stats/appliances`).
+## 1) SNMP Credential Tool
 
-**Update cz SSH password** (menu 4) logs in with current `ssh_password`, then on each box: `openssl passwd -6` (new password on stdin, not argv) and `cz-config set users/0/encrypted-password` plus `nopasswd false`, then **SSH login-verify**. Warns if `ssh_password_new` is only global. STIG complexity (15 chars, upper/lower/digit/special) when `LAB_MODE=False`. Does not rewrite `credentials.json`.
+Logs in to every Controller, pulls appliances, then:
 
-**Credentials:** exclude collectives like appliances. Entry is **1) global**, **2) per collective**, or **3) global then override**. Short file secrets are discarded; typed replacements are kept. Short/missing `snmp_priv` reuses `snmp_auth`.
+1. Pin `engineIDType 3` via API  
+2. SSH: read `oldEngineID`, check MAC (RFC 3411 type 3)  
+3. Localize auth/priv per engine ID (RFC 3414, SHA-256)  
+4. API `deleteUser` / `createUser` / `rouser` (no `exactEngineID`; v1/v2c stripped)  
+5. SSH: stop snmpd, purge persistent `usmUser`, start snmpd  
+6. Parallel SNMP walk (FQDN then IP)
 
-**TLS / SSH keys:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`. Unknown SSH host keys are accepted **on the main thread** before parallel work (`Trust and save this host key?`) into `~/.ssh/known_hosts` (created `0600`). Worker threads never call `input()` (that hung the pool).
+Dry-run: preview engine IDs/hashes (no snmpd restart), then optional live apply. Failures skip that box; the rest continue.
 
-**ACAS scan prep** asks **1) Unharden** or **2) Harden**, then the same Controller login / exclude table. Check the **same hostname** you selected (e.g. `hit-agr-001`, not a connector that was not in the list).
+## 2) ACAS scan prep
 
-API is inventory only. `/etc/sudoers` is autogenerated by cz-configd (`#includedir /etc/sudoers.d`). Unharden (SSH, FQDN first):
+Unharden or harden. API is **inventory only** (a PUT would persist STIG-hostile state). Check the **same hostname** you selected.
 
-1. `iptables` / `ip6tables` `-F SSHBRUTE; -A ACCEPT`
-2. `cz-config set -j users/0/nopasswd true` plus drop-in `ACAS_SUDOERS_DROPIN` (visudo-only edits get wiped)
-3. wrap `/etc/profile.d/ssh_confirm.sh` with `if [ -t 0 ]` so **non-TTY scanners** skip y/N. Interactive SSH still prompts. Missing file (typical gateway) is a skip, not a fail.
+**Unharden (SSH):**
 
-Harden: `nopasswd false`, restore `*.pre-acas`, remove drop-in, `nohup systemctl restart cz-configd` (foreground restart drops SSH). `python app/main.py unharden`. Re-harden as soon as the scan finishes.
+1. `iptables` / `ip6tables` `-F SSHBRUTE; -A ACCEPT`  
+2. `cz-config set -j users/0/nopasswd true` plus drop-in `/etc/sudoers.d/cz-acas-scan` (`/etc/sudoers` is cz-configd-generated)  
+3. Wrap `/etc/profile.d/ssh_confirm.sh` with `if [ -t 0 ]` so **non-TTY scanners** skip y/N. Interactive SSH still prompts. Missing file (typical gateway) is a skip.
 
-**Reports:** `WRITE_RUN_REPORT = True` writes timestamped `reports/run-*.json` / `dryrun-*.json` / `walk-*.json` / `acas-*.json` / `cz-password-*.json` (no passwords/tokens; file mode `0600` on Unix). Full JSON is printed when `DEBUG = True`. ESXi USM keys print when `PRINT_ESXI_KEYS = True`.
+**Harden:** `nopasswd false`, restore `*.pre-acas`, remove drop-in, `nohup systemctl restart cz-configd`. Re-harden as soon as the scan finishes.
 
-**Dry-run flow:** After inventory loads → **Dry-run only?** → exclude appliances → preview (engine ID read without snmpd restart + hashes) → report → **Push config now?** (`y` = live pin/push/purge/walk + second report). `DRY_RUN = True` in `config.py` skips the first prompt.
+## 3) SNMP Walk
 
-Missing Python packages install from `app/vendor/wheels` first (air-gapped), then offer online pip if you allow it.
+**1) single FQDN/IP** (then *Walk another?*) or **2) pull list from Controller(s)** (same login / exclude). Validate-only. Health from `GET /admin/appliances/status`. Parallel walks: `WALK_CONCURRENCY`.
+
+## 4) Update cz SSH password
+
+Uses current `ssh_password` to log in. On each box: `openssl passwd -6` (new password on **stdin**, not argv), `cz-config set users/0/encrypted-password`, `nopasswd false`, then SSH login-verify (`PASS` / `FAIL`). Warns if `ssh_password_new` is only global. Does not rewrite `credentials.json`.
+
+## D / U) Dependencies
+
+- **D:** `pip download` into `app/vendor/wheels` on a **networked machine with the same OS and Python**. Copy the project to the air-gap host.  
+- **U:** `pip install --upgrade` into this interpreter (needs network).
 
 ## Launchers
-
-One launcher per OS. Keep `README.md` and credentials next to it; Python lives in `app/`.
 
 | OS | Launcher |
 | --- | --- |
@@ -62,44 +86,48 @@ One launcher per OS. Keep `README.md` and credentials next to it; Python lives i
 | Linux | `./MultiCollectiveToolkit-Linux.sh` |
 | macOS | `MultiCollectiveToolkit-macOS.command` |
 
-Launchers only start `app/main.py`. The Python CLI shows the menu (or takes the first arg):
-
-```bash
-MultiCollectiveToolkit-Windows.bat
-MultiCollectiveToolkit-Windows.bat 1
-./MultiCollectiveToolkit-Linux.sh 3
-python app/main.py d
-python app/main.py u
-python app/main.py 2
-python app/main.py unharden
-python app/main.py walk
-```
-
-On Linux/macOS: `chmod +x MultiCollectiveToolkit-Linux.sh MultiCollectiveToolkit-macOS.command` once. On macOS, right-click → Open the first time.
-
-Shared defaults: `ssh_username`, `ssh_password`, `snmp_user`, `snmp_auth`, `snmp_priv`, `rouser`, `mibs` (OID/MIB name array). Collective objects may omit any of these.
-
-Per collective: required `fqdn`; `agip` recommended (IP fallback). Optional: `api_username` / `api_password`, `ssh_*` (including `ssh_password_new`), `snmp_*`, `rouser`, `mibs`. Empty/omitted = inherit top-level. Old `admin_*` keys still load.
-
-A single-controller file still works (collective `1`) but you will be prompted for `fqdn` if it is missing.
+Launchers only start `app/main.py`. On Linux/macOS: `chmod +x` once. On macOS, right-click → Open the first time.
 
 ## Prerequisites
 
 - Python 3.7+
 - SSH to the appliance with sudo
-- AppGate admin API access (MFA-exempt local user recommended)
+- AppGate admin API (MFA-exempt local user recommended)
+
+Optional walk backend: Linux `snmp` / `net-snmp-utils`, macOS `brew install net-snmp`, or Windows Net-SNMP. Otherwise walks use `pysnmp`.
 
 ```bash
-MultiCollectiveToolkit-Windows.bat       # pick D) Download deps
-./MultiCollectiveToolkit-Linux.sh
-open MultiCollectiveToolkit-macOS.command
+python -m unittest tests.test_snmp_hashgen
 ```
-
-Optional walk backend: Linux `snmp` / `net-snmp-utils`, macOS `brew install net-snmp`, or Windows Net-SNMP. Otherwise validation uses `pysnmp`.
 
 ## credentials.json (optional, gitignored)
 
-Copy `credentials.example.json` to `credentials.json` next to the launchers. Missing keys are prompted. Secrets use `getpass`. Do not commit this file.
+Copy `credentials.example.json` to `credentials.json` next to the launchers. Missing keys are prompted. Secrets use `getpass` (typed twice). Do not commit this file.
+
+**Global** (top-level): used by every collective unless that row overrides the same key.
+
+| Field | Required | Used by | Meaning |
+| --- | --- | --- | --- |
+| `ssh_username` | All tools | SSH | Appliance login (usually `cz`) |
+| `ssh_password` | All tools | SSH | Current sudo/SSH password |
+| `ssh_password_new` | Menu 4 only | cz password | Replacement cz password. Prefer per-collective. Global-only prints a warning |
+| `api_username` | All tools | Controller API | Admin API user (old name: `admin_username`) |
+| `api_password` | All tools | Controller API | Admin API password (old name: `admin_password`) |
+| `snmp_user` | Menus 1 and 3 | SNMPv3 | USM user name |
+| `snmp_auth` | Menus 1 and 3 | SNMPv3 | Auth passphrase (min 8 lab / 15 if `LAB_MODE=False`) |
+| `snmp_priv` | Menus 1 and 3 | SNMPv3 | Priv passphrase. If missing or too short, auth is reused |
+| `rouser` | Optional | Menu 1 | Read-only username written into snmpd.conf |
+| `mibs` | Never | Reserved | Array of MIB/OID names (e.g. `["SNMPv2-MIB"]`) |
+
+**Each object in `collectives[]`:**
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `fqdn` | Yes | Controller admin hostname (API/SSH/walk first) |
+| `agip` | Recommended | Controller IP if the FQDN fails |
+| Any global key above | Optional | Override for this collective only. Omit or `""` = inherit global |
+
+A one-controller file (no `collectives[]`, just top-level `fqdn`/`agip`) still works as collective `1`.
 
 ```json
 {
@@ -120,7 +148,6 @@ Copy `credentials.example.json` to `credentials.json` next to the launchers. Mis
       "api_username": "api-a",
       "api_password": "...",
       "ssh_password_new": "",
-      "snmp_auth": "",
       "mibs": []
     },
     { "fqdn": "ctrl-b.example.com", "agip": "10.0.0.10" }
@@ -128,132 +155,77 @@ Copy `credentials.example.json` to `credentials.json` next to the launchers. Mis
 }
 ```
 
-## Air-gapped install
-
-On a **networked machine with the same OS and Python version**:
-
-```bash
-./MultiCollectiveToolkit-Linux.sh   # choose 2) Download deps
-```
-
-That fills `app/vendor/wheels/`. Copy the whole project folder to the air-gapped host. The toolkit installs from `app/vendor/` before any network pip.
-
-Wheels are gitignored. Hashing is in-process (no external `snmpv3-hashgen`).
-
-```bash
-python -m unittest tests.test_snmp_hashgen
-```
-
 ## Standards (NSA / DISA / RFC)
 
-| Area | What this tool does |
+Applies mainly to **menu 1** (SNMP) and **menu 4** (cz password).
+
+| Area | What this toolkit does |
 | --- | --- |
-| RFC 3411 | Engine ID type 3 = 4-byte enterprise (MSB set) + `0x03` + 6-byte MAC. Validated against `ETH_IFACE`. |
-| RFC 3414 | Password-to-key: expand passphrase to 1 MiB, `Ku = H(expanded)`, `Kul = H(Ku \|\| engineID \|\| Ku)`. |
-| RFC 7630 / 7860 | Auth HMAC-SHA-256 (`usmHMAC192SHA256AuthProtocol`). |
-| RFC 3826 family | Privacy AES-256 CFB (`AES256` / `usmAesCfb256Protocol`). |
-| CNSA 2.0 (NSA) | Default SHA-256 + AES-256. MD5 and SHA-1 are rejected. |
-| DISA SNMP STIG | authPriv only; v1/v2c communities stripped from pushed config; min passphrase length; no default `public` community written by this tool. |
-| Timeouts | Every SSH, HTTPS, pip, and walk call has a timeout so the tool cannot hang on a dead socket. |
+| RFC 3411 | Engine ID type 3 = enterprise + `0x03` + MAC. Checked against `ETH_IFACE`. |
+| RFC 3414 | Password-to-key localization (SHA-256). |
+| RFC 7630 / 7860 | Auth HMAC-SHA-256. |
+| RFC 3826 family | Privacy AES-256 CFB. |
+| CNSA 2.0 | Default SHA-256 + AES-256. MD5 and SHA-1 rejected. |
+| DISA | authPriv only; v1/v2c stripped; passphrase floor; STIG cz password when `LAB_MODE=False`. |
 
-**Known deviations (set in `app/config.py`):**
+**Known deviations (`app/config.py`):**
 
-- `LAB_MODE` at the bottom of `app/config.py` sets TLS verify, SSH host-key policy, ESXi key printing, SNMP min passphrase (15 off-lab), and STIG new-password check. `DEBUG` and `DRY_RUN` stay independent.
-- `DEBUG` is **False**. `LAB_MODE` is **False** (STIG new-password check on). Set `LAB_MODE=True` only in lab.
-- AppGate `createUser` stores a vendor priv OID (`.1.3.6.1.4.1.14832.1.4`) that is still AES-256 CFB; walks use pysnmp’s AES-256 protocol object.
+- `LAB_MODE=False`: TLS on, SSH TOFU, no ESXi Kul dump, SNMP passphrase ≥15, STIG cz password on. Set `LAB_MODE=True` only in lab.
+- `DEBUG` is **False**.
+- AppGate `createUser` stores a vendor priv OID that is still AES-256 CFB.
 
 ## Tunables (`app/config.py`)
 
 | Variable | Meaning |
 | --- | --- |
+| `LAB_MODE` | TLS, SSH host keys, Kul dump, SNMP min len, STIG cz pw |
+| `DEBUG` / `DRY_RUN` | Independent of `LAB_MODE` |
+| `SSH_KNOWN_HOSTS` | Empty = `~/.ssh/known_hosts` |
+| `SSH_CONCURRENCY` / `WALK_CONCURRENCY` | Parallel SSH / walks (default 5) |
 | `SNMP_HASH_ALGO` / `SNMP_AUTH_PROTOCOL` / `SNMP_PRIV_PROTOCOL` | Must stay in sync |
-| `ALLOWED_HASH_ALGOS` | CNSA-allowed localization hashes |
-| `SNMP_MIN_PASSPHRASE_LEN` | Raise to 15 for stricter sites |
-| `ENGINE_ID_TYPE` / `ETH_IFACE` | Type 3 + MAC source |
-| `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` / `SSH_PORT` / `SSH_KNOWN_HOSTS` / `LAB_MODE` | Transport; empty known_hosts path = `~/.ssh/known_hosts` |
-| `CZ_PASSWORD_VERIFY_DELAY` | Seconds to wait before SSH login-verify after cz-config set |
-| `APPGATE_*` | API version, port, provider, machineId |
-| `STRIP_V1V2_COMMUNITIES` | Drop `rocommunity` / `rwcommunity` |
-| `WRITE_RUN_REPORT` | Write `reports/run-*.json` at end (default on) |
-| `REPORTS_DIRNAME` | Report folder under repo root (`reports`) |
-| `DRY_RUN` | Preview: no pin/push/purge/walk/snmpd restart |
-| `DEBUG` | Full JSON dump + step traces to console (off; set True for lab) |
-| `PRINT_ESXI_KEYS` | Print localized USM keys in the SNMP summary (DISA: False) |
-| `PIP_UPGRADE_TIMEOUT` | Menu U `pip install --upgrade` timeout |
-| `REPORT_FILE_MODE` | Unix mode for new report files (`0600`) |
-| `SNMPD_STOP_POLL_SEC` | Delay between snmpd stop polls |
-| `LOGIN_BODY_PREVIEW` / `API_ERROR_BODY_PREVIEW` / `SSH_LOG_PREVIEW` / `WALK_ERROR_PREVIEW` | Truncate error bodies (no full payloads) |
-| `SUMMARY_WIDTH` / `INVENTORY_NAME_WIDTH` | Human table layout |
-| `VENDOR_DOWNLOAD_TIMEOUT` | pip download timeout for menu option D |
-| `ACAS_SSH_TIMEOUT` | SSH command timeout for cz-configd restart (default 90) |
-| `ACAS_SUDOERS_DROPIN` / `ACAS_SUDOERS_FILE` / `ACAS_BANNER_FILE` / `ACAS_IPTABLES_CHAIN` / `ACAS_CZCONFIGD_UNIT` | ACAS overlay paths (`ssh_confirm.sh`, SSHBRUTE) |
-| `ENGINE_ID_MIN_OCTETS` / `ENGINE_ID_MAX_OCTETS` | RFC 3411 engine-ID length check |
-| `YES_ANSWERS` / `NO_ANSWERS` | Prompt replies |
-| `MENU_CHOICE_ALIASES` | CLI `1`/`2`/`walk`/`acas`/`d`/`deps` → tool |
-| `HEALTH_STATUS_KEYS` | Fields read from `/appliances/status` |
-| `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per IP / per FQDN (default 2) |
-| `SSH_CONCURRENCY` | Parallel SSH sessions (default 5) |
-| `WALK_CONCURRENCY` | Parallel SNMP walks for inventory / step 8 (default 5) |
-| `APPLIANCE_SKIP_STATUS` | Health values skipped (offline / not active / warning). `error` is still configured. |
-| `APPLIANCE_STATUS_PATH` | `GET /appliances/status` (6.3+) |
-| `SNMPD_STOP_RETRIES` / `USM_SED_RETRIES` / `USM_RECREATE_WAITS` | Persistent USM purge timing |
-| Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention and cz-configd wait |
+| `CZ_PASSWORD_VERIFY_DELAY` | Wait before SSH login-verify |
+| `ACAS_*` | Banner, sudoers drop-in, SSHBRUTE, cz-configd unit |
+| `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per address |
+| `WRITE_RUN_REPORT` / `REPORTS_DIRNAME` | JSON reports |
+| `MENU_CHOICE_ALIASES` | `1` / `acas` / `walk` / `password` / `d` / `u` |
+| Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention |
 
 ## Security notes
 
-- API tokens and walk passphrases are not printed. Login/PUT error bodies are truncated.
-- Localized hashes in the live summary are USM keys for ESXi, not the original passwords. Reports store hash *lengths*, not the hex.
-- Engine IDs are validated (hex, 5–32 octets) before RFC 3414 localization so a bad `oldEngineID` cannot crash or mint garbage Kul.
-- Windows never downloads a Net-SNMP installer.
-- Persistent USM edits stay under `/var/lib/snmp` and `/var/net-snmp` (no `find /`). SNMP usernames are matched against `SNMP_NAME_RE` before remote `sed`.
-- `credentials.json` is gitignored. Report files use mode `0600` where the OS honors it.
-- `LAB_MODE=False`: TLS on, strict SSH keys, no ESXi Kul dump, SNMP passphrase ≥15, STIG cz password check on.
-- ACAS unharden leaves `NOPASSWD` and an open `SSHBRUTE` until harden. Do not leave a box unhardened.
-- Identical `snmp_auth` / `snmp_priv` prints a DISA warning (distinct secrets preferred).
-- RFC 3414 passphrase floor is 8 in lab; `LAB_MODE=False` raises it to 15.
+- Tokens and passphrases are not printed. New cz password is not on the remote argv.
+- Reports store hash *lengths*, not hex. `PRINT_ESXI_KEYS` follows `LAB_MODE`.
+- `credentials.json` is gitignored. Reports are `0600` where the OS honors it.
+- ACAS unharden leaves `NOPASSWD` and an open `SSHBRUTE` until harden.
+- Identical `snmp_auth` / `snmp_priv` prints a DISA warning.
 
 ## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
-| 401 login failed | API user, MFA exemption, `APPGATE_PROVIDER` (`local` / `saml` / `oidc`) |
-| 403 Forbidden | Admin role can edit appliances |
-| HTTP 422 site | API user needs Appliance **Edit** and Site access; script retries PUT without `site` then prints a hint |
-| Health always `n/a` | `/appliances/status` empty or 403 for this API user; when present, mapped to healthy/busy/warning/error/offline/not active |
-| Gateway missing from list | 6.7 lists only appliances this user can **View**. Edit without View is not enough. Grant Appliance View on all tags / All appliances. |
-| Engine ID not found | API `engineIDType 3`, SSH/sudo, `oldEngineID` after snmpd restart, MAC on `ETH_IFACE` |
-| Passphrase too short | Increase length or lower `SNMP_MIN_PASSPHRASE_LEN` |
-| Walk timeout then pass | cz-configd may drop SNMP iptables briefly; retries usually recover |
-| SSH to Controller FQDN times out | NAT/DNS: set `agip` in that collective; SSH retries the configured IP |
-| Walk / digest error | Leftover `usmUser` in persistent conf, algorithm mismatch, short reload wait |
-| Unknown SSH host key | Answer the main-thread prompt; key is saved to `~/.ssh/known_hosts` |
-| SSH hang on host-key prompt | Old bug (input from worker). Update and re-run; keys are primed first |
-| Vendor install failed | Wheels built for another OS/Python — rerun launcher option D on a matching host |
-| ACAS unharden SSH lockout | `SSHBRUTE` still dropping; confirm iptables step ran |
-| ACAS banner still hangs **interactive** SSH | Intended. `if [ -t 0 ]` only skips non-TTY. Test: `ssh -T user@host` |
-| ACAS banner missing on gateway | Skip is OK. File is `ACAS_BANNER_FILE` (`/etc/profile.d/ssh_confirm.sh`) |
-| ACAS visudo shows no NOPASSWD | File is cz-configd generated. Check `cz-config get users/0/nopasswd` and `/etc/sudoers.d/cz-acas-scan` |
-| ACAS harden reported fail / SSH drop | Old bug; restart is `nohup`. Re-run harden |
-| Menu U fails on air-gap | U needs network. Use D to prefetch wheels, copy `app/vendor/`, then install from vendor |
-| Need a flow trace | Set `DEBUG = True` for step traces + JSON. Uncomment `# print(f"DEBUG ...")` for more. Never print passphrases. |
-
-Uncomment extra `# print(f"DEBUG ...")` lines in the file you are tracing if the live `DEBUG=True` output is not enough. Comment them again when done. Do not add passphrase / token prints.
+| 401 login failed | API user, MFA exemption, `APPGATE_PROVIDER` |
+| 403 Forbidden | Admin role can edit/view appliances |
+| TLS verify failed | Self-signed: answer Proceed anyway, or `LAB_MODE=True` |
+| Health always `n/a` | `/appliances/status` empty or 403 |
+| Gateway missing from list | Need Appliance **View** on those tags |
+| Engine ID not found | `engineIDType 3`, SSH/sudo, MAC on `ETH_IFACE` |
+| Walk / digest error | Leftover `usmUser`, algorithm mismatch |
+| Unknown SSH host key | Answer the **main-thread** prompt |
+| SSH hang on host-key prompt | Old bug; keys are primed before the pool |
+| ACAS banner still hangs **interactive** SSH | Intended. Test: `ssh -T user@host` |
+| ACAS visudo shows no NOPASSWD | Check `cz-config get users/0/nopasswd` and the drop-in |
+| Menu U fails on air-gap | Use **D**, copy `app/vendor/` |
+| Need a flow trace | `DEBUG = True`; optional `# print(f"DEBUG ...")` |
 
 ## Layout
 
 | Path | Role |
 | --- | --- |
-| `MultiCollectiveToolkit-<OS>.*` | Starts `app/main.py` (menu + args live in Python) |
-| `app/main.py` | CLI menu only (`cli()`) |
-| `app/config.py` | Algorithms, timeouts, paths |
-| `app/tools/` | Menu tools (credentials, ACAS, walk, download deps) |
-| `app/api/` | Admin API HTTP client only |
-| `app/ssh/` | Shared SSH session + SNMP engine/USM + ACAS overlay |
-| `app/core/` | Shared non-HTTP helpers (inventory model, prompts, hashgen, walk, utils) |
-| `app/core/inventory.py` | Target model, health labels, exclude prompt (not an API client) |
-| `app/core/prompts.py` | Shared Controller / credential prompts |
-| `app/core/snmp_hashgen.py` | RFC 3414 localization |
-| `app/core/snmp_validate.py` | Walk backends + optional tool install |
-| `app/core/utils.py` | Vendor pip, credentials load, report writer |
-| `app/vendor/` | Offline wheel cache (not committed) |
-| `credentials.example.json` | Empty credentials template |
+| `MultiCollectiveToolkit-<OS>.*` | Starts `app/main.py` |
+| `app/main.py` | Menu only |
+| `app/config.py` | Algorithms, timeouts, `LAB_MODE` |
+| `app/tools/` | SNMP credentials, ACAS, walk, cz password, deps |
+| `app/api/` | Admin API HTTP client |
+| `app/ssh/` | SSH session, SNMP engine/USM, ACAS, cz password |
+| `app/core/` | Inventory, prompts, hashgen, walk, utils |
+| `app/vendor/` | Offline wheels (not committed) |
+| `credentials.example.json` | Empty template |
