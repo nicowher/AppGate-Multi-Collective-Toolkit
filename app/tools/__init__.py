@@ -3,7 +3,7 @@
 Each tool is launched from app/main.py. Shared code is in api/, ssh/, and
 core/ (not loose files under app/). Adding app/ to sys.path here (and
 again at the top of each tool file) lets `python app/tools/<name>.py` work
-the same as `python app/main.py N`.
+the same as `python app/main.py N` (or `d` for download deps).
 """
 import os
 import sys

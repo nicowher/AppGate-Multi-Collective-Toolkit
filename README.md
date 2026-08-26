@@ -7,10 +7,10 @@ GitHub: https://github.com/nicowher/AppGate-Multi-Collective-Toolkit
 ## Tools (menu)
 
 1. **SNMP Credential Tool** — localized SNMPv3 USM keys (SHA-256 / AES-256) to selected appliances  
-2. **Download deps** — prefetch `app/vendor/wheels`  
+2. **ACAS scan prep** — unharden for scanning, then harden (restart cz-configd)  
 3. **SNMP Walk** — validate authPriv only (no SSH / no config push)  
-
-Future menu items (e.g. ACAS harden/deharden) will land here the same way.
+D. **Download deps** — `pip download` into `app/vendor/wheels` (air-gap; does not install)  
+U. **Update deps** — `pip install --upgrade` into this Python (needs network; does not refresh wheels)
 
 ## SNMP Credential Tool — what it does
 
@@ -29,7 +29,9 @@ Same SNMP user/auth/priv for every device by default. SSH/engine-ID failures ski
 
 **SNMP Walk** asks **1) single FQDN/IP** (then *Walk another?*) or **2) pull list from Controller(s)** (same login / exclude as the credential tool). Health uses `GET /admin/appliances/status` (not the removed `/stats/appliances`).
 
-**Reports:** `WRITE_RUN_REPORT = True` writes timestamped `reports/run-*.json` / `dryrun-*.json` / `walk-*.json` (no passwords/tokens; file mode `0600` on Unix). Full JSON is printed when `DEBUG = True` (currently on for lab troubleshooting — set `False` before production).
+**ACAS scan prep** asks **1) Unharden** or **2) Harden**, then the same Controller login / exclude table. API is inventory only — a PUT would persist STIG-hostile state. Unharden (SSH, FQDN first): flush `SSHBRUTE` on iptables **and** ip6tables, write `ACAS_SUDOERS_DROPIN` (`NOPASSWD` for the SSH user), wrap the DoD banner `read -p` in `if [ -t 0 ]` (backup `*.pre-acas`, `bash -n` before replace). Harden: restore those backups, remove the drop-in, `systemctl restart cz-configd.service`. `python app/main.py unharden`. Re-harden as soon as the scan finishes (NOPASSWD is a STIG finding if left on).
+
+**Reports:** `WRITE_RUN_REPORT = True` writes timestamped `reports/run-*.json` / `dryrun-*.json` / `walk-*.json` / `acas-*.json` (no passwords/tokens; file mode `0600` on Unix). Full JSON is printed when `DEBUG = True` (on for lab). ESXi USM keys print when `PRINT_ESXI_KEYS = True`.
 
 **Dry-run flow:** After inventory loads → **Dry-run only?** → exclude appliances → preview (engine ID read without snmpd restart + hashes) → report → **Push config now?** (`y` = live pin/push/purge/walk + second report). `DRY_RUN = True` in `config.py` skips the first prompt.
 
@@ -51,7 +53,10 @@ Launchers only start `app/main.py`. The Python CLI shows the menu (or takes the 
 MultiCollectiveToolkit-Windows.bat
 MultiCollectiveToolkit-Windows.bat 1
 ./MultiCollectiveToolkit-Linux.sh 3
+python app/main.py d
+python app/main.py u
 python app/main.py 2
+python app/main.py unharden
 python app/main.py walk
 ```
 
@@ -70,7 +75,7 @@ A single-controller file still works (collective `1`) but you will be prompted f
 - AppGate admin API access (MFA-exempt local user recommended)
 
 ```bash
-MultiCollectiveToolkit-Windows.bat       # pick 2) Download deps
+MultiCollectiveToolkit-Windows.bat       # pick D) Download deps
 ./MultiCollectiveToolkit-Linux.sh
 open MultiCollectiveToolkit-macOS.command
 ```
@@ -144,15 +149,19 @@ python -m unittest tests.test_snmp_hashgen
 | `WRITE_RUN_REPORT` | Write `reports/run-*.json` at end (default on) |
 | `REPORTS_DIRNAME` | Report folder under repo root (`reports`) |
 | `DRY_RUN` | Preview: no pin/push/purge/walk/snmpd restart |
-| `DEBUG` | Full JSON dump + step traces to console (on for lab; **off for production**) |
+| `DEBUG` | Full JSON dump + step traces to console (**on** for lab; off for production) |
+| `PRINT_ESXI_KEYS` | Print localized USM keys in the SNMP summary (DISA: False) |
+| `PIP_UPGRADE_TIMEOUT` | Menu U `pip install --upgrade` timeout |
 | `REPORT_FILE_MODE` | Unix mode for new report files (`0600`) |
 | `SNMPD_STOP_POLL_SEC` | Delay between snmpd stop polls |
 | `LOGIN_BODY_PREVIEW` / `API_ERROR_BODY_PREVIEW` / `SSH_LOG_PREVIEW` / `WALK_ERROR_PREVIEW` | Truncate error bodies (no full payloads) |
 | `SUMMARY_WIDTH` / `INVENTORY_NAME_WIDTH` | Human table layout |
-| `VENDOR_DOWNLOAD_TIMEOUT` | pip download timeout for menu option 2 |
+| `VENDOR_DOWNLOAD_TIMEOUT` | pip download timeout for menu option D |
+| `ACAS_SSH_TIMEOUT` | SSH command timeout for cz-configd restart (default 90) |
+| `ACAS_SUDOERS_DROPIN` / `ACAS_IPTABLES_CHAIN` / `ACAS_BANNER_*` / `ACAS_CZCONFIGD_UNIT` | ACAS overlay paths and banner search |
 | `ENGINE_ID_MIN_OCTETS` / `ENGINE_ID_MAX_OCTETS` | RFC 3411 engine-ID length check |
 | `YES_ANSWERS` / `NO_ANSWERS` | Prompt replies |
-| `MENU_CHOICE_ALIASES` | CLI `1`/`walk`/`deps` → tool |
+| `MENU_CHOICE_ALIASES` | CLI `1`/`2`/`walk`/`acas`/`d`/`deps` → tool |
 | `HEALTH_STATUS_KEYS` | Fields read from `/appliances/status` |
 | `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per IP / per FQDN (default 2) |
 | `SSH_CONCURRENCY` | Parallel SSH sessions (default 5) |
@@ -169,7 +178,9 @@ python -m unittest tests.test_snmp_hashgen
 - Windows never downloads a Net-SNMP installer.
 - Persistent USM edits stay under `/var/lib/snmp` and `/var/net-snmp` (no `find /`). SNMP usernames are matched against `SNMP_NAME_RE` before remote `sed`.
 - `credentials.json` is gitignored. Report files use mode `0600` where the OS honors it.
-- Lab defaults (`TLS_VERIFY=False`, `SSH_STRICT_HOST_KEY=False`, `DEBUG=True`) print a warning at tool start. Production: all three flipped (`True` / `True` / `False`).
+- Lab defaults (`TLS_VERIFY=False`, `SSH_STRICT_HOST_KEY=False`, `DEBUG=True`) print a warning at tool start. Production: `True` / `True` / `False`.
+- ACAS unharden leaves `NOPASSWD` and an open `SSHBRUTE` until harden. Do not leave a box unhardened.
+- Identical `snmp_auth` / `snmp_priv` prints a DISA warning (distinct secrets preferred).
 - RFC 3414 passphrase floor is 8; raise `SNMP_MIN_PASSPHRASE_LEN` to 15 for stricter DISA sites.
 
 ## Troubleshooting
@@ -187,7 +198,10 @@ python -m unittest tests.test_snmp_hashgen
 | SSH to Controller FQDN times out | NAT/DNS: set `agip` in that collective; SSH retries the configured IP |
 | Walk / digest error | Leftover `usmUser` in persistent conf, algorithm mismatch, short reload wait |
 | Unknown ssh-rsa host key | Expected when `SSH_STRICT_HOST_KEY` is False |
-| Vendor install failed | Wheels built for another OS/Python — rerun launcher option 2 on a matching host |
+| Vendor install failed | Wheels built for another OS/Python — rerun launcher option D on a matching host |
+| ACAS unharden SSH lockout | `SSHBRUTE` still dropping; confirm iptables step ran |
+| ACAS banner still hangs scan | Banner not under `ACAS_BANNER_PATHS` / `ACAS_BANNER_SEARCH_ROOTS`; add the path in `config.py` |
+| Menu U fails on air-gap | U needs network. Use D to prefetch wheels, copy `app/vendor/`, then install from vendor |
 | Need a flow trace | `DEBUG = True` already prints step traces + JSON. For more, uncomment `# print(f"DEBUG ...")` lines in the tool you are tracing, then comment them again. Never uncomment lines that would print passphrases. |
 
 Uncomment extra `# print(f"DEBUG ...")` lines in the file you are tracing if the live `DEBUG=True` output is not enough. Comment them again when done. Do not add passphrase / token prints.
@@ -199,9 +213,9 @@ Uncomment extra `# print(f"DEBUG ...")` lines in the file you are tracing if the
 | `MultiCollectiveToolkit-<OS>.*` | Starts `app/main.py` (menu + args live in Python) |
 | `app/main.py` | CLI menu only (`cli()`) |
 | `app/config.py` | Algorithms, timeouts, paths |
-| `app/tools/` | Menu tools (credentials, walk, download deps) |
+| `app/tools/` | Menu tools (credentials, ACAS, walk, download deps) |
 | `app/api/` | Admin API HTTP client only |
-| `app/ssh/` | Shared SSH session + SNMP engine/USM helpers |
+| `app/ssh/` | Shared SSH session + SNMP engine/USM + ACAS overlay |
 | `app/core/` | Shared non-HTTP helpers (inventory model, prompts, hashgen, walk, utils) |
 | `app/core/inventory.py` | Target model, health labels, exclude prompt (not an API client) |
 | `app/core/prompts.py` | Shared Controller / credential prompts |

@@ -13,8 +13,10 @@ the parent of this package (``app/``), not ``app/core/``.
       collectives[] is kept as a list of objects (not stringified).
 
   vendor_has_wheels / install_from_vendor / ensure_package / download_vendor_wheels
+  / upgrade_vendor_packages
       Used when requests/paramiko/pysnmp are missing. Vendor wheels first
-      (air-gapped); online pip only if the operator allows it.
+      (air-gapped); online pip only if the operator allows it. Menu U upgrades
+      the same packages in the current interpreter.
 """
 import importlib.util
 import ipaddress
@@ -29,6 +31,7 @@ from typing import Any, Callable, Dict, Optional
 from config import (
     DEBUG,
     PIP_INSTALL_TIMEOUT,
+    PIP_UPGRADE_TIMEOUT,
     REPORT_FILE_MODE,
     REPORTS_DIRNAME,
     VENDOR_DOWNLOAD_TIMEOUT,
@@ -117,6 +120,26 @@ def download_vendor_wheels() -> None:
     )
 
 
+def upgrade_vendor_packages() -> None:
+    """pip install --upgrade the same packages menu D downloads (not wheels)."""
+    print(
+        f"Upgrading {', '.join(VENDOR_PACKAGES)} via pip ...",
+        file=sys.stderr,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--upgrade",
+            *VENDOR_PACKAGES,
+        ],
+        check=True,
+        timeout=PIP_UPGRADE_TIMEOUT,
+    )
+
+
 def ensure_package(package: str, import_name: str) -> None:
     """Install a missing dependency from vendor/ first, then pip if allowed."""
     if importlib.util.find_spec(import_name) is not None:
@@ -133,7 +156,7 @@ def ensure_package(package: str, import_name: str) -> None:
         )
         return
     print(
-        f"Please install {package} (or run launcher option 2 / python app/main.py 2) and rerun.",
+        f"Please install {package} (or run launcher option D / python app/main.py d) and rerun.",
         file=sys.stderr,
     )
     sys.exit(1)

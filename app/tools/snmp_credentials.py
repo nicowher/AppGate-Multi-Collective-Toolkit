@@ -29,7 +29,6 @@ if _APP_DIR not in sys.path:
 
 import platform
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -38,6 +37,7 @@ from config import (
     APPGATE_API_VERSION,
     DEBUG,
     DRY_RUN,
+    PRINT_ESXI_KEYS,
     ENGINE_ID_TYPE,
     ETH_IFACE,
     SNMP_AUTH_PROTOCOL,
@@ -58,6 +58,7 @@ from core.prompts import CREDENTIALS_PATH, _parse_collectives, _require
 from core.snmp_hashgen import SNMPHashGenerator
 from core.snmp_validate import SNMPValidator
 from core.utils import load_credentials, write_json_report
+from ssh.client import run_ssh_batch
 from ssh.engine import SNMPEngineFetcher
 
 ClientMap = Dict[int, AppGateClient]
@@ -73,25 +74,6 @@ def _fail(target: Target, message: str) -> None:
     target.status = "failed"
     target.error = message
     print(f"      FAIL {target.label()}: {message}", file=sys.stderr)
-
-
-def _run_ssh_batch(
-    targets: List[Target],
-    worker: Callable[[Target], None],
-    concurrency: int,
-) -> None:
-    """Steps 4 and 7: run SSH work in a pool (default 5). One box crashing does not stop the rest."""
-    if not targets:
-        return
-    workers = max(1, min(concurrency, len(targets)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(worker, t): t for t in targets}
-        for future in as_completed(futures):
-            target = futures[future]
-            try:
-                future.result()
-            except Exception as exc:
-                _fail(target, str(exc))
 
 
 def _api_by_collective(
@@ -148,6 +130,12 @@ def main() -> None:
         }
         ssh_user = _require(creds, "ssh_username", "SSH Username")
         ssh_pass = _require(creds, "ssh_password", "SSH Password", sensitive=True)
+        if inputs["snmp_auth"] == inputs["snmp_priv"]:
+            print(
+                "WARNING: snmp_auth and snmp_priv are identical. "
+                "DISA SNMPv3 wants distinct auth and priv secrets.",
+                file=sys.stderr,
+            )
 
         collectives = _parse_collectives(creds)
         if not collectives:
@@ -343,7 +331,7 @@ def _run_phases_3_to_8(
         target.engine_id = engine_id
         print(f"      {target.label()}: engine {engine_id}")
 
-    _run_ssh_batch(_ok(selected), _ssh_engine, SSH_CONCURRENCY)
+    run_ssh_batch(_ok(selected), _ssh_engine, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
     if not _ok(selected):
         print("      No appliances left after SSH engine-ID pass.", file=sys.stderr)
 
@@ -392,7 +380,7 @@ def _run_phases_3_to_8(
             )
             print(f"      {target.label()}: persistent USM purged")
 
-        _run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY)
+        run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 
     print("\n[8/8] Validating SNMP walks...")
     if dry_run:
@@ -435,9 +423,7 @@ def _print_summary(
         extra = target.engine_id or target.error
         host = target.ssh_fqdn or target.ssh_ip
         print(f"  [{state:<7}] {target.label():<32} {host:<22} {extra}")
-        if target.status == "ok" and target.auth_hash:
-            print(f"           ESXi: {user}/{target.auth_hash}/{target.priv_hash}/priv")
-        elif target.status == "preview" and target.auth_hash:
+        if PRINT_ESXI_KEYS and target.auth_hash and target.status in ("ok", "preview"):
             print(f"           ESXi: {user}/{target.auth_hash}/{target.priv_hash}/priv")
     print("=" * SUMMARY_WIDTH)
 

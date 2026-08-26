@@ -28,6 +28,7 @@ except ImportError:
     import paramiko
 
 import re
+import shlex
 import sys
 import time
 from typing import Optional, Sequence, Union
@@ -63,17 +64,12 @@ class SNMPEngineFetcher(SSHSession):
         """
         if not self.ssh_user or not self.ssh_password:
             raise ValueError("SSH credentials are required to retrieve the Engine ID")
-        addrs = self._hosts(host)
-        last = None
-        for i, addr in enumerate(addrs):
-            engine = self._ssh_query_engine_id(addr, restart_snmpd=restart_snmpd)
-            if engine:
-                return engine
-            last = addr
-            if i < len(addrs) - 1:
-                print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
-        raise ValueError(
-            f"Could not retrieve Engine ID via SSH ({last or host})"
+        return self._with_ssh_endpoints(
+            host,
+            lambda c: self._configure_and_read_engine_id(
+                c, restart_snmpd=restart_snmpd
+            ),
+            error="Could not retrieve Engine ID via SSH",
         )
 
     def purge_persistent_user(
@@ -180,12 +176,6 @@ class SNMPEngineFetcher(SSHSession):
             print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
         raise RuntimeError(f"Could not purge persistent SNMP user '{user}' via SSH")
 
-    def _ssh_query_engine_id(self, ip: str, *, restart_snmpd: bool = True) -> Optional[str]:
-        def _reader(client: paramiko.SSHClient) -> Optional[str]:
-            return self._configure_and_read_engine_id(client, restart_snmpd=restart_snmpd)
-
-        return self._with_ssh(ip, _reader)
-
     def _configure_and_read_engine_id(
         self, client: paramiko.SSHClient, *, restart_snmpd: bool = True
     ) -> Optional[str]:
@@ -196,7 +186,7 @@ class SNMPEngineFetcher(SSHSession):
             )
             if not self._restart_snmpd(client):
                 print("      snmpd restart failed.", file=sys.stderr)
-                return None
+                return False
             time.sleep(SNMP_RELOAD_DELAY)
         else:
             print("      Reading existing oldEngineID (no snmpd restart)...", file=sys.stderr)
@@ -209,7 +199,7 @@ class SNMPEngineFetcher(SSHSession):
                 f"Output: {(raw or '').strip()[:200]}",
                 file=sys.stderr,
             )
-            return None
+            return False
         engine_id = match.group(1).lower()
         print(f"      oldEngineID: {engine_id}", file=sys.stderr)
         # print(f"DEBUG step4: raw oldEngineID line={raw!r}")
@@ -219,7 +209,7 @@ class SNMPEngineFetcher(SSHSession):
         mac = self._read_iface_mac(client)
         if not mac:
             print(f"      Could not read {ETH_IFACE} MAC via ip addr.", file=sys.stderr)
-            return None
+            return False
         print(f"      {ETH_IFACE} MAC: {mac}", file=sys.stderr)
 
         expected_suffix = mac.replace(":", "").lower()
@@ -229,7 +219,7 @@ class SNMPEngineFetcher(SSHSession):
                 f"(expected ...03{expected_suffix}, got {engine_id}).",
                 file=sys.stderr,
             )
-            return None
+            return False
         print(f"      Engine ID matches {ETH_IFACE} MAC (engineIDType {ENGINE_ID_TYPE}).", file=sys.stderr)
         return engine_id
 
@@ -267,11 +257,12 @@ class SNMPEngineFetcher(SSHSession):
         return status == "active" or "is running" in fallback or "active (running)" in fallback
 
     def _read_iface_mac(self, client: paramiko.SSHClient) -> Optional[str]:
-        output = self._run(client, f"ip -o link show {ETH_IFACE}")
+        iface = shlex.quote(ETH_IFACE)
+        output = self._run(client, f"ip -o link show {iface}")
         match = MAC_RE.search(output or "")
         if match:
             return match.group(1).lower()
-        output = self._run(client, f"ip addr show {ETH_IFACE}")
+        output = self._run(client, f"ip addr show {iface}")
         match = MAC_RE.search(output or "")
         return match.group(1).lower() if match else None
 
