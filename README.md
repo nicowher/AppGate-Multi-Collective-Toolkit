@@ -18,16 +18,6 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 | **U** | Update deps — `pip install --upgrade` (needs network; does not refresh wheels) |
 | **Q** | Quit |
 
-```bash
-MultiCollectiveToolkit-Windows.bat
-python app/main.py 1
-python app/main.py 2 unharden
-python app/main.py walk
-python app/main.py 4
-python app/main.py d
-python app/main.py u
-```
-
 ## Shared behavior (all mutating / inventory tools)
 
 - **`credentials.json`** (gitignored): global defaults plus `collectives[]`. Required per collective: `fqdn` (`agip` recommended). SSH user/pass and API user/pass are required for every tool; SNMP only for 1 and 3; `ssh_password_new` only for 4; `mibs` never required. Old `admin_*` keys still load as `api_*`.
@@ -88,7 +78,7 @@ CLI is `[1/3]` API login, `[2/3]` inventory / exclude, `[3/3]` unharden or harde
 | Linux | `./MultiCollectiveToolkit-Linux.sh` |
 | macOS | `MultiCollectiveToolkit-macOS.command` |
 
-Launchers only start `app/main.py`. On Linux/macOS: `chmod +x` once. On macOS, right-click → Open the first time.
+Double-click the launcher for the menu, or pass a tool: `MultiCollectiveToolkit-Windows.bat 1` / `python app/main.py walk`. On Linux/macOS: `chmod +x` once. On macOS, right-click → Open the first time.
 
 ## Prerequisites
 
@@ -178,19 +168,27 @@ Applies mainly to **menu 1** (SNMP) and **menu 4** (cz password).
 
 ## Tunables (`app/config.py`)
 
+Three switches people actually flip:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `LAB_MODE` | `False` | **Security posture.** `True`: skip TLS verify, WarningPolicy SSH keys, print ESXi Kul, SNMP passphrase min 8, skip STIG cz-password check. `False`: verify TLS (prompt after cert fail), prompt/save SSH host keys, hide Kul, SNMP min 15, STIG cz password on. |
+| `DEBUG` | `False` | **Console noise.** `True`: step traces (`DEBUG step2:…`) and full JSON report dump. Does **not** change TLS, SSH keys, or STIG. Unrelated to `LAB_MODE`. |
+| `DRY_RUN` | `False` | **Force preview.** `True`: skip the “Dry-run only?” prompt and never pin/push/purge/walk/restart snmpd. You can still dry-run when this is `False` by answering `y` at the prompt. Unrelated to `LAB_MODE`. |
+
+Other knobs:
+
 | Variable | Meaning |
 | --- | --- |
-| `LAB_MODE` | TLS, SSH host keys, Kul dump, SNMP min len, STIG cz pw |
-| `DEBUG` / `DRY_RUN` | Independent of `LAB_MODE` |
-| `SSH_KNOWN_HOSTS` | Empty = `~/.ssh/known_hosts` |
-| `SSH_CONCURRENCY` / `WALK_CONCURRENCY` | Parallel SSH / walks (default 5) |
-| `SNMP_HASH_ALGO` / `SNMP_AUTH_PROTOCOL` / `SNMP_PRIV_PROTOCOL` | Must stay in sync |
-| `CZ_PASSWORD_VERIFY_DELAY` | Wait before SSH login-verify |
-| `ACAS_*` | Banner, sudoers drop-in, SSHBRUTE, cz-configd unit |
-| `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per address |
-| `WRITE_RUN_REPORT` / `REPORTS_DIRNAME` | JSON reports |
-| `MENU_CHOICE_ALIASES` | `1` / `acas` / `walk` / `password` / `d` / `u` |
-| Timeouts and `SNMP_RELOAD_DELAY` | Hang prevention |
+| `SSH_KNOWN_HOSTS` | Empty = `~/.ssh/known_hosts` (created `0600` if missing) |
+| `SSH_CONCURRENCY` / `WALK_CONCURRENCY` | Parallel SSH / SNMP walks (default 5) |
+| `SNMP_HASH_ALGO` / `SNMP_AUTH_PROTOCOL` / `SNMP_PRIV_PROTOCOL` | Must stay in sync (SHA-256 / AES-256) |
+| `CZ_PASSWORD_VERIFY_DELAY` | Seconds to wait before SSH login-verify after cz-config set |
+| `ACAS_*` | Banner file, sudoers drop-in, SSHBRUTE chain, cz-configd unit |
+| `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per address (default 2) |
+| `WRITE_RUN_REPORT` / `REPORTS_DIRNAME` | Write `reports/*.json` |
+| `MENU_CHOICE_ALIASES` | CLI tokens → `1` / `2` / `3` / `4` / `d` / `u` |
+| `SNMP_RELOAD_DELAY` | Wait after API pin/push so cz-configd can settle |
 
 ## Security notes
 
