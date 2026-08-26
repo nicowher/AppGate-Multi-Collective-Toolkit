@@ -1,7 +1,7 @@
 """AppGate Multi-Collective Toolkit — CLI menu.
 
 OS launchers only run this file so menu/args stay in one place (not duplicated
-in .bat/.sh). ``cli()`` shows the menu or dispatches 1/2/3/d/u.
+in .bat/.sh). ``cli()`` shows the menu or dispatches 1/2/3/4/d/u.
 
 ``app/`` is menu + config plus folders: ``tools/``, ``api/``, ``ssh/``, ``core/``.
 """
@@ -12,7 +12,7 @@ from config import ACAS_MODES, DEBUG, MENU_CHOICE_ALIASES, NO_ANSWERS
 
 
 def _normalize_menu_choice(raw: str) -> str:
-    """Map user/argv token to 1|2|3|d|u|q (empty if unknown)."""
+    """Map user/argv token to 1|2|3|4|d|u|q (empty if unknown)."""
     return MENU_CHOICE_ALIASES.get((raw or "").strip().lower(), "")
 
 
@@ -23,12 +23,13 @@ def _prompt_menu_choice() -> str:
     print("  1) SNMP Credential Tool  (configure SNMPv3 USM)")
     print("  2) ACAS scan prep        (unharden / harden)")
     print("  3) SNMP Walk             (validate only)")
+    print("  4) Update cz SSH password")
     print("  D) Download deps         (prefetch vendor wheels)")
     print("  U) Update deps           (pip install --upgrade)")
     print("  Q) Quit")
     print()
     while True:
-        choice = _normalize_menu_choice(input("Select 1, 2, 3, D, U, or Q: "))
+        choice = _normalize_menu_choice(input("Select 1, 2, 3, 4, D, U, or Q: "))
         if choice:
             return choice
         print("Invalid choice.")
@@ -57,6 +58,10 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
         if choice == "3":
             from tools.snmp_walk import main as walk_main
             walk_main()
+            return 0
+        if choice == "4":
+            from tools.cz_password import main as czpw_main
+            czpw_main()
             return 0
         if choice == "d":
             from tools.download_deps import main as deps_main
@@ -101,7 +106,7 @@ def cli(argv: Optional[List[str]] = None) -> None:
             if choice == "q":
                 return
             if not choice:
-                print("Invalid choice. Use 1, 2, 3, D, U, or Q.", file=sys.stderr)
+                print("Invalid choice. Use 1, 2, 3, 4, D, U, or Q.", file=sys.stderr)
                 if noninteractive:
                     sys.exit(2)
                 continue

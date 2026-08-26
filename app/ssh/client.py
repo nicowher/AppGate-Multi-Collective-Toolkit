@@ -3,7 +3,8 @@
 Password auth first; keyboard-interactive is the fallback some AppGate
 boxes require. Timeouts come from config (SSH_TIMEOUT / SSH_AUTH_TIMEOUT)
 so a dead host cannot hang the toolkit. Host-key policy is
-SSH_STRICT_HOST_KEY (lab WarningPolicy / production RejectPolicy).
+SSH_STRICT_HOST_KEY (lab WarningPolicy / production TOFU: prompt on the
+main thread, then save ~/.ssh/known_hosts). Never input() from a worker.
 """
 from core.utils import ensure_package, run_target_batch
 
@@ -13,18 +14,23 @@ except ImportError:
     ensure_package("paramiko", "paramiko")
     import paramiko
 
+import os
 import shlex
 import socket
 import sys
+import threading
+from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 from config import (
     DEBUG,
     SSH_AUTH_TIMEOUT,
+    SSH_KNOWN_HOSTS,
     SSH_LOG_PREVIEW,
     SSH_PORT,
     SSH_STRICT_HOST_KEY,
     SSH_TIMEOUT,
+    YES_ANSWERS,
 )
 
 
@@ -40,12 +46,39 @@ class SSHSession:
         return [h for h in host if h]
 
     def _apply_host_key_policy(self, client: paramiko.SSHClient) -> None:
+        path = SSH_KNOWN_HOSTS.strip() or str(Path.home() / ".ssh" / "known_hosts")
+        path = os.path.expanduser(path)
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            if not os.path.isfile(path):
+                fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+                os.close(fd)
+            client.load_host_keys(path)
+        except OSError as exc:
+            print(f"      Could not prepare known_hosts {path}: {exc}", file=sys.stderr)
         try:
             client.load_system_host_keys()
         except OSError:
             pass
-        policy = paramiko.RejectPolicy() if SSH_STRICT_HOST_KEY else paramiko.WarningPolicy()
-        client.set_missing_host_key_policy(policy)
+        # Strict: trust-on-first-use (add unknown, reject changed keys).
+        # Lab: WarningPolicy (do not persist).
+        if SSH_STRICT_HOST_KEY:
+            if threading.current_thread() is threading.main_thread():
+                client.set_missing_host_key_policy(_PromptAddHostKeyPolicy())
+            else:
+                client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        else:
+            client.set_missing_host_key_policy(paramiko.WarningPolicy())
+
+    def prime_host_keys(self, hosts: Union[str, Sequence[str]]) -> None:
+        """Accept unknown keys on this thread (call from main before a pool)."""
+        for host in self._hosts(hosts):
+            if _hostname_known(host):
+                continue
+            print(f"      Checking SSH host key for {host}...", file=sys.stderr)
+            self._with_ssh(host, lambda _c: True)
 
     def _with_ssh(self, ip: str, fn):
         """Open an SSH session, run *fn(client)*, then close.
@@ -162,6 +195,7 @@ class SSHSession:
         client: paramiko.SSHClient,
         script: str,
         timeout: Optional[int] = None,
+        extra_stdin: str = "",
     ) -> Optional[Tuple[int, str]]:
         cmd = f"sudo -S bash -c {shlex.quote(script)}"
         wait = SSH_TIMEOUT if timeout is None else timeout
@@ -169,6 +203,10 @@ class SSHSession:
         stdout.channel.settimeout(wait)
         stderr.channel.settimeout(wait)
         stdin.write(self.ssh_password + "\n")
+        if extra_stdin:
+            if not extra_stdin.endswith("\n"):
+                extra_stdin += "\n"
+            stdin.write(extra_stdin)
         stdin.flush()
         try:
             stdin.channel.shutdown_write()
@@ -221,6 +259,68 @@ class SSHSession:
         # if DEBUG:
         #     print(f"DEBUG ssh: cmd={command!r} rc={exit_status} out={output[:80]!r}", file=sys.stderr)
         return output
+
+
+def _known_hosts_path() -> str:
+    path = SSH_KNOWN_HOSTS.strip() or str(Path.home() / ".ssh" / "known_hosts")
+    return os.path.expanduser(path)
+
+
+def _hostname_known(hostname: str) -> bool:
+    path = _known_hosts_path()
+    if not os.path.isfile(path):
+        return False
+    try:
+        keys = paramiko.HostKeys(path)
+        return keys.lookup(hostname) is not None
+    except OSError:
+        return False
+
+
+def _save_host_key(client, hostname, key) -> None:
+    client.get_host_keys().add(hostname, key.get_name(), key)
+    path = getattr(client, "_host_keys_filename", None) or _known_hosts_path()
+    try:
+        client.save_host_keys(path)
+    except OSError as exc:
+        print(f"      Could not save known_hosts: {exc}", file=sys.stderr)
+
+
+class _PromptAddHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """TOFU: prompt on the main thread only (worker input() deadlocks)."""
+
+    def missing_host_key(self, client, hostname, key) -> None:
+        print(
+            f"      SSH host key for {hostname} is not in known_hosts.",
+            file=sys.stderr,
+        )
+        ans = input("      Trust and save this host key? [y/N]: ").strip().lower()
+        if ans not in YES_ANSWERS:
+            raise paramiko.SSHException(f"Host key for {hostname} rejected")
+        _save_host_key(client, hostname, key)
+        print(f"      Saved host key for {hostname}.", file=sys.stderr)
+
+
+def prime_target_host_keys(targets, collectives) -> None:
+    """Prompt for unknown FQDN keys on the main thread before a worker pool."""
+    from core.prompts import collective_for_target
+
+    # print(f"DEBUG prime_keys: n={len(targets)}")
+    print(
+        "      SSH host keys: accept each new host before parallel work starts.",
+        file=sys.stderr,
+    )
+    seen = set()
+    for target in targets:
+        col = collective_for_target(target, collectives)
+        host = target.ssh_fqdn or (
+            target.ssh_endpoints()[0] if target.ssh_endpoints() else ""
+        )
+        marker = (col.get("ssh_username"), host)
+        if not host or marker in seen:
+            continue
+        seen.add(marker)
+        SSHSession(col["ssh_username"], col["ssh_password"]).prime_host_keys([host])
 
 
 def run_ssh_batch(

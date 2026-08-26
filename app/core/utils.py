@@ -178,22 +178,51 @@ def prompt_until_valid(
 ) -> str:
     """Read a field from creds or stdin. Invalid values re-prompt; never exit."""
     value = str(creds.get(field) or "").strip()
+    from_file = bool(value)
     while True:
         if value:
             if min_len and len(value) < min_len:
-                print(f"      Must be at least {min_len} characters. Try again.", file=sys.stderr)
-            elif pattern and not re.fullmatch(pattern, value):
+                if from_file:
+                    print(
+                        f"      {field} in credentials.json is {len(value)} character(s); "
+                        f"need at least {min_len}. Enter a new value.",
+                        file=sys.stderr,
+                    )
+                    creds[field] = ""
+                else:
+                    print(
+                        f"      {field} entry is {len(value)} character(s); "
+                        f"need at least {min_len}.",
+                        file=sys.stderr,
+                    )
+                value = ""
+                from_file = False
+                continue
+            if pattern and not re.fullmatch(pattern, value):
                 print(f"      {pattern_msg}", file=sys.stderr)
-            elif validator and not validator(value):
+                value = ""
+                from_file = False
+                continue
+            if validator and not validator(value):
                 print(f"      {validator_msg}", file=sys.stderr)
-            else:
-                return value
-        elif not required:
+                value = ""
+                from_file = False
+                continue
+            creds[field] = value
+            return value
+        if not required:
             return ""
         if sensitive:
             value = getpass(f"{prompt}: ").strip()
+            if value:
+                confirm = getpass(f"{prompt} (confirm): ").strip()
+                if confirm != value:
+                    print("      Entries did not match. Try again.", file=sys.stderr)
+                    value = ""
+                    continue
         else:
             value = input(f"{prompt}: ").strip()
+        from_file = False
         if required and not value:
             print("      This field is required. Try again.", file=sys.stderr)
 
@@ -213,8 +242,8 @@ def load_credentials(path: str) -> Dict[str, Any]:
             print(f"      DEBUG creds: loaded {path} keys={sorted(data)}", file=sys.stderr)
         out: Dict[str, Any] = {}
         for key, value in data.items():
-            # Keep collectives[] as a list of objects (do not stringify it).
-            if key == "collectives":
+            # Keep objects/arrays (collectives[], mibs[]) — do not stringify them.
+            if isinstance(value, (list, dict)):
                 out[key] = value
             else:
                 out[key] = "" if value is None else str(value)

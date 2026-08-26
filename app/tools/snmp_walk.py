@@ -28,7 +28,13 @@ from config import (
     warn_insecure_transport,
 )
 from core.inventory import prompt_exclusions
-from core.prompts import CREDENTIALS_PATH, _parse_collectives, _require
+from core.prompts import (
+    CREDENTIALS_PATH,
+    _parse_collectives,
+    _require,
+    collective_for_target,
+    prepare_collectives,
+)
 from core.snmp_validate import SNMPValidator
 from core.utils import is_valid_host, load_credentials, run_target_batch, write_json_report
 
@@ -101,15 +107,16 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     collectives = _parse_collectives(creds)
     if not collectives:
         raise ValueError("No collectives defined (collectives[] or agip)")
+    prepare_collectives(creds, collectives, need_snmp=True)
 
     print("\n[1/3] Authenticating to Controller API(s)...")
     clients = {}
     for col in collectives:
         idx = int(col["index"])
-        print(f"      [{idx}] {col['fqdn']} as {col['admin_username']}...")
+        print(f"      [{idx}] {col['fqdn']} as {col['api_username']}...")
         client = AppGateClient(col["fqdn"], fallback_ip=col.get("agip") or "")
         try:
-            client.login(col["admin_username"], col["admin_password"])
+            client.login(col["api_username"], col["api_password"])
             clients[idx] = client
             print(f"      [{idx}] Authenticated")
         except Exception as exc:
@@ -146,8 +153,13 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     # print(f"DEBUG walk-inventory: parallel={WALK_CONCURRENCY}")
 
     def _walk_one(target) -> None:
+        col = collective_for_target(target, collectives)
         ok = SNMPValidator().validate_snmp_walk(
-            target.walk_endpoints(), user, auth, priv, engine_id=target.engine_id or None
+            target.walk_endpoints(),
+            col.get("snmp_user") or user,
+            col.get("snmp_auth") or auth,
+            col.get("snmp_priv") or priv,
+            engine_id=target.engine_id or None,
         )
         target.walk_ok = ok
         print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
@@ -172,7 +184,7 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
                     "index": int(c["index"]),
                     "fqdn": c.get("fqdn", ""),
                     "agip": c.get("agip", ""),
-                    "admin_username": c["admin_username"],
+                    "api_username": c["api_username"],
                 }
                 for c in collectives
             ],
@@ -202,8 +214,10 @@ def main() -> None:
     choice = ""
     while choice not in ("1", "2"):
         choice = input("Select 1 or 2: ").strip()
-    user, auth, priv = _snmp_creds(creds)
     if choice == "1":
+        user, auth, priv = _snmp_creds(creds)
+        _require(creds, "ssh_username", "SSH Username")
+        _require(creds, "ssh_password", "SSH Password", sensitive=True)
         sys.exit(_walk_single(creds, user, auth, priv))
     sys.exit(_walk_inventory(creds, user, auth, priv))
 

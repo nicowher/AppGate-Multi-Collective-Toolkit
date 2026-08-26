@@ -49,6 +49,7 @@ from config import (
     SNMP_PRIV_PROTOCOL,
     STRIP_V1V2_COMMUNITIES,
     TLS_VERIFY,
+    confirm_skip_tls_verify,
 )
 import re
 import sys
@@ -62,7 +63,15 @@ from core.inventory import (
     is_selectable,
 )
 
-if not TLS_VERIFY:
+_tls_verify = TLS_VERIFY
+if not _tls_verify:
+    from requests.packages.urllib3.exceptions import InsecureRequestWarning
+    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+
+def _disable_tls_verify() -> None:
+    global _tls_verify
+    _tls_verify = False
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
     requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
@@ -112,9 +121,30 @@ class AppGateClient:
                     f"{self.base_url}/login",
                     headers=self.headers,
                     json=payload,
-                    verify=TLS_VERIFY,
+                    verify=_tls_verify,
                     timeout=API_TIMEOUT,
                 )
+            except requests.exceptions.SSLError as exc:
+                last_connect_error = exc
+                print(
+                    f"      TLS verify failed for {host} (self-signed or untrusted CA).",
+                    file=sys.stderr,
+                )
+                if confirm_skip_tls_verify():
+                    _disable_tls_verify()
+                    try:
+                        response = requests.post(
+                            f"{self.base_url}/login",
+                            headers=self.headers,
+                            json=payload,
+                            verify=False,
+                            timeout=API_TIMEOUT,
+                        )
+                    except (requests.ConnectionError, requests.Timeout, OSError) as retry_exc:
+                        last_connect_error = retry_exc
+                        continue
+                else:
+                    continue
             except (requests.ConnectionError, requests.Timeout, OSError) as exc:
                 last_connect_error = exc
                 print(
@@ -247,7 +277,7 @@ class AppGateClient:
                 f"{self.base_url}{path}",
                 headers=self.headers,
                 params={"range": f"{start}-{end}"},
-                verify=TLS_VERIFY,
+                verify=_tls_verify,
                 timeout=API_TIMEOUT,
             )
             if response.status_code not in (200, 206):
@@ -285,7 +315,7 @@ class AppGateClient:
         response = requests.get(
             f"{self.base_url}/appliances",
             headers=self.headers,
-            verify=TLS_VERIFY,
+            verify=_tls_verify,
             timeout=API_TIMEOUT,
         )
         response.raise_for_status()
@@ -429,7 +459,7 @@ class AppGateClient:
         response = requests.get(
             f"{self.base_url}/appliances/{aid}",
             headers=self.headers,
-            verify=TLS_VERIFY,
+            verify=_tls_verify,
             timeout=API_TIMEOUT,
         )
         response.raise_for_status()
@@ -463,13 +493,13 @@ class AppGateClient:
         body = self._sanitize_appliance_for_put(appliance)
         url = f"{self.base_url}/appliances/{appliance.get('id')}"
         put_response = requests.put(
-            url, headers=self.headers, json=body, verify=TLS_VERIFY, timeout=API_TIMEOUT
+            url, headers=self.headers, json=body, verify=_tls_verify, timeout=API_TIMEOUT
         )
         if put_response.status_code == 422 and "site" in (put_response.text or "").lower():
             body.pop("site", None)
             print("      Retrying PUT without site (422 site privilege/shape).", file=sys.stderr)
             put_response = requests.put(
-                url, headers=self.headers, json=body, verify=TLS_VERIFY, timeout=API_TIMEOUT
+                url, headers=self.headers, json=body, verify=_tls_verify, timeout=API_TIMEOUT
             )
         if put_response.status_code != 200:
             body_preview = (put_response.text or "")[:API_ERROR_BODY_PREVIEW]

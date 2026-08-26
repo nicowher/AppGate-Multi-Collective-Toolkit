@@ -55,11 +55,17 @@ from config import (
     warn_insecure_transport,
 )
 from core.inventory import Target, prompt_exclusions
-from core.prompts import CREDENTIALS_PATH, _parse_collectives, _require
+from core.prompts import (
+    CREDENTIALS_PATH,
+    _parse_collectives,
+    _require,
+    collective_for_target,
+    prepare_collectives,
+)
 from core.snmp_hashgen import SNMPHashGenerator
 from core.snmp_validate import SNMPValidator
 from core.utils import load_credentials, run_target_batch, write_json_report
-from ssh.client import run_ssh_batch
+from ssh.client import prime_target_host_keys, run_ssh_batch
 from ssh.engine import SNMPEngineFetcher
 
 ClientMap = Dict[int, AppGateClient]
@@ -105,21 +111,16 @@ def _api_by_collective(
 
 def main() -> None:
     try:
+        warn_insecure_transport()
         creds = load_credentials(CREDENTIALS_PATH)
+        collectives = _parse_collectives(creds)
+        if not collectives:
+            raise ValueError("No collectives defined (collectives[] or agip)")
+        prepare_collectives(creds, collectives, need_snmp=True)
         inputs = {
-            "snmp_user": _require(
-                creds,
-                "snmp_user",
-                "SNMP User",
-                pattern=SNMP_NAME_RE,
-                pattern_msg="Use letters, digits, underscore, dot, or hyphen.",
-            ),
-            "snmp_auth": _require(
-                creds, "snmp_auth", "SNMP Auth", sensitive=True, min_len=SNMP_MIN_PASSPHRASE_LEN
-            ),
-            "snmp_priv": _require(
-                creds, "snmp_priv", "SNMP Priv", sensitive=True, min_len=SNMP_MIN_PASSPHRASE_LEN
-            ),
+            "snmp_user": collectives[0].get("snmp_user") or "",
+            "snmp_auth": collectives[0].get("snmp_auth") or "",
+            "snmp_priv": collectives[0].get("snmp_priv") or "",
             "rouser": _require(
                 creds,
                 "rouser",
@@ -129,20 +130,13 @@ def main() -> None:
                 pattern_msg="Use letters, digits, underscore, dot, or hyphen.",
             ),
         }
-        ssh_user = _require(creds, "ssh_username", "SSH Username")
-        ssh_pass = _require(creds, "ssh_password", "SSH Password", sensitive=True)
-        if inputs["snmp_auth"] == inputs["snmp_priv"]:
+        if inputs["snmp_auth"] and inputs["snmp_auth"] == inputs["snmp_priv"]:
             print(
                 "WARNING: snmp_auth and snmp_priv are identical. "
                 "DISA SNMPv3 wants distinct auth and priv secrets.",
                 file=sys.stderr,
             )
 
-        collectives = _parse_collectives(creds)
-        if not collectives:
-            raise ValueError("No collectives defined (collectives[] or agip)")
-
-        warn_insecure_transport()
         dry_run = DRY_RUN
         # print(f"DEBUG step0: DRY_RUN={DRY_RUN} WRITE_RUN_REPORT={WRITE_RUN_REPORT} DEBUG={DEBUG}")
         if DEBUG:
@@ -150,9 +144,7 @@ def main() -> None:
                 f"      DEBUG step0: dry_run={dry_run} collectives={len(collectives)}",
                 file=sys.stderr,
             )
-        engine_fetcher = SNMPEngineFetcher(ssh_user, ssh_pass)
         hashgen = SNMPHashGenerator()
-        validator = SNMPValidator()
         user = inputs["snmp_user"]
         rouser_line = f"rouser {inputs['rouser']} priv" if inputs.get("rouser") else ""
         started_at = datetime.now(timezone.utc).isoformat()
@@ -161,10 +153,10 @@ def main() -> None:
         clients: ClientMap = {}
         for col in collectives:
             idx = int(col["index"])
-            print(f"      [{idx}] {col['fqdn']} as {col['admin_username']}...")
+            print(f"      [{idx}] {col['fqdn']} as {col['api_username']}...")
             client = AppGateClient(col["fqdn"], fallback_ip=col.get("agip") or "")
             try:
-                client.login(col["admin_username"], col["admin_password"])
+                client.login(col["api_username"], col["api_password"])
                 clients[idx] = client
                 print(f"      [{idx}] Authenticated")
             except Exception as exc:
@@ -221,9 +213,8 @@ def main() -> None:
         _run_phases_3_to_8(
             selected=selected,
             clients=clients,
-            engine_fetcher=engine_fetcher,
+            collectives=collectives,
             hashgen=hashgen,
-            validator=validator,
             user=user,
             snmp_auth=inputs["snmp_auth"],
             snmp_priv=inputs["snmp_priv"],
@@ -257,9 +248,8 @@ def main() -> None:
                 _run_phases_3_to_8(
                     selected=selected,
                     clients=clients,
-                    engine_fetcher=engine_fetcher,
+                    collectives=collectives,
                     hashgen=hashgen,
-                    validator=validator,
                     user=user,
                     snmp_auth=inputs["snmp_auth"],
                     snmp_priv=inputs["snmp_priv"],
@@ -293,9 +283,8 @@ def _run_phases_3_to_8(
     *,
     selected: List[Target],
     clients: ClientMap,
-    engine_fetcher: SNMPEngineFetcher,
+    collectives: list,
     hashgen: SNMPHashGenerator,
-    validator: SNMPValidator,
     user: str,
     snmp_auth: str,
     snmp_priv: str,
@@ -320,13 +309,15 @@ def _run_phases_3_to_8(
         time.sleep(SNMP_RELOAD_DELAY)
 
     print(f"\n[4/8] SSH engine ID (up to {SSH_CONCURRENCY} at a time)...")
+    prime_target_host_keys(_ok(selected), collectives)
 
     def _ssh_engine(target: Target) -> None:
         if target.status == "failed":
             return
-        engine_id = engine_fetcher.get_engine_id(
-            target.ssh_endpoints(), restart_snmpd=not dry_run
-        )
+        col = collective_for_target(target, collectives)
+        engine_id = SNMPEngineFetcher(
+            col["ssh_username"], col["ssh_password"]
+        ).get_engine_id(target.ssh_endpoints(), restart_snmpd=not dry_run)
         if engine_id.lower().startswith("0x"):
             engine_id = engine_id[2:]
         target.engine_id = engine_id
@@ -339,7 +330,13 @@ def _run_phases_3_to_8(
     print("\n[5/8] Localizing SNMPv3 keys...")
     for target in _ok(selected):
         try:
-            data = hashgen.generate_hashes(user, snmp_auth, snmp_priv, target.engine_id)
+            col = collective_for_target(target, collectives)
+            data = hashgen.generate_hashes(
+                col.get("snmp_user") or user,
+                col.get("snmp_auth") or snmp_auth,
+                col.get("snmp_priv") or snmp_priv,
+                target.engine_id,
+            )
             target.auth_hash = data["hashes"]["auth"]
             target.priv_hash = data["hashes"]["priv"]
             print(f"      {target.label()}: hashed")
@@ -356,10 +353,12 @@ def _run_phases_3_to_8(
             target.status = "preview"
     else:
         def _push(target: Target, client: AppGateClient) -> None:
-            client.delete_snmp_user(user, appliance_id=target.appliance_id)
+            col = collective_for_target(target, collectives)
+            snmp_user = col.get("snmp_user") or user
+            client.delete_snmp_user(snmp_user, appliance_id=target.appliance_id)
             time.sleep(SNMP_RELOAD_DELAY)
             client.update_snmp_config(
-                user,
+                snmp_user,
                 target.auth_hash,
                 target.priv_hash,
                 rouser_line,
@@ -376,8 +375,11 @@ def _run_phases_3_to_8(
             print(f"      {target.label()}: would purge persistent usmUser {user}")
     else:
         def _ssh_purge(target: Target) -> None:
-            engine_fetcher.purge_persistent_user(
-                target.ssh_endpoints(), user, keep_hash=target.auth_hash
+            col = collective_for_target(target, collectives)
+            SNMPEngineFetcher(col["ssh_username"], col["ssh_password"]).purge_persistent_user(
+                target.ssh_endpoints(),
+                col.get("snmp_user") or user,
+                keep_hash=target.auth_hash,
             )
             print(f"      {target.label()}: persistent USM purged")
 
@@ -392,11 +394,12 @@ def _run_phases_3_to_8(
         time.sleep(SNMP_RELOAD_DELAY)
 
         def _walk_one(target: Target) -> None:
+            col = collective_for_target(target, collectives)
             ok = SNMPValidator().validate_snmp_walk(
                 target.walk_endpoints(),
-                user,
-                snmp_auth,
-                snmp_priv,
+                col.get("snmp_user") or user,
+                col.get("snmp_auth") or snmp_auth,
+                col.get("snmp_priv") or snmp_priv,
                 engine_id=target.engine_id,
             )
             target.walk_ok = ok
@@ -461,7 +464,7 @@ def _build_run_report(
                 "index": int(c["index"]),
                 "fqdn": c.get("fqdn", ""),
                 "agip": c.get("agip", ""),
-                "admin_username": c["admin_username"],
+                "api_username": c["api_username"],
             }
             for c in collectives
         ],

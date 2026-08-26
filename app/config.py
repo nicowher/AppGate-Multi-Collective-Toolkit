@@ -1,3 +1,4 @@
+import sys
 import warnings
 
 # ============================================================================
@@ -20,6 +21,7 @@ SNMP_PRIV_PROTOCOL = "AES256"
 # CNSA 2.0 / DISA: do not localize with MD5 or SHA-1.
 ALLOWED_HASH_ALGOS = ("sha256", "sha384", "sha512")
 # RFC 3414 floor is 8. DISA SNMP STIG often wants 15 — raise here for those sites.
+# Floor 8 (RFC 3414). LAB_MODE=False at bottom raises this to 15 (DISA).
 SNMP_MIN_PASSPHRASE_LEN = 8
 # RFC 3414 password-to-key expansion (1 MiB).
 RFC3414_KDF_LEN = 1048576
@@ -66,18 +68,10 @@ warnings.filterwarnings(
 )
 
 def warn_insecure_transport() -> None:
-    """DISA: warn when lab defaults weaken transport or dump run data.
-
-    Called at the start of mutating / walk tools (not the menu itself).
-    Production: TLS_VERIFY=True, SSH_STRICT_HOST_KEY=True, DEBUG=False.
-    """
-    import sys
-    if not (TLS_VERIFY and SSH_STRICT_HOST_KEY):
+    """LAB_MODE on: warning only, never blocks. Off: no prompt here (ask after TLS fail)."""
+    if LAB_MODE:
         print(
-            "WARNING: Insecure transport defaults are on "
-            f"(TLS_VERIFY={TLS_VERIFY}, SSH_STRICT_HOST_KEY={SSH_STRICT_HOST_KEY}). "
-            "Admin and SSH secrets can be MITM'd. Set both True in app/config.py "
-            "on untrusted networks (DISA / CNSA).",
+            "WARNING: LAB_MODE=True — TLS/SSH verification off; STIG new-password skipped.",
             file=sys.stderr,
         )
     if DEBUG:
@@ -87,7 +81,29 @@ def warn_insecure_transport() -> None:
             file=sys.stderr,
         )
 
+
+_skip_tls_asked = False
+_skip_tls_ok = False
+
+
+def confirm_skip_tls_verify() -> bool:
+    """Once per run: untrusted cert. Default No. LAB_MODE already skips verify."""
+    global _skip_tls_asked, _skip_tls_ok
+    if LAB_MODE:
+        return True
+    if _skip_tls_asked:
+        return _skip_tls_ok
+    _skip_tls_asked = True
+    # print(f"DEBUG tls: confirm_skip asked for this run")
+    ans = input(
+        "Certificate could not be verified. Proceed anyway? [y/N]: "
+    ).strip().lower()
+    _skip_tls_ok = ans in YES_ANSWERS
+    return _skip_tls_ok
+
 SSH_PORT = 22
+# Empty = ~/.ssh/known_hosts (created if missing). Used when SSH_STRICT_HOST_KEY.
+SSH_KNOWN_HOSTS = ""
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
 # Parallel SNMP walks (menu 3 inventory + credentials step 8). One validator per worker.
@@ -97,7 +113,7 @@ WALK_CONCURRENCY = 5
 DEBUG = False
 # Write timestamped reports/*.json; console dump only if DEBUG is on.
 WRITE_RUN_REPORT = True
-# Live/dry-run summary prints ESXi USM keys (Kul). DISA: False — keys go in reports lengths only.
+# Overridden at bottom from LAB_MODE (lab prints Kul; production does not).
 PRINT_ESXI_KEYS = True
 # Unix mode for new report files (owner read/write only). Windows ignores most bits.
 REPORT_FILE_MODE = 0o600
@@ -127,7 +143,7 @@ ENGINE_ID_MAX_OCTETS = 32
 # Accepted answers for yes/no prompts (Add another Controller, Walk another IP).
 YES_ANSWERS = ("y", "yes")
 NO_ANSWERS = ("n", "no")
-# CLI menu first-arg aliases → 1 configure | 2 acas | 3 walk | d deps | u pip-upgrade | q quit
+# CLI menu first-arg aliases → 1 configure | 2 acas | 3 walk | 4 cz-password | d deps | u pip-upgrade | q quit
 MENU_CHOICE_ALIASES = {
     "1": "1",
     "configure": "1",
@@ -146,6 +162,11 @@ MENU_CHOICE_ALIASES = {
     "walk": "3",
     "snmp-walk": "3",
     "snmpwalk": "3",
+    "4": "4",
+    "password": "4",
+    "passwd": "4",
+    "cz-password": "4",
+    "ssh-password": "4",
     "d": "d",
     "deps": "d",
     "download": "d",
@@ -273,8 +294,14 @@ VENDOR_PACKAGES = ("requests", "paramiko", "pysnmp")
 # ============================================================================
 # Lab / production transport switch (keep at the bottom)
 # ============================================================================
-# Why defaults are False: lab Controllers use self-signed certs and first-run
-# SSH host keys. That is a MITM risk on untrusted networks — warn_insecure_transport()
-# prints at start. Production: set both True after trusting the CA and known_hosts.
-TLS_VERIFY = False
-SSH_STRICT_HOST_KEY = False
+# LAB_MODE only (DEBUG stays independent).
+# True: skip TLS/SSH verify, print ESXi Kul, SNMP pw min 8, skip STIG cz pw.
+# False: TLS verify (prompt after fail), SSH TOFU into known_hosts, SNMP pw min 15, STIG cz pw.
+LAB_MODE = False
+TLS_VERIFY = not LAB_MODE
+SSH_STRICT_HOST_KEY = not LAB_MODE
+PRINT_ESXI_KEYS = LAB_MODE
+SNMP_MIN_PASSPHRASE_LEN = 8 if LAB_MODE else 15
+STIG_PASSWORD_MIN_LEN = 15
+# Pause after cz-config set so SSH login-verify uses the new hash.
+CZ_PASSWORD_VERIFY_DELAY = 2
