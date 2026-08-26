@@ -173,6 +173,7 @@ python -m unittest tests.test_snmp_hashgen
 | `HEALTH_STATUS_KEYS` | Fields read from `/appliances/status` |
 | `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per IP / per FQDN (default 2) |
 | `SSH_CONCURRENCY` | Parallel SSH sessions (default 5) |
+| `WALK_CONCURRENCY` | Parallel SNMP walks for inventory / step 8 (default 5) |
 | `APPLIANCE_SKIP_STATUS` | Health values skipped (offline / not active / warning). `error` is still configured. |
 | `APPLIANCE_STATUS_PATH` | `GET /appliances/status` (6.3+) |
 | `SNMPD_STOP_RETRIES` / `USM_SED_RETRIES` / `USM_RECREATE_WAITS` | Persistent USM purge timing |

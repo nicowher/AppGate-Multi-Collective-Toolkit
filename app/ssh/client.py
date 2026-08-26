@@ -5,7 +5,7 @@ boxes require. Timeouts come from config (SSH_TIMEOUT / SSH_AUTH_TIMEOUT)
 so a dead host cannot hang the toolkit. Host-key policy is
 SSH_STRICT_HOST_KEY (lab WarningPolicy / production RejectPolicy).
 """
-from core.utils import ensure_package
+from core.utils import ensure_package, run_target_batch
 
 try:
     import paramiko
@@ -16,7 +16,6 @@ except ImportError:
 import shlex
 import socket
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, List, Optional, Sequence, Tuple, Union
 
 from config import (
@@ -230,16 +229,5 @@ def run_ssh_batch(
     concurrency: int,
     on_fail: Callable,
 ) -> None:
-    """Run SSH work in a pool. One box crashing does not stop the rest."""
-    # print(f"DEBUG ssh_batch: n={len(targets)} concurrency={concurrency}")
-    if not targets:
-        return
-    workers = max(1, min(concurrency, len(targets)))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(worker, t): t for t in targets}
-        for future in as_completed(futures):
-            target = futures[future]
-            try:
-                future.result()
-            except Exception as exc:
-                on_fail(target, exc)
+    """SSH-named wrapper around run_target_batch (same pool)."""
+    run_target_batch(targets, worker, concurrency, on_fail)

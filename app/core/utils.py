@@ -25,6 +25,7 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from getpass import getpass
 from typing import Any, Callable, Dict, Optional
 
@@ -260,3 +261,19 @@ def write_json_report(prefix: str, payload: Dict[str, Any]) -> None:
         print(f"      Report written: {path}", file=sys.stderr)
     except OSError as exc:
         print(f"      Could not write report file: {exc}", file=sys.stderr)
+
+
+def run_target_batch(targets: list, worker: Callable, concurrency: int, on_fail: Callable) -> None:
+    """Run one worker per target in a pool. One failure does not stop the rest."""
+    # print(f"DEBUG batch: n={len(targets)} concurrency={concurrency}")
+    if not targets:
+        return
+    workers = max(1, min(concurrency, len(targets)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(worker, t): t for t in targets}
+        for future in as_completed(futures):
+            target = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                on_fail(target, exc)

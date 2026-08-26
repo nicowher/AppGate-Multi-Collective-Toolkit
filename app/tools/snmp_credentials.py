@@ -47,6 +47,7 @@ from config import (
     SNMP_PRIV_PROTOCOL,
     SNMP_RELOAD_DELAY,
     SSH_CONCURRENCY,
+    WALK_CONCURRENCY,
     SUMMARY_WIDTH,
     TLS_VERIFY,
     WRITE_RUN_REPORT,
@@ -57,7 +58,7 @@ from core.inventory import Target, prompt_exclusions
 from core.prompts import CREDENTIALS_PATH, _parse_collectives, _require
 from core.snmp_hashgen import SNMPHashGenerator
 from core.snmp_validate import SNMPValidator
-from core.utils import load_credentials, write_json_report
+from core.utils import load_credentials, run_target_batch, write_json_report
 from ssh.client import run_ssh_batch
 from ssh.engine import SNMPEngineFetcher
 
@@ -382,15 +383,16 @@ def _run_phases_3_to_8(
 
         run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 
-    print("\n[8/8] Validating SNMP walks...")
+    print(f"\n[8/8] Validating SNMP walks (up to {WALK_CONCURRENCY} at a time)...")
     if dry_run:
         for target in _ok(selected):
             print(f"      {target.label()}: would walk {target.walk_endpoints()}")
             target.walk_ok = None
     else:
         time.sleep(SNMP_RELOAD_DELAY)
-        for target in _ok(selected):
-            ok = validator.validate_snmp_walk(
+
+        def _walk_one(target: Target) -> None:
+            ok = SNMPValidator().validate_snmp_walk(
                 target.walk_endpoints(),
                 user,
                 snmp_auth,
@@ -400,7 +402,14 @@ def _run_phases_3_to_8(
             target.walk_ok = ok
             print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
             if not ok:
-                _fail(target, "SNMP walk failed")
+                raise RuntimeError("SNMP walk failed")
+
+        run_target_batch(
+            _ok(selected),
+            _walk_one,
+            WALK_CONCURRENCY,
+            lambda t, e: _fail(t, "SNMP walk failed"),
+        )
 
 
 def _print_summary(

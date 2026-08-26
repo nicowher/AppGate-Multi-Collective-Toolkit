@@ -22,6 +22,7 @@ from config import (
     SNMP_MIN_PASSPHRASE_LEN,
     SNMP_NAME_RE,
     SNMP_PRIV_PROTOCOL,
+    WALK_CONCURRENCY,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
@@ -29,7 +30,7 @@ from config import (
 from core.inventory import prompt_exclusions
 from core.prompts import CREDENTIALS_PATH, _parse_collectives, _require
 from core.snmp_validate import SNMPValidator
-from core.utils import is_valid_host, load_credentials, write_json_report
+from core.utils import is_valid_host, load_credentials, run_target_batch, write_json_report
 
 
 def _single_walk_hosts(creds: dict, typed: str) -> list:
@@ -141,18 +142,24 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     # print("DEBUG walk-inventory:", [t.label() for t in selected])
     if DEBUG:
         print(f"      DEBUG walk-inventory: selected={[t.label() for t in selected]}", file=sys.stderr)
-    print("\n[3/3] SNMP walk...")
-    validator = SNMPValidator()
-    failed = 0
-    for target in selected:
-        ok = validator.validate_snmp_walk(
-            # FQDN first, then IP. Gateway never uses Controller agip.
+    print(f"\n[3/3] SNMP walk (up to {WALK_CONCURRENCY} at a time)...")
+    # print(f"DEBUG walk-inventory: parallel={WALK_CONCURRENCY}")
+
+    def _walk_one(target) -> None:
+        ok = SNMPValidator().validate_snmp_walk(
             target.walk_endpoints(), user, auth, priv, engine_id=target.engine_id or None
         )
         target.walk_ok = ok
         print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
         if not ok:
-            failed += 1
+            raise RuntimeError("SNMP walk failed")
+
+    def _walk_fail(target, _exc) -> None:
+        target.walk_ok = False
+        print(f"      {target.label()}: walk FAILED", file=sys.stderr)
+
+    run_target_batch(selected, _walk_one, WALK_CONCURRENCY, _walk_fail)
+    failed = sum(1 for t in selected if not t.walk_ok)
 
     if WRITE_RUN_REPORT or DEBUG:
         report = {

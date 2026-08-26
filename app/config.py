@@ -90,6 +90,8 @@ def warn_insecure_transport() -> None:
 SSH_PORT = 22
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
+# Parallel SNMP walks (menu 3 inventory + credentials step 8). One validator per worker.
+WALK_CONCURRENCY = 5
 # Lab troubleshooting: full JSON dump to the console at end of run (no passwords/tokens).
 # DISA: set False before a production run so engine IDs / inventory stay off the console.
 DEBUG = False
