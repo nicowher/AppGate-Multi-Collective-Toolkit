@@ -92,7 +92,7 @@ SSH_PORT = 22
 SSH_CONCURRENCY = 5
 # Lab troubleshooting: full JSON dump to the console at end of run (no passwords/tokens).
 # DISA: set False before a production run so engine IDs / inventory stay off the console.
-DEBUG = True
+DEBUG = False
 # Write timestamped reports/*.json; console dump only if DEBUG is on.
 WRITE_RUN_REPORT = True
 # Unix mode for new report files (owner read/write only). Windows ignores most bits.

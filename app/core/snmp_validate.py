@@ -49,6 +49,12 @@ class SNMPValidator:
 
     def __init__(self) -> None:
         self._tool: Optional[Tuple[Optional[str], Optional[str]]] = None
+        self._last_walk_error = ""
+
+    def _set_walk_error(self, message: str) -> None:
+        self._last_walk_error = message
+        if DEBUG:
+            print(f"      {message}", file=sys.stderr)
 
     def validate_snmp_walk(
         self,
@@ -64,13 +70,17 @@ class SNMPValidator:
         # print(f"DEBUG walk: hosts={hosts} engine={engine_id}")
         if DEBUG:
             print(f"      DEBUG walk: hosts={hosts} engine_set={bool(engine_id)}", file=sys.stderr)
+        self._last_walk_error = ""
         for addr in hosts:
             target = self._walk_target(addr)
             attempts = WALK_IP_ATTEMPTS if self._addr_is_ip(target) else WALK_FQDN_ATTEMPTS
-            kind = "IP" if self._addr_is_ip(target) else "FQDN"
-            print(f"      Walk {kind} {target} ({attempts} attempt(s))...", file=sys.stderr)
+            if DEBUG:
+                kind = "IP" if self._addr_is_ip(target) else "FQDN"
+                print(f"      Walk {kind} {target} ({attempts} attempt(s))...", file=sys.stderr)
             if self._validate_snmp_walk_one(target, user, auth, priv, engine_id, attempts):
                 return True
+        if self._last_walk_error and not DEBUG:
+            print(f"      {self._last_walk_error}", file=sys.stderr)
         return False
 
     @staticmethod
@@ -123,16 +133,18 @@ class SNMPValidator:
         # cz-configd / snmpd may still be reloading; retry a few times.
         for attempt in range(1, max_attempts + 1):
             if attempt > 1:
-                print(
-                    f"      Retrying SNMP walk (attempt {attempt}/{max_attempts})...",
-                    file=sys.stderr,
-                )
+                if DEBUG:
+                    print(
+                        f"      Retrying SNMP walk (attempt {attempt}/{max_attempts})...",
+                        file=sys.stderr,
+                    )
                 time.sleep(VALIDATION_RETRY_DELAY)
 
             try:
                 # print(f"DEBUG step8: backend={tool_type} target={ip} engine={engine_id}")
                 if tool_type == "pysnmp":
-                    print("      Using pysnmp for SNMP walk validation...", file=sys.stderr)
+                    if DEBUG:
+                        print("      Using pysnmp for SNMP walk validation...", file=sys.stderr)
                     if self._validate_snmp_walk_pysnmp(ip, user, auth, priv, engine_id):
                         return True
                     continue
@@ -171,16 +183,17 @@ class SNMPValidator:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=SNMPWALK_TIMEOUT)
                 if result.returncode == 0:
                     return True
-                print(
-                    f"      SNMP walk failed (rc={result.returncode}): "
-                    f"{result.stderr.strip()[:WALK_ERROR_PREVIEW] or result.stdout.strip()[:WALK_ERROR_PREVIEW]}",
-                    file=sys.stderr,
+                self._set_walk_error(
+                    f"SNMP walk failed (rc={result.returncode}): "
+                    f"{result.stderr.strip()[:WALK_ERROR_PREVIEW] or result.stdout.strip()[:WALK_ERROR_PREVIEW]}"
                 )
-                print(f"      cmd: {safe_cmd}", file=sys.stderr)
+                if DEBUG:
+                    print(f"      cmd: {safe_cmd}", file=sys.stderr)
             except subprocess.TimeoutExpired:
-                print(f"      SNMP walk timed out after {SNMPWALK_TIMEOUT}s", file=sys.stderr)
+                self._set_walk_error(f"SNMP walk timed out after {SNMPWALK_TIMEOUT}s")
 
-        print(f"      SNMP walk validation failed after {max_attempts} attempts", file=sys.stderr)
+        if DEBUG:
+            print(f"      SNMP walk validation failed after {max_attempts} attempts", file=sys.stderr)
         return False
 
     def _cached_detect(self) -> Tuple[Optional[str], Optional[str]]:
@@ -353,10 +366,12 @@ class SNMPValidator:
                 ObjectType(ObjectIdentity(SNMP_WALK_OID)),
             ):
                 if errorIndication:
-                    print(f"      SNMP walk (pysnmp): {errorIndication}", file=sys.stderr)
+                    self._set_walk_error(f"SNMP walk (pysnmp): {errorIndication}")
                     return False
                 if errorStatus:
-                    print(f"      SNMP walk (pysnmp): {errorStatus.prettyPrint()}", file=sys.stderr)
+                    self._set_walk_error(
+                        f"SNMP walk (pysnmp): {errorStatus.prettyPrint()}"
+                    )
                     return False
                 return True
             return False
@@ -378,10 +393,12 @@ class SNMPValidator:
             try:
                 async for (errorIndication, errorStatus, errorIndex, varBinds) in agen:
                     if errorIndication:
-                        print(f"      SNMP walk (pysnmp): {errorIndication}", file=sys.stderr)
+                        self._set_walk_error(f"SNMP walk (pysnmp): {errorIndication}")
                         return False
                     if errorStatus:
-                        print(f"      SNMP walk (pysnmp): {errorStatus.prettyPrint()}", file=sys.stderr)
+                        self._set_walk_error(
+                            f"SNMP walk (pysnmp): {errorStatus.prettyPrint()}"
+                        )
                         return False
                     return True
                 return False
@@ -415,5 +432,5 @@ class SNMPValidator:
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
                 loop.close()
         except Exception as exc:
-            print(f"      SNMP walk (pysnmp) encountered an error: {exc}", file=sys.stderr)
+            self._set_walk_error(f"SNMP walk (pysnmp) encountered an error: {exc}")
             return False
