@@ -2,8 +2,7 @@
 
 Push and validate configuration across multiple AppGate SDP collectives from one launcher. Designed for lab and production, including air-gapped networks.
 
-GitHub: https://github.com/nicowher/AppGate-SNMPv3-Passwordinator  
-(Product name: **AppGate Multi-Collective Toolkit**; repo slug may still use the old path.)
+GitHub: https://github.com/nicowher/AppGate-Multi-Collective-Toolkit
 
 ## Tools (menu)
 
