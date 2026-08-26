@@ -7,7 +7,7 @@ Lives in ``core/``. Called from ``tools/snmp_credentials.py`` (step 8) and
 Why walk at all: pin/push can succeed while snmpd still has stale usmUser
 keys; a walk with the *passphrases* is the real acceptance test.
 
-Why IP before FQDN: UDP/161 often fails on NAT names that still answer SSH.
+Why FQDN before IP: same as API/SSH (admin hostname first). IP is fallback.
 Attempts per address are tunable (WALK_IP_ATTEMPTS / WALK_FQDN_ATTEMPTS).
 
 Backends: Net-SNMP snmpwalk → SnmpSoft → pysnmp (auto-install vendor/pip).
@@ -45,7 +45,7 @@ from config import (
 
 
 class SNMPValidator:
-    """Walk one host list (IPs then FQDNs) until one endpoint succeeds."""
+    """Walk one host list (FQDN then IPs) until one endpoint succeeds."""
 
     def __init__(self) -> None:
         self._tool: Optional[Tuple[Optional[str], Optional[str]]] = None

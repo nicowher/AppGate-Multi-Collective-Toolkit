@@ -4,7 +4,7 @@ Reached via ``python app/main.py 3`` or launcher menu option 3.
 
   1) Single IP / FQDN — walk, then ask to walk another
   2) Controller list — same login / exclude as configure steps 1–2, then walk
-     (IP first for NAT; gateway never uses Controller agip)
+      (FQDN first, then IP; gateway never uses Controller agip)
 """
 import os
 import sys
@@ -46,7 +46,7 @@ def _single_walk_hosts(creds: dict, typed: str) -> list:
         fqdn = str(item.get("fqdn") or item.get("hostname") or "").strip()
         agip = str(item.get("agip") or "").strip()
         if fqdn.lower() == typed_l and agip and agip not in hosts:
-            hosts.insert(0, agip)
+            hosts.append(agip)
     return hosts
 
 
@@ -146,8 +146,7 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     failed = 0
     for target in selected:
         ok = validator.validate_snmp_walk(
-            # Controllers: FQDN then credentials agip. Gateways: FQDN only.
-            # IP first (NAT), then FQDN. Gateway never uses Controller agip.
+            # FQDN first, then IP. Gateway never uses Controller agip.
             target.walk_endpoints(), user, auth, priv, engine_id=target.engine_id or None
         )
         target.walk_ok = ok

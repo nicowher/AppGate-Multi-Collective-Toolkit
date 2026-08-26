@@ -10,9 +10,8 @@ shared by SNMP credentials and walk.
                             when DNS/NAT is wrong. Controllers also try credentials
                             agip; gateways use their own ssh_ip — never the
                             Controller IP (that would SSH the wrong box).
-  Target.walk_endpoints() → IP first for SNMP UDP. NAT FQDNs often answer
-                            HTTPS/SSH but not UDP/161; walking the name first
-                            wastes timeouts. Gateways must not walk Controller agip.
+  Target.walk_endpoints() → same order as ssh_endpoints(). Gateways must not
+                            walk Controller agip.
 
 Health from GET /appliances/status (6.7 labels). error is still configurable;
 offline/not active/warning are skipped so we do not push to unreachable boxes.
@@ -73,24 +72,8 @@ class Target:
         )
 
     def walk_endpoints(self) -> List[str]:
-        """Ordered SNMP walk targets: IP first, then FQDN.
-
-        Why opposite of SSH: SNMPv3 is UDP/161; many NAT paths forward TCP
-        (API/SSH) but not SNMP, so FQDN-first walks time out even when the
-        private IP works. Controller walks use credentials agip first;
-        gateway walks use appliance ssh_ip only (never Controller agip).
-        """
-        out: List[str] = []
-        # print(f"DEBUG walk_endpoints: controller={self._is_controller_box()} ip={self.ssh_ip} fqdn={self.ssh_fqdn}")
-        if self._is_controller_box():
-            for host in (self.collective_ip, self.ssh_ip, self.ssh_fqdn):
-                if host and host not in out:
-                    out.append(host)
-        else:
-            for host in (self.ssh_ip, self.ssh_fqdn):
-                if host and host not in out:
-                    out.append(host)
-        return out
+        """Same order as ssh_endpoints(): FQDN first, then IP."""
+        return self.ssh_endpoints()
 
 
 def appliance_functions(appliance: Dict[str, Any]) -> List[str]:

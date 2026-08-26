@@ -23,7 +23,7 @@ Reads `credentials.json`, prompts for gaps, then:
 5. Localizes auth/priv per engine ID (RFC 3414, SHA-256)  
 6. Pushes `deleteUser` then `createUser` / `rouser` / `engineIDType 3` one appliance at a time. No `exactEngineID`. v1/v2c communities stripped  
 7. SSH: **stop snmpd**, delete persistent `usmUser` (net-snmp will not update an existing user’s password), **start snmpd** so `/etc` `createUser` writes the new keys  
-8. Walks every pushed appliance: **IP first** (NAT), then FQDN. Attempts are `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` (default 2 each). Gateways never use the Controller IP  
+8. Walks every pushed appliance: **FQDN first**, then IP. Attempts are `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` (default 2 each). Gateways never use the Controller IP  
 
 Same SNMP user/auth/priv for every device by default. SSH/engine-ID failures skip that box; the rest still get pushed and walked.
 
@@ -59,7 +59,7 @@ On Linux/macOS: `chmod +x MultiCollectiveToolkit-Linux.sh MultiCollectiveToolkit
 
 Shared: `snmp_user`, `snmp_auth`, `snmp_priv`, `ssh_username`, `ssh_password`. `rouser` is optional.
 
-Per collective: required `fqdn`, optional `agip`, `admin_username`, `admin_password`. API: FQDN then IP (not on 401/403). SSH: FQDN then IP (Controller uses credentials `agip`; gateway uses appliance `ssh_ip`). SNMP walk: **IP first**, then FQDN. Gateways never walk the Controller IP.
+Per collective: required `fqdn`, optional `agip`, `admin_username`, `admin_password`. API, SSH, and SNMP walk: FQDN then IP (API not on 401/403). Controller IP fallback uses credentials `agip`; gateway uses appliance `ssh_ip`. Gateways never walk or SSH the Controller IP.
 
 A single-controller file still works (collective `1`) but you will be prompted for `fqdn` if it is missing.
 
