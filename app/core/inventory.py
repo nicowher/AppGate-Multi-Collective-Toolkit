@@ -73,6 +73,7 @@ class Target:
 
     def walk_endpoints(self) -> List[str]:
         """Same order as ssh_endpoints(): FQDN first, then IP."""
+        # print(f"DEBUG walk_endpoints: {self.ssh_endpoints()!r}")
         return self.ssh_endpoints()
 
 

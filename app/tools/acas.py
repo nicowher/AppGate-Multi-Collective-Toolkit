@@ -6,8 +6,9 @@ Reached via ``python app/main.py 2`` or launcher menu option 2
 Steps:
   1/3  API login (inventory only — do not PUT appliance JSON)
   2/3  Same exclude table as SNMP credentials / walk
-  3/3  SSH overlay (FQDN first). Unharden: SSHBRUTE, sudoers, banner TTY.
-       Harden: restore banner backup, rm drop-in, restart cz-configd.
+  3/3  SSH overlay (FQDN first). Unharden: SSHBRUTE, cz-config nopasswd,
+       drop-in, ssh_confirm.sh TTY guard. Harden: restore backups, nopasswd
+       false, nohup restart cz-configd (SSH drop otherwise).
 
 Why SSH not API: persisting those changes via PUT would make unharden the
 source of truth and fail STIG after the scan window.
@@ -25,7 +26,6 @@ from typing import Dict, List
 from api.appgate import AppGateClient
 from config import (
     ACAS_CZCONFIGD_UNIT,
-    ACAS_SUDOERS_DROPIN,
     DEBUG,
     DRY_RUN,
     SSH_CONCURRENCY,
@@ -120,6 +120,9 @@ def _summarize_output(text: str) -> str:
         "STEP_IPTABLES_OK",
         "STEP_IPTABLES_SKIP",
         "STEP_SUDOERS_OK",
+        "STEP_SUDOERS_DROPIN_OK",
+        "STEP_SUDOERS_ALREADY",
+        "STEP_CZCONFIG_NOPASSWD_TRUE",
         "STEP_BANNER_OK",
         "STEP_BANNER_ALREADY",
         "STEP_BANNER_SKIP",
@@ -186,12 +189,12 @@ def _apply(
         for target in selected:
             if mode == "unharden":
                 print(
-                    f"      {target.label()}: would flush SSHBRUTE, write {ACAS_SUDOERS_DROPIN}, "
-                    "patch banner if [ -t 0 ]"
+                    f"      {target.label()}: would iptables -F SSHBRUTE, "
+                    "append NOPASSWD to /etc/sudoers, wrap banner read -p"
                 )
             else:
                 print(
-                    f"      {target.label()}: would remove {ACAS_SUDOERS_DROPIN} "
+                    f"      {target.label()}: would restore /etc/sudoers "
                     f"and restart {ACAS_CZCONFIGD_UNIT}"
                 )
             target.status = "preview"
@@ -204,6 +207,9 @@ def _apply(
             out = prep.harden(target.ssh_endpoints())
         target.status = "ok"
         print(f"      {target.label()}: {_summarize_output(out)}")
+        for ln in out.splitlines():
+            if ln.startswith("STEP_"):
+                print(f"        {ln}")
 
     run_ssh_batch(selected, _one, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 

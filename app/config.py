@@ -92,7 +92,7 @@ SSH_PORT = 22
 SSH_CONCURRENCY = 5
 # Lab troubleshooting: full JSON dump to the console at end of run (no passwords/tokens).
 # DISA: set False before a production run so engine IDs / inventory stay off the console.
-DEBUG = True
+DEBUG = False
 # Write timestamped reports/*.json; console dump only if DEBUG is on.
 WRITE_RUN_REPORT = True
 # Live/dry-run summary prints ESXi USM keys (Kul). DISA: False — keys go in reports lengths only.
@@ -224,20 +224,14 @@ SSH_AUTH_TIMEOUT = 10
 ACAS_SSH_TIMEOUT = 90
 # ACAS unharden is SSH overlay only (API would persist STIG-hostile state).
 ACAS_SUDOERS_DROPIN = "/etc/sudoers.d/cz-acas-scan"
-ACAS_SUDOERS_DROPIN_LEGACY = ("/etc/sudoers.d/cz-nopasswd",)
 ACAS_IPTABLES_CHAIN = "SSHBRUTE"
 ACAS_IPTABLES_BINS = ("iptables", "ip6tables")
 ACAS_CZCONFIGD_UNIT = "cz-configd.service"
-ACAS_BANNER_NEEDLE = "Do you agree?"
 ACAS_BANNER_TTY_GUARD = "if [ -t 0 ]; then"
-ACAS_BANNER_PATHS = (
-    "/etc/profile.d/dod_banner.sh",
-    "/etc/profile.d/banner.sh",
-    "/etc/profile.d/ssh_banner.sh",
-    "/etc/profile",
-)
-ACAS_BANNER_SEARCH_ROOTS = ("/etc/profile.d", "/etc/ssh")
-ACAS_BANNER_GREP_TIMEOUT = 20
+ACAS_BANNER_FILE = "/etc/profile.d/ssh_confirm.sh"
+ACAS_SUDOERS_FILE = "/etc/sudoers"
+ACAS_SUDOERS_MARK_BEGIN = "# BEGIN ACAS-SCAN"
+ACAS_SUDOERS_MARK_END = "# END ACAS-SCAN"
 ACAS_MODES = ("unharden", "deharden", "harden", "reharden")
 API_TIMEOUT = 15
 SNMPWALK_TIMEOUT = 15

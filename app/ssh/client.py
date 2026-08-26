@@ -231,6 +231,7 @@ def run_ssh_batch(
     on_fail: Callable,
 ) -> None:
     """Run SSH work in a pool. One box crashing does not stop the rest."""
+    # print(f"DEBUG ssh_batch: n={len(targets)} concurrency={concurrency}")
     if not targets:
         return
     workers = max(1, min(concurrency, len(targets)))
