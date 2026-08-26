@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 rem AppGate Multi-Collective Toolkit — thin OS wrapper.
-rem Menu/dispatch live in app\main.py (cli).
+rem Menu/dispatch live in app\main.py (cli). Tools are app\tools\*.py.
 rem   MultiCollectiveToolkit-Windows.bat
 rem   MultiCollectiveToolkit-Windows.bat 1
 rem   MultiCollectiveToolkit-Windows.bat walk

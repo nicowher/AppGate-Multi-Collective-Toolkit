@@ -1,6 +1,6 @@
 #!/bin/sh
 # AppGate Multi-Collective Toolkit — thin OS wrapper.
-# Menu/dispatch live in app/main.py (cli).
+# Menu/dispatch live in app/main.py (cli). Tools are app/tools/*.py.
 #   ./MultiCollectiveToolkit-Linux.sh
 #   ./MultiCollectiveToolkit-Linux.sh 1
 #   ./MultiCollectiveToolkit-Linux.sh walk

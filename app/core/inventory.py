@@ -1,4 +1,9 @@
-"""Controller inventory: GET /appliances, health labels, exclude prompt.
+"""Appliance table model — not an API client.
+
+HTTP lives in ``api/appgate.py`` (``list_targets``). This module holds the
+``Target`` dataclass, health/function helpers, and the step-2 exclude prompt
+shared by SNMP credentials and walk.
+
 
   Target.label()          → 1.hostname so two sites can share a hostname safely
   Target.ssh_endpoints()  → FQDN first (admin hostname best practice), then IP
@@ -17,7 +22,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import APPLIANCE_FUNCTION_NAMES, HEALTH_STATUS_KEYS
+from config import APPLIANCE_FUNCTION_NAMES, HEALTH_STATUS_KEYS, INVENTORY_NAME_WIDTH
 
 
 @dataclass
@@ -235,7 +240,7 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
         funcs = ",".join(t.functions) or "-"
         host = t.ssh_fqdn or t.ssh_ip
         print(
-            f"     {i:2d}  {t.collective:<10}  {t.hostname[:30]:<30}  {host:<22}  {funcs:<22}  {t.health}"
+            f"     {i:2d}  {t.collective:<10}  {t.hostname[:INVENTORY_NAME_WIDTH]:<{INVENTORY_NAME_WIDTH}}  {host:<22}  {funcs:<22}  {t.health}"
         )
     raw = input(
         "\n      Exclude (comma-separated numbers, e.g. 1,3 or 1.hostname; Enter for all): "

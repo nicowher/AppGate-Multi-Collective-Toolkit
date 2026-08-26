@@ -19,7 +19,7 @@
         - createUser is applied asynchronously on start; walking too early
           still sees the old key or an empty DB.
 """
-from utils import ensure_package
+from core.utils import ensure_package
 
 try:
     import paramiko
@@ -28,42 +28,32 @@ except ImportError:
     import paramiko
 
 import re
-import socket
 import sys
 import time
-from typing import List, Optional, Sequence, Union
+from typing import Optional, Sequence, Union
 
 from config import (
+    DEBUG,
     ENGINE_ID_TYPE,
     ETH_IFACE,
     SNMP_NAME_RE,
     SNMP_PERSISTENT_CONF,
     SNMP_PERSISTENT_CONF_ALT,
     SNMP_RELOAD_DELAY,
+    SSH_LOG_PREVIEW,
+    SNMPD_STOP_POLL_SEC,
     SNMPD_STOP_RETRIES,
     USM_RECREATE_WAITS,
     USM_SED_RETRIES,
-    SSH_AUTH_TIMEOUT,
-    SSH_PORT,
-    SSH_STRICT_HOST_KEY,
-    SSH_TIMEOUT,
 )
+
+from .client import SSHSession
 
 OLD_ENGINE_RE = re.compile(r"oldEngineID\s+(?:0x)?([0-9a-fA-F]+)", re.IGNORECASE)
 MAC_RE = re.compile(r"link/ether\s+([0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5})")
 
 
-class SNMPEngineFetcher:
-    def __init__(self, ssh_user: str, ssh_password: str) -> None:
-        self.ssh_user = ssh_user
-        self.ssh_password = ssh_password
-
-    @staticmethod
-    def _hosts(host: Union[str, Sequence[str]]) -> List[str]:
-        if isinstance(host, str):
-            return [host] if host else []
-        return [h for h in host if h]
-
+class SNMPEngineFetcher(SSHSession):
     def get_engine_id(
         self, host: Union[str, Sequence[str]], *, restart_snmpd: bool = True
     ) -> str:
@@ -190,90 +180,6 @@ class SNMPEngineFetcher:
             print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
         raise RuntimeError(f"Could not purge persistent SNMP user '{user}' via SSH")
 
-    def _apply_host_key_policy(self, client: paramiko.SSHClient) -> None:
-        try:
-            client.load_system_host_keys()
-        except OSError:
-            pass
-        policy = paramiko.RejectPolicy() if SSH_STRICT_HOST_KEY else paramiko.WarningPolicy()
-        client.set_missing_host_key_policy(policy)
-
-    def _with_ssh(self, ip: str, fn):
-        """Open an SSH session, run *fn(client)*, then close.
-
-        Password auth first; keyboard-interactive is the fallback some
-        AppGate boxes require.
-        """
-        client = paramiko.SSHClient()
-        self._apply_host_key_policy(client)
-        try:
-            client.connect(
-                hostname=ip,
-                port=SSH_PORT,
-                username=self.ssh_user,
-                password=self.ssh_password,
-                timeout=SSH_TIMEOUT,
-                allow_agent=False,
-                look_for_keys=False,
-                auth_timeout=SSH_AUTH_TIMEOUT,
-            )
-            return fn(client)
-        except paramiko.AuthenticationException as exc:
-            print(
-                f"      SSH authentication failed: {exc}. "
-                "Trying keyboard-interactive fallback...",
-                file=sys.stderr,
-            )
-            return self._with_ssh_keyboard_interactive(ip, fn)
-        except paramiko.SSHException as exc:
-            print(f"      SSH connection error ({type(exc).__name__}): {exc}", file=sys.stderr)
-        except (OSError, socket.timeout, TimeoutError) as exc:
-            print(f"      SSH network error ({type(exc).__name__}): {exc}", file=sys.stderr)
-        finally:
-            try:
-                client.close()
-            except OSError:
-                pass
-        return None
-
-    def _with_ssh_keyboard_interactive(self, ip: str, fn):
-        def handler(title, instructions, prompt_list):
-            responses = []
-            for prompt in prompt_list:
-                if "password" in prompt[0].lower():
-                    responses.append(self.ssh_password)
-                else:
-                    responses.append("")
-            return responses
-
-        transport = None
-        client = paramiko.SSHClient()
-        self._apply_host_key_policy(client)
-        try:
-            transport = paramiko.Transport((ip, SSH_PORT))
-            transport.banner_timeout = SSH_TIMEOUT
-            transport.auth_timeout = SSH_AUTH_TIMEOUT
-            transport.start_client(timeout=SSH_TIMEOUT)
-            transport.auth_interactive(self.ssh_user, handler)
-            client._transport = transport
-            return fn(client)
-        except (paramiko.SSHException, OSError, socket.timeout, TimeoutError) as exc:
-            print(
-                f"      Keyboard-interactive SSH failed ({type(exc).__name__}): {exc}",
-                file=sys.stderr,
-            )
-        finally:
-            try:
-                client.close()
-            except OSError:
-                pass
-            if transport is not None:
-                try:
-                    transport.close()
-                except OSError:
-                    pass
-        return None
-
     def _ssh_query_engine_id(self, ip: str, *, restart_snmpd: bool = True) -> Optional[str]:
         def _reader(client: paramiko.SSHClient) -> Optional[str]:
             return self._configure_and_read_engine_id(client, restart_snmpd=restart_snmpd)
@@ -283,7 +189,6 @@ class SNMPEngineFetcher:
     def _configure_and_read_engine_id(
         self, client: paramiko.SSHClient, *, restart_snmpd: bool = True
     ) -> Optional[str]:
-        # 1) restart so snmpd picks up engineIDType 3 from cz-configd (skipped in DRY_RUN)
         if restart_snmpd:
             print(
                 f"      Restarting snmpd so it applies engineIDType {ENGINE_ID_TYPE}...",
@@ -296,7 +201,6 @@ class SNMPEngineFetcher:
         else:
             print("      Reading existing oldEngineID (no snmpd restart)...", file=sys.stderr)
 
-        # 2) oldEngineID is written to persistent conf after a clean start
         raw = self._sudo(client, f"grep -E '^oldEngineID' {SNMP_PERSISTENT_CONF} | tail -n 1")
         match = OLD_ENGINE_RE.search(raw or "")
         if not match:
@@ -309,8 +213,9 @@ class SNMPEngineFetcher:
         engine_id = match.group(1).lower()
         print(f"      oldEngineID: {engine_id}", file=sys.stderr)
         # print(f"DEBUG step4: raw oldEngineID line={raw!r}")
+        if DEBUG:
+            print(f"      DEBUG step4: oldEngineID={engine_id} restart={restart_snmpd}", file=sys.stderr)
 
-        # 3) type 3 must embed this interface's MAC
         mac = self._read_iface_mac(client)
         if not mac:
             print(f"      Could not read {ETH_IFACE} MAC via ip addr.", file=sys.stderr)
@@ -333,7 +238,7 @@ class SNMPEngineFetcher:
             self._sudo(client, "systemctl stop snmpd", check=False)
             self._sudo(client, "service snmpd stop", check=False)
             self._sudo(client, "killall -q snmpd || true", check=False)
-            time.sleep(1)
+            time.sleep(SNMPD_STOP_POLL_SEC)
             status = (self._sudo(client, "systemctl is-active snmpd || true") or "").strip()
             if status != "active":
                 return True
@@ -355,7 +260,7 @@ class SNMPEngineFetcher:
         status = (self._sudo(client, "systemctl is-active snmpd || true") or "").strip()
         if status == "active":
             return True
-        print(f"      systemctl restart snmpd: {out.strip()[:200]}", file=sys.stderr)
+        print(f"      systemctl restart snmpd: {out.strip()[:SSH_LOG_PREVIEW]}", file=sys.stderr)
         self._sudo(client, "service snmpd restart", check=False)
         status = (self._sudo(client, "systemctl is-active snmpd || true") or "").strip()
         fallback = (self._sudo(client, "service snmpd status || true") or "").lower()
@@ -382,33 +287,3 @@ class SNMPEngineFetcher:
         if raw[4] != ENGINE_ID_TYPE:
             return False
         return raw[5:11].hex() == mac_hex
-
-    def _sudo(self, client: paramiko.SSHClient, command: str, check: bool = True) -> str:
-        return self._run(client, f"sudo -S {command}", sudo=True, check=check)
-
-    def _run(
-        self,
-        client: paramiko.SSHClient,
-        command: str,
-        sudo: bool = False,
-        check: bool = True,
-    ) -> str:
-        stdin, stdout, stderr = client.exec_command(command)
-        stdout.channel.settimeout(SSH_TIMEOUT)
-        stderr.channel.settimeout(SSH_TIMEOUT)
-        if sudo:
-            stdin.write(self.ssh_password + "\n")
-            stdin.flush()
-        try:
-            output = stdout.read().decode("utf-8", errors="replace")
-            err_output = stderr.read().decode("utf-8", errors="replace")
-            exit_status = stdout.channel.recv_exit_status()
-        except (socket.timeout, TimeoutError, OSError) as exc:
-            print(f"      SSH command timed out or failed ({type(exc).__name__}): {exc}", file=sys.stderr)
-            return ""
-        if check and exit_status not in (0, 1):
-            print(
-                f"      SSH command failed (exit {exit_status}): {err_output.strip()[:300]}",
-                file=sys.stderr,
-            )
-        return output

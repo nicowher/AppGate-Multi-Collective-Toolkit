@@ -1,4 +1,8 @@
-"""Shared helpers for credentials, host validation, and pip packages.
+"""Shared helpers for credentials, host validation, pip, and reports.
+
+Lives in ``core/`` so ``app/`` stays menu + config + folders. ``APP_DIR`` is
+the parent of this package (``app/``), not ``app/core/``.
+
 
   is_valid_host / prompt_until_valid
       Step 0 prompts: IPv4/IPv6/FQDN and re-ask on bad input.
@@ -22,7 +26,16 @@ import sys
 from getpass import getpass
 from typing import Any, Callable, Dict, Optional
 
-from config import PIP_INSTALL_TIMEOUT, VENDOR_PACKAGES
+from config import (
+    DEBUG,
+    PIP_INSTALL_TIMEOUT,
+    REPORT_FILE_MODE,
+    REPORTS_DIRNAME,
+    VENDOR_DOWNLOAD_TIMEOUT,
+    VENDOR_PACKAGES,
+    WRITE_RUN_REPORT,
+    YES_ANSWERS,
+)
 
 # FQDN: labels of letters/digits/hyphen, at least one dot, TLD 2+ letters.
 _FQDN_RE = re.compile(
@@ -41,10 +54,12 @@ def is_valid_host(value: str) -> bool:
         ipaddress.ip_address(text)
         return True
     except ValueError:
-        return bool(_FQDN_RE.fullmatch(value.strip()))
+        return bool(_FQDN_RE.fullmatch(text))
 
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# This file lives in app/core/; vendor/ and launchers stay under app/ and repo root.
+CORE_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.dirname(CORE_DIR)
 REPO_ROOT = os.path.dirname(APP_DIR)
 VENDOR_DIR = os.path.join(APP_DIR, "vendor")
 VENDOR_WHEELS = os.path.join(VENDOR_DIR, "wheels")
@@ -98,7 +113,7 @@ def download_vendor_wheels() -> None:
             *VENDOR_PACKAGES,
         ],
         check=True,
-        timeout=PIP_INSTALL_TIMEOUT,
+        timeout=VENDOR_DOWNLOAD_TIMEOUT,
     )
 
 
@@ -110,7 +125,7 @@ def ensure_package(package: str, import_name: str) -> None:
     if install_from_vendor(package) and importlib.util.find_spec(import_name) is not None:
         return
     answer = input(f"Install {package} now via pip (needs network)? [Y/n]: ").strip().lower()
-    if answer in ("", "y", "yes"):
+    if is_yes(answer, default_yes=True):
         subprocess.run(
             [sys.executable, "-m", "pip", "install", package],
             check=True,
@@ -162,12 +177,16 @@ def prompt_until_valid(
 def load_credentials(path: str) -> Dict[str, Any]:
     """Load optional credentials.json. Missing or invalid files become {}."""
     if not os.path.isfile(path):
+        # print(f"DEBUG creds: missing {path}")
         return {}
     try:
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
             return {}
+        # print(f"DEBUG creds: loaded keys={list(data)} from {path}")
+        if DEBUG:
+            print(f"      DEBUG creds: loaded {path} keys={sorted(data)}", file=sys.stderr)
         out: Dict[str, Any] = {}
         for key, value in data.items():
             # Keep collectives[] as a list of objects (do not stringify it).
@@ -179,3 +198,42 @@ def load_credentials(path: str) -> Dict[str, Any]:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         print(f"Warning: Could not load credentials from {path}: {exc}", file=sys.stderr)
         return {}
+
+
+def is_yes(answer: str, *, default_yes: bool = False) -> bool:
+    """True for y/yes. Empty input follows *default_yes* (install prompts default yes)."""
+    text = (answer or "").strip().lower()
+    if not text:
+        return default_yes
+    return text in YES_ANSWERS
+
+
+def write_json_report(prefix: str, payload: Dict[str, Any]) -> None:
+    """Write reports/<prefix>-<utc>.json (mode 600). Console dump only if DEBUG.
+
+    Reports never include passwords, tokens, or full localized USM keys.
+    """
+    from datetime import datetime, timezone
+
+    text = json.dumps(payload, indent=2)
+    if DEBUG:
+        print("\n----- BEGIN RUN REPORT -----")
+        print(text)
+        print("----- END RUN REPORT -----")
+    if not WRITE_RUN_REPORT:
+        return
+    reports_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME)
+    try:
+        os.makedirs(reports_dir, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        path = os.path.join(reports_dir, f"{prefix}-{stamp}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.write("\n")
+        try:
+            os.chmod(path, REPORT_FILE_MODE)
+        except OSError:
+            pass
+        print(f"      Report written: {path}", file=sys.stderr)
+    except OSError as exc:
+        print(f"      Could not write report file: {exc}", file=sys.stderr)

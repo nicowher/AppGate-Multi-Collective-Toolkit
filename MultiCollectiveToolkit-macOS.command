@@ -1,6 +1,6 @@
 #!/bin/sh
 # AppGate Multi-Collective Toolkit — thin OS wrapper (Finder double-click OK).
-# Menu/dispatch live in app/main.py (cli).
+# Menu/dispatch live in app/main.py (cli). Tools are app/tools/*.py.
 #   ./MultiCollectiveToolkit-macOS.command
 #   ./MultiCollectiveToolkit-macOS.command 1
 cd "$(dirname "$0")"

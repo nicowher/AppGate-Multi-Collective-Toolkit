@@ -1,11 +1,11 @@
-"""Unit tests for app/snmp_hashgen.py (RFC 3414 / CNSA SHA-256 vectors)."""
+"""Unit tests for app/core/snmp_hashgen.py (RFC 3414 / CNSA SHA-256 vectors)."""
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
-from snmp_hashgen import SNMPHashGenerator  # noqa: E402
+from core.snmp_hashgen import SNMPHashGenerator  # noqa: E402
 
 
 class HashgenTests(unittest.TestCase):
@@ -48,6 +48,14 @@ class HashgenTests(unittest.TestCase):
         a = self.gen._localize("authpass", "8000000001020304", "sha256")
         b = self.gen._localize("authpass", "0x8000000001020304", "sha256")
         self.assertEqual(a, b)
+
+    def test_rejects_empty_and_non_hex_engine(self) -> None:
+        with self.assertRaises(ValueError):
+            self.gen._localize("authpass", "", "sha256")
+        with self.assertRaises(ValueError):
+            self.gen._localize("authpass", "zz", "sha256")
+        with self.assertRaises(ValueError):
+            self.gen._localize("authpass", "00", "sha256")
 
 
 if __name__ == "__main__":

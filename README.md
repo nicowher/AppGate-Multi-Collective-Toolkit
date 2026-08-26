@@ -30,7 +30,7 @@ Same SNMP user/auth/priv for every device by default. SSH/engine-ID failures ski
 
 **SNMP Walk** asks **1) single FQDN/IP** (then *Walk another?*) or **2) pull list from Controller(s)** (same login / exclude as the credential tool). Health uses `GET /admin/appliances/status` (not the removed `/stats/appliances`).
 
-**Reports:** `WRITE_RUN_REPORT = True` writes timestamped `reports/run-*.json` / `dryrun-*.json` / `walk-*.json` (no passwords/tokens). Full JSON is printed only when `DEBUG = True`.
+**Reports:** `WRITE_RUN_REPORT = True` writes timestamped `reports/run-*.json` / `dryrun-*.json` / `walk-*.json` (no passwords/tokens; file mode `0600` on Unix). Full JSON is printed when `DEBUG = True` (currently on for lab troubleshooting — set `False` before production).
 
 **Dry-run flow:** After inventory loads → **Dry-run only?** → exclude appliances → preview (engine ID read without snmpd restart + hashes) → report → **Push config now?** (`y` = live pin/push/purge/walk + second report). `DRY_RUN = True` in `config.py` skips the first prompt.
 
@@ -128,6 +128,7 @@ python -m unittest tests.test_snmp_hashgen
 **Known deviations (set in `app/config.py`):**
 
 - `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` live at the **bottom of `app/config.py`**. Lab = both `False` (self-signed). Production = both `True` after you trust the CA and pin SSH host keys. The script warns at start when either is False.
+- `DEBUG` is **True** on this branch for lab traces. Set `False` before production so inventory/engine IDs stay off the console.
 - AppGate `createUser` stores a vendor priv OID (`.1.3.6.1.4.1.14832.1.4`) that is still AES-256 CFB; walks use pysnmp’s AES-256 protocol object.
 
 ## Tunables (`app/config.py`)
@@ -144,7 +145,13 @@ python -m unittest tests.test_snmp_hashgen
 | `WRITE_RUN_REPORT` | Write `reports/run-*.json` at end (default on) |
 | `REPORTS_DIRNAME` | Report folder under repo root (`reports`) |
 | `DRY_RUN` | Preview: no pin/push/purge/walk/snmpd restart |
-| `DEBUG` | Full JSON dump to console (off) |
+| `DEBUG` | Full JSON dump + step traces to console (on for lab; **off for production**) |
+| `REPORT_FILE_MODE` | Unix mode for new report files (`0600`) |
+| `SNMPD_STOP_POLL_SEC` | Delay between snmpd stop polls |
+| `LOGIN_BODY_PREVIEW` / `API_ERROR_BODY_PREVIEW` / `SSH_LOG_PREVIEW` / `WALK_ERROR_PREVIEW` | Truncate error bodies (no full payloads) |
+| `SUMMARY_WIDTH` / `INVENTORY_NAME_WIDTH` | Human table layout |
+| `VENDOR_DOWNLOAD_TIMEOUT` | pip download timeout for menu option 2 |
+| `ENGINE_ID_MIN_OCTETS` / `ENGINE_ID_MAX_OCTETS` | RFC 3411 engine-ID length check |
 | `YES_ANSWERS` / `NO_ANSWERS` | Prompt replies |
 | `MENU_CHOICE_ALIASES` | CLI `1`/`walk`/`deps` → tool |
 | `HEALTH_STATUS_KEYS` | Fields read from `/appliances/status` |
@@ -157,11 +164,14 @@ python -m unittest tests.test_snmp_hashgen
 
 ## Security notes
 
-- API tokens and walk passphrases are not printed.
-- Localized hashes in the live summary are USM keys for ESXi, not the original passwords.
+- API tokens and walk passphrases are not printed. Login/PUT error bodies are truncated.
+- Localized hashes in the live summary are USM keys for ESXi, not the original passwords. Reports store hash *lengths*, not the hex.
+- Engine IDs are validated (hex, 5–32 octets) before RFC 3414 localization so a bad `oldEngineID` cannot crash or mint garbage Kul.
 - Windows never downloads a Net-SNMP installer.
-- Persistent USM edits stay under `/var/lib/snmp` and `/var/net-snmp` (no `find /`).
-- `credentials.json` is gitignored.
+- Persistent USM edits stay under `/var/lib/snmp` and `/var/net-snmp` (no `find /`). SNMP usernames are matched against `SNMP_NAME_RE` before remote `sed`.
+- `credentials.json` is gitignored. Report files use mode `0600` where the OS honors it.
+- Lab defaults (`TLS_VERIFY=False`, `SSH_STRICT_HOST_KEY=False`, `DEBUG=True`) print a warning at tool start. Production: all three flipped (`True` / `True` / `False`).
+- RFC 3414 passphrase floor is 8; raise `SNMP_MIN_PASSPHRASE_LEN` to 15 for stricter DISA sites.
 
 ## Troubleshooting
 
@@ -179,20 +189,25 @@ python -m unittest tests.test_snmp_hashgen
 | Walk / digest error | Leftover `usmUser` in persistent conf, algorithm mismatch, short reload wait |
 | Unknown ssh-rsa host key | Expected when `SSH_STRICT_HOST_KEY` is False |
 | Vendor install failed | Wheels built for another OS/Python — rerun launcher option 2 on a matching host |
+| Need a flow trace | `DEBUG = True` already prints step traces + JSON. For more, uncomment `# print(f"DEBUG ...")` lines in the tool you are tracing, then comment them again. Never uncomment lines that would print passphrases. |
+
+Uncomment extra `# print(f"DEBUG ...")` lines in the file you are tracing if the live `DEBUG=True` output is not enough. Comment them again when done. Do not add passphrase / token prints.
 
 ## Layout
 
 | Path | Role |
 | --- | --- |
 | `MultiCollectiveToolkit-<OS>.*` | Starts `app/main.py` (menu + args live in Python) |
-| `app/main.py` | CLI menu + SNMP Credential Tool workflow (`cli()` / `main()`) |
-| `credentials.example.json` | Empty credentials template |
-| `app/` | Python sources and optional `vendor/` wheel cache |
+| `app/main.py` | CLI menu only (`cli()`) |
 | `app/config.py` | Algorithms, timeouts, paths |
-| `app/appgate.py` | Admin API |
-| `app/snmp_engine.py` | SSH Engine ID + USM purge |
-| `app/snmp_hashgen.py` | RFC 3414 localization |
-| `app/snmp_validate.py` | Walk + optional tool install |
-| `app/snmp_walk_test.py` | Standalone walk |
-| `app/utils.py` | Vendor pip + credentials load |
+| `app/tools/` | Menu tools (credentials, walk, download deps) |
+| `app/api/` | Admin API HTTP client only |
+| `app/ssh/` | Shared SSH session + SNMP engine/USM helpers |
+| `app/core/` | Shared non-HTTP helpers (inventory model, prompts, hashgen, walk, utils) |
+| `app/core/inventory.py` | Target model, health labels, exclude prompt (not an API client) |
+| `app/core/prompts.py` | Shared Controller / credential prompts |
+| `app/core/snmp_hashgen.py` | RFC 3414 localization |
+| `app/core/snmp_validate.py` | Walk backends + optional tool install |
+| `app/core/utils.py` | Vendor pip, credentials load, report writer |
 | `app/vendor/` | Offline wheel cache (not committed) |
+| `credentials.example.json` | Empty credentials template |

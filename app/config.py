@@ -5,9 +5,9 @@ import warnings
 # ============================================================================
 # Why SHA-256 + AES-256: CNSA 2.0 / DISA baseline for SNMPv3 authPriv.
 # All three paths must use the same trio or walks fail with digest errors:
-#   1. createUser line (appgate.py)
-#   2. RFC 3414 localization (snmp_hashgen.py)
-#   3. walk client (snmp_validate.py / snmp_walk_test.py)
+#   1. createUser line (api/appgate.py)
+#   2. RFC 3414 localization (core/snmp_hashgen.py)
+#   3. walk client (core/snmp_validate.py / tools/snmp_walk.py)
 #
 # If you still see "Wrong SNMP PDU digest" after a password change, it is
 # usually stale usmUser in /var/lib/snmp (step 7), not these algorithm names.
@@ -19,6 +19,7 @@ SNMP_AUTH_PROTOCOL = "SHA256"
 SNMP_PRIV_PROTOCOL = "AES256"
 # CNSA 2.0 / DISA: do not localize with MD5 or SHA-1.
 ALLOWED_HASH_ALGOS = ("sha256", "sha384", "sha512")
+# RFC 3414 floor is 8. DISA SNMP STIG often wants 15 — raise here for those sites.
 SNMP_MIN_PASSPHRASE_LEN = 8
 # RFC 3414 password-to-key expansion (1 MiB).
 RFC3414_KDF_LEN = 1048576
@@ -65,31 +66,60 @@ warnings.filterwarnings(
 )
 
 def warn_insecure_transport() -> None:
-    """Print a DISA-style warning if TLS or SSH host-key checks are off."""
+    """DISA: warn when lab defaults weaken transport or dump run data.
+
+    Called at the start of mutating / walk tools (not the menu itself).
+    Production: TLS_VERIFY=True, SSH_STRICT_HOST_KEY=True, DEBUG=False.
+    """
     import sys
-    if TLS_VERIFY and SSH_STRICT_HOST_KEY:
-        return
-    print(
-        "WARNING: Insecure transport defaults are on "
-        f"(TLS_VERIFY={TLS_VERIFY}, SSH_STRICT_HOST_KEY={SSH_STRICT_HOST_KEY}). "
-        "Admin and SSH secrets can be MITM'd. Set both True in app/config.py "
-        "on untrusted networks (DISA / CNSA).",
-        file=sys.stderr,
-    )
+    if not (TLS_VERIFY and SSH_STRICT_HOST_KEY):
+        print(
+            "WARNING: Insecure transport defaults are on "
+            f"(TLS_VERIFY={TLS_VERIFY}, SSH_STRICT_HOST_KEY={SSH_STRICT_HOST_KEY}). "
+            "Admin and SSH secrets can be MITM'd. Set both True in app/config.py "
+            "on untrusted networks (DISA / CNSA).",
+            file=sys.stderr,
+        )
+    if DEBUG:
+        print(
+            "WARNING: DEBUG=True — hostnames, engine IDs, and hash lengths print "
+            "to the console (no passwords/tokens). Set DEBUG=False for production.",
+            file=sys.stderr,
+        )
+
 SSH_PORT = 22
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
-# Full JSON dump to the console at end of run (no passwords/tokens).
-DEBUG = False
+# Lab troubleshooting: full JSON dump to the console at end of run (no passwords/tokens).
+# DISA: set False before a production run so engine IDs / inventory stay off the console.
+DEBUG = True
 # Write timestamped reports/*.json; console dump only if DEBUG is on.
 WRITE_RUN_REPORT = True
+# Unix mode for new report files (owner read/write only). Windows ignores most bits.
+REPORT_FILE_MODE = 0o600
 # When True: first pass is dry-run without asking. Prompt can still enable dry-run when False.
 DRY_RUN = False
 # Directory for run-*.json / dryrun-*.json / walk-*.json (under repo root).
 REPORTS_DIRNAME = "reports"
 SNMPD_STOP_RETRIES = 5
+# Seconds between snmpd stop polls (step 7 must see a dead daemon before sed).
+SNMPD_STOP_POLL_SEC = 1
 USM_SED_RETRIES = 3
 USM_RECREATE_WAITS = 5
+# Truncate API/SSH/walk error bodies so we never dump a full token-bearing payload.
+LOGIN_BODY_PREVIEW = 300
+API_ERROR_BODY_PREVIEW = 500
+SSH_LOG_PREVIEW = 300
+WALK_ERROR_PREVIEW = 500
+# Summary banner width (step 8 human table).
+SUMMARY_WIDTH = 60
+# Inventory table hostname column (step 2).
+INVENTORY_NAME_WIDTH = 30
+# pip download of vendor wheels is slower than a single install.
+VENDOR_DOWNLOAD_TIMEOUT = 300
+# RFC 3411 engine ID is 5–32 octets. Type-3 MAC IDs are 11.
+ENGINE_ID_MIN_OCTETS = 5
+ENGINE_ID_MAX_OCTETS = 32
 # Accepted answers for yes/no prompts (Add another Controller, Walk another IP).
 YES_ANSWERS = ("y", "yes")
 NO_ANSWERS = ("n", "no")

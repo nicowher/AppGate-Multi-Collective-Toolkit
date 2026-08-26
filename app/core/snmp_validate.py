@@ -1,5 +1,9 @@
 """Step 8 / SNMP-Walk: prove the new USM user works (authPriv).
 
+Lives in ``core/``. Called from ``tools/snmp_credentials.py`` (step 8) and
+``tools/snmp_walk.py`` (menu 3).
+
+
 Why walk at all: pin/push can succeed while snmpd still has stale usmUser
 keys; a walk with the *passphrases* is the real acceptance test.
 
@@ -17,8 +21,9 @@ import sys
 import time
 from typing import List, Optional, Sequence, Tuple, Union
 
-from utils import install_from_vendor
+from core.utils import install_from_vendor, is_yes
 from config import (
+    DEBUG,
     DEFAULT_SNMP_PORT,
     PIP_INSTALL_TIMEOUT,
     PKG_INSTALL_TIMEOUT,
@@ -31,6 +36,7 @@ from config import (
     SNMPWALK_RETRIES,
     SNMP_WALK_OID,
     VALIDATION_RETRY_DELAY,
+    WALK_ERROR_PREVIEW,
     WALK_FQDN_ATTEMPTS,
     WALK_IP_ATTEMPTS,
     get_auth_protocol,
@@ -55,13 +61,25 @@ class SNMPValidator:
         hosts: List[str] = [host] if isinstance(host, str) else [h for h in host if h]
         if not hosts:
             return False
+        # print(f"DEBUG walk: hosts={hosts} engine={engine_id}")
+        if DEBUG:
+            print(f"      DEBUG walk: hosts={hosts} engine_set={bool(engine_id)}", file=sys.stderr)
         for addr in hosts:
-            attempts = WALK_IP_ATTEMPTS if self._addr_is_ip(addr) else WALK_FQDN_ATTEMPTS
-            kind = "IP" if self._addr_is_ip(addr) else "FQDN"
-            print(f"      Walk {kind} {addr} ({attempts} attempt(s))...", file=sys.stderr)
-            if self._validate_snmp_walk_one(addr, user, auth, priv, engine_id, attempts):
+            target = self._walk_target(addr)
+            attempts = WALK_IP_ATTEMPTS if self._addr_is_ip(target) else WALK_FQDN_ATTEMPTS
+            kind = "IP" if self._addr_is_ip(target) else "FQDN"
+            print(f"      Walk {kind} {target} ({attempts} attempt(s))...", file=sys.stderr)
+            if self._validate_snmp_walk_one(target, user, auth, priv, engine_id, attempts):
                 return True
         return False
+
+    @staticmethod
+    def _walk_target(value: str) -> str:
+        """Strip IPv6 brackets so pysnmp/Net-SNMP get a bare address."""
+        text = (value or "").strip()
+        if text.startswith("[") and text.endswith("]"):
+            return text[1:-1]
+        return text
 
     @staticmethod
     def _addr_is_ip(value: str) -> bool:
@@ -155,7 +173,7 @@ class SNMPValidator:
                     return True
                 print(
                     f"      SNMP walk failed (rc={result.returncode}): "
-                    f"{result.stderr.strip()[:500] or result.stdout.strip()[:500]}",
+                    f"{result.stderr.strip()[:WALK_ERROR_PREVIEW] or result.stdout.strip()[:WALK_ERROR_PREVIEW]}",
                     file=sys.stderr,
                 )
                 print(f"      cmd: {safe_cmd}", file=sys.stderr)
@@ -217,7 +235,7 @@ class SNMPValidator:
                 answer = input(
                     "      Install Net-SNMP via the system package manager? [Y/n]: "
                 ).strip().lower()
-                if answer in ("", "y", "yes"):
+                if is_yes(answer, default_yes=True):
                     print("      Attempting to install Net-SNMP...", file=sys.stderr)
                     if system == "Linux":
                         native_ok = self._install_snmpwalk_linux()
@@ -274,7 +292,7 @@ class SNMPValidator:
                 text=True,
             )
         except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()[:500]
+            stderr = (exc.stderr or "").strip()[:WALK_ERROR_PREVIEW]
             print(f"      pip install pysnmp failed (rc={exc.returncode}): {stderr}", file=sys.stderr)
             return False
         except subprocess.TimeoutExpired:

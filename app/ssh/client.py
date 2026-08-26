@@ -1,0 +1,160 @@
+"""Reusable SSH sessions for appliance work.
+
+Password auth first; keyboard-interactive is the fallback some AppGate
+boxes require. Timeouts come from config (SSH_TIMEOUT / SSH_AUTH_TIMEOUT)
+so a dead host cannot hang the toolkit. Host-key policy is
+SSH_STRICT_HOST_KEY (lab WarningPolicy / production RejectPolicy).
+"""
+from core.utils import ensure_package
+
+try:
+    import paramiko
+except ImportError:
+    ensure_package("paramiko", "paramiko")
+    import paramiko
+
+import socket
+import sys
+from typing import List, Sequence, Union
+
+from config import (
+    SSH_AUTH_TIMEOUT,
+    SSH_LOG_PREVIEW,
+    SSH_PORT,
+    SSH_STRICT_HOST_KEY,
+    SSH_TIMEOUT,
+)
+
+
+class SSHSession:
+    def __init__(self, ssh_user: str, ssh_password: str) -> None:
+        self.ssh_user = ssh_user
+        self.ssh_password = ssh_password
+
+    @staticmethod
+    def _hosts(host: Union[str, Sequence[str]]) -> List[str]:
+        if isinstance(host, str):
+            return [host] if host else []
+        return [h for h in host if h]
+
+    def _apply_host_key_policy(self, client: paramiko.SSHClient) -> None:
+        try:
+            client.load_system_host_keys()
+        except OSError:
+            pass
+        policy = paramiko.RejectPolicy() if SSH_STRICT_HOST_KEY else paramiko.WarningPolicy()
+        client.set_missing_host_key_policy(policy)
+
+    def _with_ssh(self, ip: str, fn):
+        """Open an SSH session, run *fn(client)*, then close.
+
+        Password auth first; keyboard-interactive is the fallback some
+        AppGate boxes require.
+        """
+        client = paramiko.SSHClient()
+        self._apply_host_key_policy(client)
+        try:
+            client.connect(
+                hostname=ip,
+                port=SSH_PORT,
+                username=self.ssh_user,
+                password=self.ssh_password,
+                timeout=SSH_TIMEOUT,
+                allow_agent=False,
+                look_for_keys=False,
+                auth_timeout=SSH_AUTH_TIMEOUT,
+            )
+            return fn(client)
+        except paramiko.AuthenticationException as exc:
+            print(
+                f"      SSH authentication failed: {exc}. "
+                "Trying keyboard-interactive fallback...",
+                file=sys.stderr,
+            )
+            return self._with_ssh_keyboard_interactive(ip, fn)
+        except paramiko.SSHException as exc:
+            print(
+                f"      SSH connection error ({type(exc).__name__}): "
+                f"{str(exc)[:SSH_LOG_PREVIEW]}",
+                file=sys.stderr,
+            )
+            # print(f"DEBUG ssh: connect fail host={ip} user={self.ssh_user}")
+        except (OSError, socket.timeout, TimeoutError) as exc:
+            print(f"      SSH network error ({type(exc).__name__}): {exc}", file=sys.stderr)
+        finally:
+            try:
+                client.close()
+            except OSError:
+                pass
+        return None
+
+    def _with_ssh_keyboard_interactive(self, ip: str, fn):
+        def handler(title, instructions, prompt_list):
+            responses = []
+            for prompt in prompt_list:
+                if "password" in prompt[0].lower():
+                    responses.append(self.ssh_password)
+                else:
+                    responses.append("")
+            return responses
+
+        transport = None
+        client = paramiko.SSHClient()
+        self._apply_host_key_policy(client)
+        try:
+            transport = paramiko.Transport((ip, SSH_PORT))
+            transport.banner_timeout = SSH_TIMEOUT
+            transport.auth_timeout = SSH_AUTH_TIMEOUT
+            transport.start_client(timeout=SSH_TIMEOUT)
+            transport.auth_interactive(self.ssh_user, handler)
+            client._transport = transport
+            return fn(client)
+        except (paramiko.SSHException, OSError, socket.timeout, TimeoutError) as exc:
+            print(
+                f"      Keyboard-interactive SSH failed ({type(exc).__name__}): {exc}",
+                file=sys.stderr,
+            )
+        finally:
+            try:
+                client.close()
+            except OSError:
+                pass
+            if transport is not None:
+                try:
+                    transport.close()
+                except OSError:
+                    pass
+        return None
+
+    def _sudo(self, client: paramiko.SSHClient, command: str, check: bool = True) -> str:
+        return self._run(client, f"sudo -S {command}", sudo=True, check=check)
+
+    def _run(
+        self,
+        client: paramiko.SSHClient,
+        command: str,
+        sudo: bool = False,
+        check: bool = True,
+    ) -> str:
+        stdin, stdout, stderr = client.exec_command(command)
+        stdout.channel.settimeout(SSH_TIMEOUT)
+        stderr.channel.settimeout(SSH_TIMEOUT)
+        if sudo:
+            stdin.write(self.ssh_password + "\n")
+            stdin.flush()
+        try:
+            output = stdout.read().decode("utf-8", errors="replace")
+            err_output = stderr.read().decode("utf-8", errors="replace")
+            exit_status = stdout.channel.recv_exit_status()
+        except (socket.timeout, TimeoutError, OSError) as exc:
+            print(f"      SSH command timed out or failed ({type(exc).__name__}): {exc}", file=sys.stderr)
+            return ""
+        if check and exit_status not in (0, 1):
+            print(
+                f"      SSH command failed (exit {exit_status}): "
+                f"{err_output.strip()[:SSH_LOG_PREVIEW]}",
+                file=sys.stderr,
+            )
+        # if DEBUG:
+        #     print(f"DEBUG ssh: cmd={command!r} rc={exit_status} out={output[:80]!r}", file=sys.stderr)
+        return output

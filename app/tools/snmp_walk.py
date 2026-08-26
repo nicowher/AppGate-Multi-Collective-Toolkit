@@ -6,30 +6,30 @@ Reached via ``python app/main.py 3`` or launcher menu option 3.
   2) Controller list — same login / exclude as configure steps 1–2, then walk
      (IP first for NAT; gateway never uses Controller agip)
 """
-import json
 import os
 import sys
 
-from appgate import AppGateClient
+_APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _APP_DIR not in sys.path:
+    sys.path.insert(0, _APP_DIR)
+
+from datetime import datetime, timezone
+
+from api.appgate import AppGateClient
 from config import (
-    CREDENTIALS_FILENAME,
     DEBUG,
     SNMP_AUTH_PROTOCOL,
     SNMP_MIN_PASSPHRASE_LEN,
     SNMP_NAME_RE,
     SNMP_PRIV_PROTOCOL,
-    REPORTS_DIRNAME,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
 )
-from inventory import prompt_exclusions
-from main import _parse_collectives, _require
-from snmp_validate import SNMPValidator
-from utils import REPO_ROOT, is_valid_host, load_credentials
-from datetime import datetime, timezone
-
-CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
+from core.inventory import prompt_exclusions
+from core.prompts import CREDENTIALS_PATH, _parse_collectives, _require
+from core.snmp_validate import SNMPValidator
+from core.utils import is_valid_host, load_credentials, write_json_report
 
 
 def _single_walk_hosts(creds: dict, typed: str) -> list:
@@ -83,6 +83,8 @@ def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
         )
         hosts = _single_walk_hosts(creds, ip)
         # print(f"DEBUG walk-single: hosts={hosts}")
+        if DEBUG:
+            print(f"      DEBUG walk-single: hosts={hosts}", file=sys.stderr)
         print(f"\n      SNMP walk {hosts}...")
         ok = validator.validate_snmp_walk(hosts, user, auth, priv)
         print(f"      {ip}: walk {'PASSED' if ok else 'FAILED'}")
@@ -137,6 +139,8 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     print(f"      Selected {len(selected)} appliance(s)")
 
     # print("DEBUG walk-inventory:", [t.label() for t in selected])
+    if DEBUG:
+        print(f"      DEBUG walk-inventory: selected={[t.label() for t in selected]}", file=sys.stderr)
     print("\n[3/3] SNMP walk...")
     validator = SNMPValidator()
     failed = 0
@@ -153,7 +157,7 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
 
     if WRITE_RUN_REPORT or DEBUG:
         report = {
-            "script": "snmp_walk_test",
+            "script": "snmp_walk",
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "auth_protocol": SNMP_AUTH_PROTOCOL,
             "priv_protocol": SNMP_PRIV_PROTOCOL,
@@ -178,22 +182,7 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
             ],
             "failed_count": failed,
         }
-        text = json.dumps(report, indent=2)
-        if DEBUG:
-            print("\n----- BEGIN RUN REPORT -----")
-            print(text)
-            print("----- END RUN REPORT -----")
-        if WRITE_RUN_REPORT:
-            reports_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME)
-            try:
-                os.makedirs(reports_dir, exist_ok=True)
-                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                path = os.path.join(reports_dir, f"walk-{stamp}.json")
-                with open(path, "w", encoding="utf-8") as fh:
-                    fh.write(text + "\n")
-                print(f"      Report written: {path}", file=sys.stderr)
-            except OSError as exc:
-                print(f"      Could not write report file: {exc}", file=sys.stderr)
+        write_json_report("walk", report)
 
     return 1 if failed else 0
 

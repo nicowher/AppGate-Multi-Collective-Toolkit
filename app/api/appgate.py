@@ -1,4 +1,8 @@
-"""AppGate admin API: login, inventory, snmpd.conf push.
+"""AppGate admin API: login, list appliances, snmpd.conf PUT.
+
+Inventory *shape* (Target, health, exclude) lives in ``core/inventory.py``.
+This file only talks HTTP.
+
 
 One AppGateClient per collective (own bearer token) so a token from site A
 is never sent to site B (403 / wrong collective).
@@ -16,7 +20,7 @@ Why site sanitize/retry: GET often expands site to an object; PUT wants a UUID.
   422 on site usually means View without Edit/Site — hint the operator, don't
   only dump raw JSON.
 """
-from utils import ensure_package
+from core.utils import ensure_package
 
 try:
     import requests
@@ -32,7 +36,10 @@ from config import (
     APPGATE_API_VERSION,
     APPGATE_MACHINE_ID,
     API_AUTH_FAIL_CODES,
+    API_ERROR_BODY_PREVIEW,
     APPGATE_PROVIDER,
+    DEBUG,
+    LOGIN_BODY_PREVIEW,
     APPLIANCE_LIST_MAX,
     APPLIANCE_LIST_PAGE,
     APPLIANCE_STATUS_PATH,
@@ -47,7 +54,7 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-from inventory import (
+from core.inventory import (
     Target,
     appliance_functions,
     appliance_health,
@@ -127,7 +134,7 @@ class AppGateClient:
             data = response.json()
             token = data.get("token")
             if not token:
-                body_preview = (response.text or "")[:300]
+                body_preview = (response.text or "")[:LOGIN_BODY_PREVIEW]
                 raise ValueError(
                     f"Login response did not contain an API token. "
                     f"HTTP {response.status_code}. Response body: {body_preview}"
@@ -299,7 +306,9 @@ class AppGateClient:
     def get_appliance_status(self) -> Dict[str, Dict[str, Any]]:
         """6.3+ replacement for GET /stats/appliances → GET /appliances/status."""
         try:
-            # print(f"DEBUG step2: GET {APPLIANCE_STATUS_PATH}")
+            # print(f"DEBUG step2: GET {APPLIANCE_STATUS_PATH} host={self.agip}")
+            if DEBUG:
+                print(f"      DEBUG step2: GET {APPLIANCE_STATUS_PATH} on {self.agip}", file=sys.stderr)
             items = self._paged_get(APPLIANCE_STATUS_PATH)
         except (requests.RequestException, ValueError, OSError):
             return {}
@@ -397,7 +406,7 @@ class AppGateClient:
         """Step 6: PUT createUser + optional rouser + engineIDType 3 (live run only).
 
         Call after delete_snmp_user so the final blob has no deleteUser line.
-        Auth/priv algorithms must match snmp_hashgen.py / config.py.
+        Auth/priv algorithms must match core/snmp_hashgen.py / config.py.
         """
         create_user_line = (
             f"createUser {user} {SNMP_AUTH_PROTOCOL} -l 0x{auth_hash} "
@@ -463,7 +472,7 @@ class AppGateClient:
                 url, headers=self.headers, json=body, verify=TLS_VERIFY, timeout=API_TIMEOUT
             )
         if put_response.status_code != 200:
-            body_preview = (put_response.text or "")[:500]
+            body_preview = (put_response.text or "")[:API_ERROR_BODY_PREVIEW]
             hint = ""
             text_l = (put_response.text or "").lower()
             if put_response.status_code == 422 and "site" in text_l:
