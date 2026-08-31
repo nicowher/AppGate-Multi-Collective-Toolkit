@@ -51,9 +51,9 @@ CLI is `[1/3]` API login, `[2/3]` inventory / exclude, `[3/3]` unharden or harde
 
 **Unharden (SSH):**
 
-1. `iptables` / `ip6tables` `-F SSHBRUTE; -A ACCEPT`  
-2. `cz-config set -j users/0/nopasswd true` plus drop-in `/etc/sudoers.d/cz-acas-scan` (`/etc/sudoers` is cz-configd-generated)  
-3. Wrap `/etc/profile.d/ssh_confirm.sh` with `if [ -t 0 ]` so **non-TTY scanners** skip y/N. Interactive SSH still prompts. Missing file (typical gateway) is a skip.
+1. `cz-config set -j users/0/nopasswd true` plus drop-in `/etc/sudoers.d/cz-acas-scan`  
+2. Wrap `/etc/profile.d/ssh_confirm.sh` with `if [ -t 0 ]` (non-TTY scanners skip y/N; interactive SSH still prompts)  
+3. `iptables` / `ip6tables` `-F SSHBRUTE; -A ACCEPT` **last** (`cz-config set` can rebuild the firewall if we flush first)
 
 **Harden:** `nopasswd false`, restore `*.pre-acas`, remove drop-in, `nohup systemctl restart cz-configd`. Re-harden as soon as the scan finishes.
 

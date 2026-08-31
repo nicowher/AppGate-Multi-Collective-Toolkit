@@ -194,8 +194,8 @@ def _apply(
         for target in selected:
             if mode == "unharden":
                 print(
-                    f"      {target.label()}: would flush SSHBRUTE, "
-                    "cz-config nopasswd true, write sudoers drop-in, wrap ssh_confirm.sh"
+                    f"      {target.label()}: would cz-config nopasswd, drop-in, "
+                    "banner TTY, then iptables -F SSHBRUTE -A ACCEPT"
                 )
             else:
                 print(

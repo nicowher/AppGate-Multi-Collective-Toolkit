@@ -6,10 +6,10 @@ visudo-only edits get wiped. We set ``cz-config users/0/nopasswd`` and write
 ``#includedir`` drop-in ``ACAS_SUDOERS_DROPIN``.
 
 Unharden (SSH, FQDN first):
-  1. iptables/ip6tables -F SSHBRUTE; -A ACCEPT
-  2. drop-in + cz-config nopasswd true (+ marked append if sudoers still writable)
-  3. wrap ``ACAS_BANNER_FILE`` (ssh_confirm.sh) with ``if [ -t 0 ]``
-     Missing file = skip (gateways often have no STIG banner).
+  1. drop-in + cz-config nopasswd true
+  2. wrap ``ACAS_BANNER_FILE`` (ssh_confirm.sh) with ``if [ -t 0 ]``
+  3. iptables/ip6tables -F SSHBRUTE; -A ACCEPT **last**
+     (cz-config set can rebuild the firewall if we flush first)
 
 Harden:
   1. cz-config nopasswd false
@@ -71,17 +71,6 @@ class AcasPrep(SSHSession):
         banner = shlex.quote(ACAS_BANNER_FILE)
         guard = ACAS_BANNER_TTY_GUARD
         return f"""
-echo STEP_IPTABLES_START
-for bin in {bins}; do
-  if "$bin" -L {chain} >/dev/null 2>&1; then
-    "$bin" -F {chain}
-    "$bin" -A {chain} -j ACCEPT
-    echo STEP_IPTABLES_OK "$bin"
-  else
-    echo STEP_IPTABLES_SKIP "$bin" no {chain} chain
-  fi
-done
-
 echo STEP_SUDOERS_START
 DROP={drop}
 SUDOERS={sudoers}
@@ -139,6 +128,18 @@ else
   fi
 fi
 fi
+
+echo STEP_IPTABLES_START
+for bin in {bins}; do
+  if "$bin" -w -n -L {chain} >/dev/null 2>&1; then
+    "$bin" -w -F {chain}
+    "$bin" -w -A {chain} -j ACCEPT
+    echo STEP_IPTABLES_OK "$bin"
+    "$bin" -w -S {chain} || true
+  else
+    echo STEP_IPTABLES_SKIP "$bin" no {chain} chain
+  fi
+done
 echo STEP_UNHARDEN_DONE
 """
 
