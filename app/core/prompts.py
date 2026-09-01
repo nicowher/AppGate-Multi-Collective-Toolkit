@@ -19,6 +19,8 @@ from config import (
     STIG_PASSWORD_MIN_LEN,
     YES_ANSWERS,
 )
+from getpass import getpass
+
 from core.utils import REPO_ROOT, is_valid_host, prompt_until_valid
 
 CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
@@ -112,11 +114,88 @@ def resolve_mibs(col: dict, creds: dict) -> List[str]:
     return _parse_mibs(creds.get("mibs"))
 
 
+def _parse_ntp_servers(value: Any) -> List[Dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            out.append(
+                {"hostname": item.strip(), "keyType": "", "keyNo": "", "key": ""}
+            )
+            continue
+        if not isinstance(item, dict):
+            continue
+        host = str(item.get("hostname") or "").strip()
+        if not host:
+            continue
+        kn = item.get("keyNo")
+        out.append(
+            {
+                "hostname": host,
+                "keyType": str(item.get("keyType") or "").strip(),
+                "keyNo": "" if kn is None else str(kn).strip(),
+                "key": str(item.get("key") or "").strip(),
+            }
+        )
+    return out
+
+
+def resolve_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
+    local = col.get("ntp_servers")
+    if isinstance(local, list) and local:
+        return _parse_ntp_servers(local)
+    return _parse_ntp_servers(creds.get("ntp_servers"))
+
+
+def ensure_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
+    """NTP tool: inherit, or prompt until at least one hostname exists."""
+    servers = resolve_ntp_servers(col, creds)
+    if servers:
+        col["ntp_servers"] = servers
+        return servers
+    print(
+        f"      Collective {col.get('index', '?')} NTP servers "
+        "(hostname required; keyType/keyNo/key optional):"
+    )
+    servers = []
+    while True:
+        host = input("      hostname: ").strip()
+        if not host:
+            if servers:
+                break
+            print("      At least one NTP hostname is required.", file=sys.stderr)
+            continue
+        key_type = input("      keyType (e.g. SHA256, empty if none): ").strip()
+        key_no = input("      keyNo (empty if none): ").strip()
+        key = ""
+        if key_type:
+            key = getpass("      key: ").strip()
+            confirm = getpass("      key (confirm): ").strip()
+            if key != confirm:
+                print("      Keys did not match. Try again.", file=sys.stderr)
+                continue
+        servers.append(
+            {
+                "hostname": host,
+                "keyType": key_type,
+                "keyNo": key_no,
+                "key": key,
+            }
+        )
+        more = input("      Add another NTP server? [y/N]: ").strip().lower()
+        if more not in YES_ANSWERS:
+            break
+    col["ntp_servers"] = servers
+    return servers
+
+
 def _row_from_item(item: dict) -> Dict[str, Any]:
     row: Dict[str, Any] = {
         "fqdn": str(item.get("fqdn") or item.get("hostname") or "").strip(),
         "agip": str(item.get("agip") or "").strip(),
         "mibs": _parse_mibs(item.get("mibs")),
+        "ntp_servers": _parse_ntp_servers(item.get("ntp_servers")),
     }
     for key in COLLECTIVE_OPTIONAL_STR:
         row[key] = _optional_str(item, key)
@@ -192,6 +271,7 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
             "api_username": user,
             "api_password": password,
             "mibs": list(row.get("mibs") or []),
+            "ntp_servers": list(row.get("ntp_servers") or []),
         }
         for key in COLLECTIVE_OPTIONAL_STR:
             entry[key] = _optional_str(row, key)
@@ -394,6 +474,8 @@ def prepare_collectives(
                 col[key] = inherited
         if not col.get("mibs"):
             col["mibs"] = resolve_mibs(col, creds)
+        if not col.get("ntp_servers"):
+            col["ntp_servers"] = resolve_ntp_servers(col, creds)
 
     flags = {"need_snmp": need_snmp, "need_new_password": need_new_password}
     scope = _prompt_cred_scope(len(collectives))

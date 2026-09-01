@@ -14,20 +14,22 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 | **2** | ACAS scan prep — unharden for scanning, then harden (`cz-configd`) |
 | **3** | SNMP Walk — validate authPriv only (no SSH / no config push) |
 | **4** | Update cz SSH password — `openssl passwd -6` + `cz-config` + login verify |
+| **5** | NTP servers — PUT `ntp.servers`, then restart cz-customization + chronyc verify |
+| **C** | Configure — edit `DEBUG`, `LAB_MODE`, SSH/walk timeouts in `config.py` |
 | **D** | Download deps — `pip download` into `app/vendor/wheels` (air-gap; does not install) |
 | **U** | Update deps — `pip install --upgrade` (needs network; does not refresh wheels) |
 | **Q** | Quit |
 
 ## Shared behavior (all mutating / inventory tools)
 
-- **`credentials.json`** (gitignored): global defaults plus `collectives[]`. Required per collective: `fqdn` (`agip` recommended). SSH user/pass and API user/pass are required for every tool; SNMP only for 1 and 3; `ssh_password_new` only for 4; `mibs` never required. Old `admin_*` keys still load as `api_*`.
+- **`credentials.json`** (gitignored): global defaults plus `collectives[]`. Required per collective: `fqdn` (`agip` recommended). SSH user/pass and API user/pass are required for every tool; SNMP only for 1 and 3; `ssh_password_new` only for 4; `ntp_servers` only for 5; `mibs` never required. Old `admin_*` keys still load as `api_*`.
 - **Credential entry** (2+ collectives): **1) global**, **2) per collective**, **3) global then override** selected rows. Short file secrets are discarded; typed replacements are kept. Short/missing `snmp_priv` reuses `snmp_auth`.
 - **Exclude collectives** (number or FQDN) then **exclude appliances** (`1.hostname`).
 - **FQDN first**, then IP. Gateways never use the Controller IP.
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **`DEBUG` and `DRY_RUN` are separate.**
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
 - **SSH keys:** unknown hosts are prompted **on the main thread** before parallel SSH (`Trust and save this host key?`) into `~/.ssh/known_hosts` (`0600`). Workers never call `input()`.
-- **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
+- **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
 - Missing packages install from `app/vendor/wheels` first, then optional online pip.
 
 ## 1) SNMP Credential Tool
@@ -64,6 +66,10 @@ CLI is `[1/3]` API login, `[2/3]` inventory / exclude, `[3/3]` unharden or harde
 ## 4) Update cz SSH password
 
 `[1/3]` login, `[2/3]` inventory / exclude, `[3/3]` SSH. Uses current `ssh_password`. On each box: host-key prime, `openssl passwd -6` (new password on **stdin**), `cz-config set users/0/encrypted-password`, `nopasswd false`, then SSH login-verify (`PASS` / `FAIL`). Warns if `ssh_password_new` is only global. Does not rewrite `credentials.json`.
+
+## 5) NTP servers
+
+`[1/4]` login, `[2/4]` inventory, `[3/4]` PUT `ntp.servers` (survives reboot), `[4/4]` SSH `systemctl restart cz-customization.service` (no REST equivalent) then `chronyc ntpdata` verify. SHA256 keys without `HEX:` get that prefix.
 
 ## D / U) Dependencies
 
@@ -110,6 +116,7 @@ Copy `credentials.example.json` to `credentials.json` next to the launchers. Mis
 | `snmp_priv` | Menus 1 and 3 | SNMPv3 | Priv passphrase. If missing or too short, auth is reused |
 | `rouser` | Optional | Menu 1 | Read-only username written into snmpd.conf |
 | `mibs` | Never | Reserved | Array of MIB/OID names (e.g. `["SNMPv2-MIB"]`) |
+| `ntp_servers` | Menu 5 | NTP | Array of `{hostname, keyType, keyNo, key}`. SHA256 keys get `HEX:` prepended. Collective list overrides global |
 
 **Each object in `collectives[]`:**
 
@@ -133,6 +140,9 @@ A one-controller file (no `collectives[]`, just top-level `fqdn`/`agip`) still w
   "snmp_priv": "privpass",
   "rouser": "readonlyuser",
   "mibs": ["SNMPv2-MIB"],
+  "ntp_servers": [
+    { "hostname": "time.example.com", "keyType": "SHA256", "keyNo": "1", "key": "aabbccdd" }
+  ],
   "collectives": [
     {
       "fqdn": "ctrl-a.example.com",
@@ -184,6 +194,7 @@ Other knobs:
 | `SSH_CONCURRENCY` / `WALK_CONCURRENCY` | Parallel SSH / SNMP walks (default 5) |
 | `SNMP_HASH_ALGO` / `SNMP_AUTH_PROTOCOL` / `SNMP_PRIV_PROTOCOL` | Must stay in sync (SHA-256 / AES-256) |
 | `CZ_PASSWORD_VERIFY_DELAY` | Seconds to wait before SSH login-verify after cz-config set |
+| `NTP_VERIFY_DELAY` / `NTP_CUSTOMIZATION_UNIT` | Wait after customization restart; systemd unit name |
 | `ACAS_*` | Banner file, sudoers drop-in, SSHBRUTE chain, cz-configd unit |
 | `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per address (default 2) |
 | `WRITE_RUN_REPORT` / `REPORTS_DIRNAME` | Write `reports/*.json` |
@@ -223,7 +234,7 @@ Other knobs:
 | `MultiCollectiveToolkit-<OS>.*` | Starts `app/main.py` |
 | `app/main.py` | Menu only |
 | `app/config.py` | Algorithms, timeouts, `LAB_MODE` |
-| `app/tools/` | SNMP credentials, ACAS, walk, cz password, deps |
+| `app/tools/` | SNMP credentials, ACAS, walk, cz password, NTP, deps |
 | `app/api/` | Admin API HTTP client |
 | `app/ssh/` | SSH session, SNMP engine/USM, ACAS, cz password |
 | `app/core/` | Inventory, prompts, hashgen, walk, utils |

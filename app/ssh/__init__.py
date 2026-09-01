@@ -7,6 +7,14 @@ step 7 persistent USM purge. AcasPrep is menu 2 unharden/harden.
 from .acas import AcasPrep
 from .client import SSHSession, run_ssh_batch
 from .engine import SNMPEngineFetcher
+from .ntp import NtpSsh
 from .password import CzPassword
 
-__all__ = ["AcasPrep", "CzPassword", "SSHSession", "SNMPEngineFetcher", "run_ssh_batch"]
+__all__ = [
+    "AcasPrep",
+    "CzPassword",
+    "NtpSsh",
+    "SSHSession",
+    "SNMPEngineFetcher",
+    "run_ssh_batch",
+]

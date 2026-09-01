@@ -24,12 +24,14 @@ def _prompt_menu_choice() -> str:
     print("  2) ACAS scan prep        (unharden / harden)")
     print("  3) SNMP Walk             (validate only)")
     print("  4) Update cz SSH password")
+    print("  5) NTP servers            (Controller API / cz-configd)")
+    print("  C) Configure             (DEBUG, LAB_MODE, timeouts)")
     print("  D) Download deps         (prefetch vendor wheels)")
     print("  U) Update deps           (pip install --upgrade)")
     print("  Q) Quit")
     print()
     while True:
-        choice = _normalize_menu_choice(input("Select 1, 2, 3, 4, D, U, or Q: "))
+        choice = _normalize_menu_choice(input("Select 1, 2, 3, 4, 5, C, D, U, or Q: "))
         if choice:
             return choice
         print("Invalid choice.")
@@ -62,6 +64,14 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
         if choice == "4":
             from tools.cz_password import main as czpw_main
             czpw_main()
+            return 0
+        if choice == "5":
+            from tools.ntp import main as ntp_main
+            ntp_main()
+            return 0
+        if choice == "c":
+            from tools.settings import main as settings_main
+            settings_main()
             return 0
         if choice == "d":
             from tools.download_deps import main as deps_main
@@ -106,7 +116,7 @@ def cli(argv: Optional[List[str]] = None) -> None:
             if choice == "q":
                 return
             if not choice:
-                print("Invalid choice. Use 1, 2, 3, 4, D, U, or Q.", file=sys.stderr)
+                print("Invalid choice. Use 1, 2, 3, 4, 5, C, D, U, or Q.", file=sys.stderr)
                 if noninteractive:
                     sys.exit(2)
                 continue

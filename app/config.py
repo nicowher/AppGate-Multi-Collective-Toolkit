@@ -167,6 +167,12 @@ MENU_CHOICE_ALIASES = {
     "passwd": "4",
     "cz-password": "4",
     "ssh-password": "4",
+    "5": "5",
+    "ntp": "5",
+    "c": "c",
+    "config": "c",
+    "configure-settings": "c",
+    "settings": "c",
     "d": "d",
     "deps": "d",
     "download": "d",
@@ -305,3 +311,5 @@ SNMP_MIN_PASSPHRASE_LEN = 8 if LAB_MODE else 15
 STIG_PASSWORD_MIN_LEN = 15
 # Pause after cz-config set so SSH login-verify uses the new hash.
 CZ_PASSWORD_VERIFY_DELAY = 2
+NTP_CUSTOMIZATION_UNIT = "cz-customization.service"
+NTP_VERIFY_DELAY = 5
