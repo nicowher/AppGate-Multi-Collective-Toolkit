@@ -37,7 +37,7 @@ from core.prompts import (
     prepare_collectives,
 )
 from core.utils import load_credentials, write_json_report
-from ssh.client import prime_target_host_keys
+from ssh.client import prime_target_host_keys, ssh_password_for
 from ssh.ntp import NtpSsh
 
 ClientMap = Dict[int, AppGateClient]
@@ -178,7 +178,7 @@ def _apply(
     for target in live:
         col = collective_for_target(target, collectives)
         try:
-            NtpSsh(col["ssh_username"], col["ssh_password"]).restart_customization(
+            NtpSsh(col["ssh_username"], ssh_password_for(target, col)).restart_customization(
                 target.ssh_endpoints()
             )
             print(f"      {target.label()}: {NTP_CUSTOMIZATION_UNIT} restarted")
@@ -191,7 +191,7 @@ def _apply(
         col = collective_for_target(target, collectives)
         servers = col.get("ntp_servers") or []
         try:
-            out = NtpSsh(col["ssh_username"], col["ssh_password"]).ntpdata(
+            out = NtpSsh(col["ssh_username"], ssh_password_for(target, col)).ntpdata(
                 target.ssh_endpoints()
             )
             if DEBUG:

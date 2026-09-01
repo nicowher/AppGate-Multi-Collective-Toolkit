@@ -19,6 +19,7 @@ import shlex
 import socket
 import sys
 import threading
+from getpass import getpass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple, Union
 
@@ -167,12 +168,14 @@ class SSHSession:
         fn,
         *,
         error: str = "SSH failed",
+        prompt_password: bool = True,
     ):
         """Try FQDN then IP.
 
         None = connect miss, try the next address.
         False = connected but the work failed — do not retry the other NIC
         (that would bounce snmpd / re-run ACAS on the same box).
+        After the last IP fails, main thread may ask for a new SSH password.
         """
         addrs = self._hosts(host)
         if not addrs:
@@ -185,7 +188,18 @@ class SSHSession:
                 return result
             if i < len(addrs) - 1:
                 print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
-        raise ValueError(f"{error} ({addrs[-1]})")
+        last = addrs[-1]
+        if (
+            prompt_password
+            and threading.current_thread() is threading.main_thread()
+        ):
+            new_pw = prompt_retry_ssh_password(last)
+            if new_pw:
+                self.ssh_password = new_pw
+                return self._with_ssh_endpoints(
+                    host, fn, error=error, prompt_password=False
+                )
+        raise ValueError(f"{error} ({last})")
 
     def _sudo(self, client: paramiko.SSHClient, command: str, check: bool = True) -> str:
         return self._run(client, f"sudo -S {command}", sudo=True, check=check)
@@ -323,11 +337,62 @@ def prime_target_host_keys(targets, collectives) -> None:
         SSHSession(col["ssh_username"], col["ssh_password"]).prime_host_keys([host])
 
 
+def ssh_password_for(target, col: dict) -> str:
+    override = getattr(target, "ssh_password_override", None)
+    if override:
+        return override
+    return col.get("ssh_password") or ""
+
+
+def prompt_retry_ssh_password(label: str) -> str:
+    """After FQDN and IP failed. Main thread only. Empty = skip."""
+    # print(f"DEBUG ssh: password retry prompt for {label}")
+    ans = input(
+        f"      SSH failed for {label} after FQDN and IP. Try a new password? [y/N]: "
+    ).strip().lower()
+    if ans not in YES_ANSWERS:
+        return ""
+    pw = getpass("      SSH Password: ").strip()
+    confirm = getpass("      SSH Password (confirm): ").strip()
+    if not pw or pw != confirm:
+        print("      Passwords did not match or empty.", file=sys.stderr)
+        return ""
+    return pw
+
+
 def run_ssh_batch(
     targets: list,
     worker: Callable,
     concurrency: int,
     on_fail: Callable,
 ) -> None:
-    """SSH-named wrapper around run_target_batch (same pool)."""
-    run_target_batch(targets, worker, concurrency, on_fail)
+    """Pool first; SSH failures retry on the main thread with a password prompt."""
+    failed = []
+
+    def _capture(target, exc) -> None:
+        failed.append((target, exc))
+
+    run_target_batch(targets, worker, concurrency, _capture)
+    for target, exc in failed:
+        label = target.label() if hasattr(target, "label") else str(target)
+        msg = str(exc).lower()
+        sshish = "connected but failed" not in msg and (
+            "ssh failed" in msg
+            or "authentication" in msg
+            or "engine id via ssh" in msg
+            or "no ssh endpoint" in msg
+        )
+        if (
+            sshish
+            and threading.current_thread() is threading.main_thread()
+        ):
+            new_pw = prompt_retry_ssh_password(label)
+            if new_pw:
+                target.ssh_password_override = new_pw
+                try:
+                    worker(target)
+                    continue
+                except Exception as exc2:
+                    on_fail(target, exc2)
+                    continue
+        on_fail(target, exc)

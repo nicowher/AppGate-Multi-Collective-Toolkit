@@ -42,7 +42,7 @@ from core.prompts import (
 )
 from core.utils import load_credentials, write_json_report
 from ssh.acas import AcasPrep
-from ssh.client import prime_target_host_keys, run_ssh_batch
+from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 
 ClientMap = Dict[int, AppGateClient]
 
@@ -209,7 +209,7 @@ def _apply(
 
     def _one(target: Target) -> None:
         col = collective_for_target(target, collectives)
-        session = AcasPrep(col["ssh_username"], col["ssh_password"])
+        session = AcasPrep(col["ssh_username"], ssh_password_for(target, col))
         if mode == "unharden":
             out = session.unharden(target.ssh_endpoints())
         else:

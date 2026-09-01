@@ -28,7 +28,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **FQDN first**, then IP. Gateways never use the Controller IP.
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **`DEBUG` and `DRY_RUN` are separate.**
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
-- **SSH keys:** unknown hosts are prompted **on the main thread** before parallel SSH (`Trust and save this host key?`) into `~/.ssh/known_hosts` (`0600`). Workers never call `input()`.
+- **SSH keys:** unknown hosts are prompted **on the main thread** before parallel SSH (`Trust and save this host key?`) into `~/.ssh/known_hosts` (`0600`). Workers never call `input()`. After FQDN **and IP** fail: `Try a new password? [y/N]` (main thread only; not for “connected but command failed”).
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
 - Missing packages install from `app/vendor/wheels` first, then optional online pip.
 

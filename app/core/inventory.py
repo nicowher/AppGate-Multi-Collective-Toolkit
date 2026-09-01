@@ -42,6 +42,7 @@ class Target:
     status: str = "pending"
     error: str = ""
     walk_ok: Optional[bool] = None
+    ssh_password_override: Optional[str] = None
 
     def label(self) -> str:
         """Human handle: 1.hit-agg-011 (collective index + hostname)."""

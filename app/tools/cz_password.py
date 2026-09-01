@@ -35,7 +35,7 @@ from core.prompts import (
     prepare_collectives,
 )
 from core.utils import load_credentials, write_json_report
-from ssh.client import prime_target_host_keys, run_ssh_batch
+from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 from ssh.password import CzPassword
 
 ClientMap = Dict[int, AppGateClient]
@@ -110,7 +110,7 @@ def _apply(
         col = collective_for_target(target, collectives)
         # print(f"DEBUG czpw: {target.label()} user={col.get('ssh_username')}")
         hosts = target.ssh_endpoints()
-        out = CzPassword(col["ssh_username"], col["ssh_password"]).set_password(
+        out = CzPassword(col["ssh_username"], ssh_password_for(target, col)).set_password(
             hosts, col["ssh_password_new"]
         )
         time.sleep(CZ_PASSWORD_VERIFY_DELAY)

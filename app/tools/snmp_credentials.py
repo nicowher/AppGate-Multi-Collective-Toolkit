@@ -65,7 +65,7 @@ from core.prompts import (
 from core.snmp_hashgen import SNMPHashGenerator
 from core.snmp_validate import SNMPValidator
 from core.utils import load_credentials, run_target_batch, write_json_report
-from ssh.client import prime_target_host_keys, run_ssh_batch
+from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 from ssh.engine import SNMPEngineFetcher
 
 ClientMap = Dict[int, AppGateClient]
@@ -316,7 +316,7 @@ def _run_phases_3_to_8(
             return
         col = collective_for_target(target, collectives)
         engine_id = SNMPEngineFetcher(
-            col["ssh_username"], col["ssh_password"]
+            col["ssh_username"], ssh_password_for(target, col)
         ).get_engine_id(target.ssh_endpoints(), restart_snmpd=not dry_run)
         if engine_id.lower().startswith("0x"):
             engine_id = engine_id[2:]
@@ -376,7 +376,9 @@ def _run_phases_3_to_8(
     else:
         def _ssh_purge(target: Target) -> None:
             col = collective_for_target(target, collectives)
-            SNMPEngineFetcher(col["ssh_username"], col["ssh_password"]).purge_persistent_user(
+            SNMPEngineFetcher(
+                col["ssh_username"], ssh_password_for(target, col)
+            ).purge_persistent_user(
                 target.ssh_endpoints(),
                 col.get("snmp_user") or user,
                 keep_hash=target.auth_hash,
