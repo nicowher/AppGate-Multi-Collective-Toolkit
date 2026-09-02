@@ -232,7 +232,7 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
             "fqdn",
             f"Collective {i} Controller FQDN",
             validator=is_valid_host,
-            validator_msg="Enter the Controller admin FQDN (e.g. hit-agr-001.hit.local).",
+            validator_msg="Enter the Controller admin FQDN (e.g. ctrl-a.example.com).",
         )
         agip = _require(
             row,

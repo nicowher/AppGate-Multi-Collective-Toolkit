@@ -45,7 +45,7 @@ class Target:
     ssh_password_override: Optional[str] = None
 
     def label(self) -> str:
-        """Human handle: 1.hit-agg-011 (collective index + hostname)."""
+        """Human handle: 1.ctrl-a (collective index + hostname)."""
         host = self.hostname or self.ssh_fqdn or self.ssh_ip or self.appliance_id
         return f"{self.collective}.{host}"
 
