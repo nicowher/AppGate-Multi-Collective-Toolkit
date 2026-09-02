@@ -1,10 +1,10 @@
 # AppGate Multi-Collective Toolkit
 
-One launcher for **several AppGate SDP collectives** at once: SNMPv3 USM, ACAS scan prep, cz SSH password, and walks. Not just an SNMP script. Works in lab and production, including air-gapped hosts.
+One launcher for **several AppGate SDP collectives** at once: SNMPv3 USM, ACAS scan prep, cz SSH password, NTP, walks, and config knobs. Works in lab and production, including air-gapped hosts.
 
 GitHub: https://github.com/nicowher/AppGate-Multi-Collective-Toolkit
 
-This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for backup/upgrade. This toolkit is SNMP, ACAS overlays, cz passwords, and multi-collective fan-out in one run.
+This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for backup/upgrade. This toolkit is SNMP, ACAS overlays, cz passwords, NTP, and multi-collective fan-out in one run.
 
 ## Menu
 
