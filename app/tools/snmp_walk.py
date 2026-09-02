@@ -36,7 +36,15 @@ from core.prompts import (
     prepare_collectives,
 )
 from core.snmp_validate import SNMPValidator
-from core.utils import is_valid_host, load_credentials, run_target_batch, write_json_report
+from core.utils import (
+    HaltError,
+    halt,
+    is_valid_host,
+    load_credentials,
+    print_error,
+    run_target_batch,
+    write_json_report,
+)
 
 
 def _single_walk_hosts(creds: dict, typed: str) -> list:
@@ -106,7 +114,11 @@ def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
 def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
     collectives = _parse_collectives(creds)
     if not collectives:
-        raise ValueError("No collectives defined (collectives[] or agip)")
+        halt(
+            "E01",
+            "No collectives defined (collectives[] or agip)",
+            "Add collectives[].fqdn to credentials.json or enter when prompted.",
+        )
     prepare_collectives(creds, collectives, need_snmp=True)
 
     print("\n[1/3] Authenticating to Controller API(s)...")
@@ -120,9 +132,18 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
             clients[idx] = client
             print(f"      [{idx}] Authenticated")
         except Exception as exc:
-            print(f"      [{idx}] LOGIN FAILED: {exc}", file=sys.stderr)
+            print_error(
+                "E02",
+                f"[{idx}] LOGIN FAILED: {exc}",
+                "Check api_username/api_password and MFA exemption.",
+                "Self-signed: answer y on Proceed anyway, or LAB_MODE=True.",
+            )
     if not clients:
-        raise ValueError("No Controller accepted login")
+        halt(
+            "E02",
+            "No Controller accepted login",
+            "Fix API creds, TLS, or agip.",
+        )
 
     # list_targets uses GET /appliances plus GET /appliances/status (not /stats/appliances).
     print("\n[2/3] Pulling appliances from every Controller...")
@@ -139,11 +160,19 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
         except Exception as exc:
             print(f"      [{idx}] list failed: {exc}", file=sys.stderr)
     if not inventory:
-        raise ValueError("No activated appliances with an SSH address were found")
+        halt(
+            "E03",
+            "No activated appliances with an SSH address were found",
+            "Need activated appliances with an SSH FQDN/IP.",
+        )
     print(f"      Found {len(inventory)} selectable appliance(s)")
     selected = prompt_exclusions(inventory)
     if not selected:
-        raise ValueError("Nothing left to walk after exclusions")
+        halt(
+            "E04",
+            "Nothing left to walk after exclusions",
+            "Press Enter to keep all, or exclude fewer.",
+        )
     print(f"      Selected {len(selected)} appliance(s)")
 
     # print("DEBUG walk-inventory:", [t.label() for t in selected])
@@ -168,7 +197,13 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
 
     def _walk_fail(target, _exc) -> None:
         target.walk_ok = False
-        print(f"      {target.label()}: walk FAILED", file=sys.stderr)
+        print_error(
+            "E10",
+            f"{target.label()}: walk FAILED",
+            "This host is skipped; others continue.",
+            "FQDN then IP: check UDP/161, SNMP user/auth/priv, and leftover usmUser.",
+            "Lab: pysnmp CFB warning is harmless. Air-gap: install vendor wheels (menu D).",
+        )
 
     run_target_batch(selected, _walk_one, WALK_CONCURRENCY, _walk_fail)
     failed = sum(1 for t in selected if not t.walk_ok)
@@ -227,6 +262,8 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nOperation cancelled by user", file=sys.stderr)
+        sys.exit(1)
+    except HaltError:
         sys.exit(1)
     except Exception as exc:
         print(f"\nError: {exc}", file=sys.stderr)

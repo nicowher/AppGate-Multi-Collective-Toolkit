@@ -21,7 +21,7 @@ from config import (
 )
 from getpass import getpass
 
-from core.utils import REPO_ROOT, is_valid_host, prompt_until_valid
+from core.utils import REPO_ROOT, halt, is_valid_host, prompt_until_valid
 
 CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
 
@@ -295,7 +295,11 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
                 print(f"        {col['index']}) {col['fqdn']}{extra}")
             out = _exclude_collectives(out)
             if not out:
-                raise ValueError("Nothing left after excluding collectives")
+                halt(
+                    "E05",
+                    "Nothing left after excluding collectives",
+                    "Press Enter to keep all Controllers, or exclude fewer numbers/FQDNs.",
+                )
             more = input(
                 "      Add another Controller besides those in the file? [y/N]: "
             ).strip().lower()

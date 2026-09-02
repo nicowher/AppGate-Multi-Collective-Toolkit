@@ -64,7 +64,7 @@ from core.prompts import (
 )
 from core.snmp_hashgen import SNMPHashGenerator
 from core.snmp_validate import SNMPValidator
-from core.utils import load_credentials, run_target_batch, write_json_report
+from core.utils import HaltError, halt, load_credentials, print_error, run_target_batch, write_json_report
 from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 from ssh.engine import SNMPEngineFetcher
 
@@ -80,7 +80,14 @@ def _fail(target: Target, message: str) -> None:
     """Mark one appliance failed and keep going (fail-soft)."""
     target.status = "failed"
     target.error = message
-    print(f"      FAIL {target.label()}: {message}", file=sys.stderr)
+    print_error(
+        "E09",
+        f"{target.label()}: {message}",
+        "This box is skipped; others continue.",
+        "SSH: after FQDN+IP fail, Try a new password, or check ssh_username/password.",
+        "Engine ID: need engineIDType 3, eth0 MAC, sudo on the appliance.",
+        "Walk/digest fail: leftover usmUser — re-run live so step 7 can purge.",
+    )
 
 
 def _api_by_collective(
@@ -115,7 +122,11 @@ def main() -> None:
         creds = load_credentials(CREDENTIALS_PATH)
         collectives = _parse_collectives(creds)
         if not collectives:
-            raise ValueError("No collectives defined (collectives[] or agip)")
+            halt(
+                "E01",
+                "No collectives defined (collectives[] or agip)",
+                "Add collectives[].fqdn to credentials.json or enter when prompted.",
+            )
         prepare_collectives(creds, collectives, need_snmp=True)
         inputs = {
             "snmp_user": collectives[0].get("snmp_user") or "",
@@ -160,9 +171,18 @@ def main() -> None:
                 clients[idx] = client
                 print(f"      [{idx}] Authenticated")
             except Exception as exc:
-                print(f"      [{idx}] LOGIN FAILED: {exc}", file=sys.stderr)
+                print_error(
+                    "E02",
+                    f"[{idx}] LOGIN FAILED: {exc}",
+                    "Check api_username/api_password and MFA exemption.",
+                    "Self-signed: answer y on Proceed anyway, or LAB_MODE=True.",
+                )
         if not clients:
-            raise ValueError("No Controller accepted login")
+            halt(
+                "E02",
+                "No Controller accepted login",
+                "Fix API creds, TLS, or agip.",
+            )
         # print("DEBUG step1: logged in", list(clients))
         if DEBUG:
             print(f"      DEBUG step1: logged in collectives={list(clients)}", file=sys.stderr)
@@ -181,7 +201,11 @@ def main() -> None:
             except Exception as exc:
                 print(f"      [{idx}] list failed: {exc}", file=sys.stderr)
         if not inventory:
-            raise ValueError("No activated appliances with an SSH address were found")
+            halt(
+                "E03",
+                "No activated appliances with an SSH address were found",
+                "Need activated appliances with SSH FQDN/IP and Appliance View.",
+            )
         print(f"      Found {len(inventory)} selectable appliance(s)")
 
         if dry_run:
@@ -204,7 +228,11 @@ def main() -> None:
 
         selected = prompt_exclusions(inventory)
         if not selected:
-            raise ValueError("Nothing left to configure after exclusions")
+            halt(
+                "E04",
+                "Nothing left to configure after exclusions",
+                "Press Enter to keep all, or exclude fewer.",
+            )
         print(f"      Selected {len(selected)} appliance(s)")
         # print("DEBUG step2:", [t.label() for t in selected])
         if DEBUG:
@@ -274,6 +302,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nOperation cancelled by user", file=sys.stderr)
         sys.exit(1)
+    except HaltError:
+        sys.exit(1)
     except Exception as exc:
         print(f"\nError: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -325,7 +355,12 @@ def _run_phases_3_to_8(
 
     run_ssh_batch(_ok(selected), _ssh_engine, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
     if not _ok(selected):
-        print("      No appliances left after SSH engine-ID pass.", file=sys.stderr)
+        print_error(
+            "E09",
+            "No appliances left after SSH engine-ID pass",
+            "Every selected box failed SSH or engine-ID read.",
+            "After FQDN+IP fail: Try a new password. Check sudo, eth0, engineIDType 3.",
+        )
 
     print("\n[5/8] Localizing SNMPv3 keys...")
     for target in _ok(selected):

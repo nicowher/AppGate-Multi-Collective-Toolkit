@@ -99,6 +99,15 @@ def confirm_skip_tls_verify() -> bool:
         "Certificate could not be verified. Proceed anyway? [y/N]: "
     ).strip().lower()
     _skip_tls_ok = ans in YES_ANSWERS
+    if not _skip_tls_ok:
+        print(
+            "ERROR E06: TLS certificate not trusted; login skipped for this host.",
+            file=sys.stderr,
+        )
+        print(
+            "      Next: answer y to Proceed anyway, set LAB_MODE=True, or trust the Controller CA.",
+            file=sys.stderr,
+        )
     return _skip_tls_ok
 
 SSH_PORT = 22

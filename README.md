@@ -241,6 +241,27 @@ Other knobs:
 - ACAS unharden leaves `NOPASSWD` and an open `SSHBRUTE` until harden.
 - Identical `snmp_auth` / `snmp_priv` prints a DISA warning.
 
+## Error codes
+
+Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue. `ERROR E0x` is the operator line; the tool does not print it twice.
+
+| Code | When | What to do |
+| --- | --- | --- |
+| **E01** | No collectives | Add `collectives[].fqdn` (and `agip`) or enter when prompted |
+| **E02** | Controller login failed | API user/password, MFA exemption, `Proceed anyway?` for self-signed, port **8443** `/admin` |
+| **E03** | No appliances with SSH | Activated boxes with hostname/SSH IP; Appliance **View** on tags |
+| **E04** | Nothing left after appliance exclude | Enter to keep all, or exclude fewer |
+| **E05** | All collectives excluded | Enter to keep all Controllers |
+| **E06** | TLS cert not trusted | Answer **y** on Proceed anyway, `LAB_MODE=True`, or trust the CA |
+| **E07** | SSH host key rejected | Answer **y** to Trust and save, or pin `~/.ssh/known_hosts` |
+| **E09** | SNMP engine-ID / box failed | Try a new SSH password after FQDN+IP; sudo; `engineIDType 3`; eth0 MAC |
+| **E10** | SNMP walk failed | UDP/161, user/auth/priv, leftover `usmUser`; others still walk |
+| **E11** | NTP PUT/verify failed | PUT must be `ntp.servers` objects; then `cz-customization` + `chronyc ntpdata` |
+| **E12** | No NTP servers in creds | `ntp_servers[].hostname` in credentials.json or at the prompt |
+| **E13** | cz password login verify failed | Hash may still be set; SSH with `ssh_password_new` or retry menu 4 |
+| **E14** | ACAS SSH overlay failed | Confirm selected hostname; Try a new password; others continue |
+| **E15** | pip / vendor wheels | Menu **D** on matching OS/Python; copy `app/vendor/` |
+
 ## Troubleshooting
 
 | Symptom | What to check |

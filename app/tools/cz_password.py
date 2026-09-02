@@ -34,7 +34,7 @@ from core.prompts import (
     collective_for_target,
     prepare_collectives,
 )
-from core.utils import load_credentials, write_json_report
+from core.utils import HaltError, halt, load_credentials, print_error, write_json_report
 from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 from ssh.password import CzPassword
 
@@ -59,9 +59,18 @@ def _login(collectives: list) -> ClientMap:
             clients[idx] = client
             print(f"      [{idx}] Authenticated")
         except Exception as exc:
-            print(f"      [{idx}] LOGIN FAILED: {exc}", file=sys.stderr)
+            print_error(
+                "E02",
+                f"[{idx}] LOGIN FAILED: {exc}",
+                "Check api_username/api_password and MFA exemption.",
+                "Self-signed cert: answer y on Proceed anyway, or set LAB_MODE=True.",
+            )
     if not clients:
-        raise ValueError("No Controller accepted login")
+        halt(
+            "E02",
+            "No Controller accepted login",
+            "Fix API creds, TLS prompt, or agip. Port 8443 /admin.",
+        )
     return clients
 
 
@@ -80,11 +89,19 @@ def _inventory(clients: ClientMap) -> List[Target]:
         except Exception as exc:
             print(f"      [{idx}] list failed: {exc}", file=sys.stderr)
     if not inventory:
-        raise ValueError("No activated appliances with an SSH address were found")
+        halt(
+            "E03",
+            "No activated appliances with an SSH address were found",
+            "Need activated appliances with SSH FQDN/IP and Appliance View.",
+        )
     print(f"      Found {len(inventory)} selectable appliance(s)")
     selected = prompt_exclusions(inventory)
     if not selected:
-        raise ValueError("Nothing left after exclusions")
+        halt(
+            "E04",
+            "Nothing left after exclusions",
+            "Press Enter to keep all appliances, or exclude fewer.",
+        )
     print(f"      Selected {len(selected)} appliance(s)")
     return selected
 
@@ -121,6 +138,12 @@ def _apply(
                 if ln.startswith("STEP_"):
                     print(f"        {ln}", file=sys.stderr)
         if not ok:
+            print_error(
+                "E13",
+                f"{target.label()}: login verify FAILED",
+                "cz-config set may have applied; SSH with the new password failed.",
+                "Wait and retry menu 4, or SSH manually with ssh_password_new.",
+            )
             raise RuntimeError("login verify FAILED")
         target.status = "ok"
         print(f"      {target.label()}: password updated, login PASS")
@@ -174,7 +197,11 @@ def main() -> None:
     creds = load_credentials(CREDENTIALS_PATH)
     collectives = _parse_collectives(creds)
     if not collectives:
-        raise ValueError("No collectives defined (collectives[] or agip)")
+        halt(
+            "E01",
+            "No collectives defined (collectives[] or agip)",
+            "Add collectives[].fqdn to credentials.json or enter when prompted.",
+        )
     prepare_collectives(creds, collectives, need_new_password=True)
     if DEBUG:
         print(
@@ -220,6 +247,8 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nOperation cancelled by user", file=sys.stderr)
+        sys.exit(1)
+    except HaltError:
         sys.exit(1)
     except Exception as exc:
         print(f"\nError: {exc}", file=sys.stderr)

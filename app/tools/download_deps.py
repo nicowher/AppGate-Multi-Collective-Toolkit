@@ -16,7 +16,12 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 from config import DEBUG, VENDOR_PACKAGES
-from core.utils import VENDOR_DIR, download_vendor_wheels, upgrade_vendor_packages
+from core.utils import (
+    VENDOR_DIR,
+    download_vendor_wheels,
+    print_error,
+    upgrade_vendor_packages,
+)
 
 
 def main() -> None:
@@ -26,7 +31,12 @@ def main() -> None:
     try:
         download_vendor_wheels()
     except Exception as exc:
-        print(f"Download failed: {exc}", file=sys.stderr)
+        print_error(
+            "E15",
+            f"Download failed: {exc}",
+            "Needs network. Run menu D on a machine with the same OS and Python.",
+            "Then copy app/vendor/ to the air-gap host.",
+        )
         sys.exit(1)
     print(f"Vendor cache ready in {VENDOR_DIR}", file=sys.stderr)
     print("Copy this folder to the air-gapped machine, then run the Multi-Collective Toolkit launcher.")
@@ -38,7 +48,11 @@ def upgrade_main() -> None:
     try:
         upgrade_vendor_packages()
     except Exception as exc:
-        print(f"Upgrade failed: {exc}", file=sys.stderr)
+        print_error(
+            "E15",
+            f"Upgrade failed: {exc}",
+            "Menu U needs network. On air-gap use menu D wheels instead.",
+        )
         sys.exit(1)
     print("Packages upgraded.", file=sys.stderr)
 

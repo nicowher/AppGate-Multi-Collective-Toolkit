@@ -47,6 +47,25 @@ _FQDN_RE = re.compile(
 )
 
 
+def print_error(code: str, message: str, *hints: str) -> None:
+    """Always-on (DEBUG off too). code like E02. hints are next steps."""
+    print(f"ERROR {code}: {message}", file=sys.stderr)
+    for hint in hints:
+        if hint:
+            print(f"      Next: {hint}", file=sys.stderr)
+
+
+class HaltError(ValueError):
+    """Already printed as ERROR E0x. Tool __main__ should exit without reprinting."""
+
+
+def halt(code: str, message: str, *hints: str) -> None:
+    """Print ERROR code and stop this tool."""
+    # print(f"DEBUG halt: {code} {message}")
+    print_error(code, message, *hints)
+    raise HaltError(f"{code}: {message}")
+
+
 def is_valid_host(value: str) -> bool:
     """True if value is IPv4, IPv6 (optional brackets), or an FQDN."""
     text = (value or "").strip()
@@ -156,9 +175,11 @@ def ensure_package(package: str, import_name: str) -> None:
             timeout=PIP_INSTALL_TIMEOUT,
         )
         return
-    print(
-        f"Please install {package} (or run launcher option D / python app/main.py d) and rerun.",
-        file=sys.stderr,
+    print_error(
+        "E15",
+        f"Package {package} is not installed",
+        "Run menu D (pip download) on a matching OS/Python, copy app/vendor/, rerun.",
+        "Or answer y to install via pip if this host has network.",
     )
     sys.exit(1)
 

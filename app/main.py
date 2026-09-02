@@ -9,6 +9,7 @@ import sys
 from typing import List, Optional
 
 from config import ACAS_MODES, DEBUG, MENU_CHOICE_ALIASES, NO_ANSWERS
+from core.utils import HaltError
 
 
 def _normalize_menu_choice(raw: str) -> str:
@@ -81,6 +82,8 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
             from tools.download_deps import upgrade_main
             upgrade_main()
             return 0
+        return 1
+    except HaltError:
         return 1
     except SystemExit as exc:
         code = exc.code

@@ -40,7 +40,7 @@ from core.prompts import (
     collective_for_target,
     prepare_collectives,
 )
-from core.utils import load_credentials, write_json_report
+from core.utils import HaltError, halt, load_credentials, print_error, write_json_report
 from ssh.acas import AcasPrep
 from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 
@@ -50,7 +50,13 @@ ClientMap = Dict[int, AppGateClient]
 def _fail(target: Target, message: str) -> None:
     target.status = "failed"
     target.error = message
-    print(f"      FAIL {target.label()}: {message}", file=sys.stderr)
+    print_error(
+        "E14",
+        f"{target.label()}: {message}",
+        "This box is skipped; others continue.",
+        "SSH after FQDN+IP: answer Try a new password, or check ssh_username/password.",
+        "Unharden: confirm you are on the selected hostname, not another appliance.",
+    )
 
 
 def _mode_from_argv() -> str:
@@ -89,9 +95,19 @@ def _login(collectives: list) -> ClientMap:
             clients[idx] = client
             print(f"      [{idx}] Authenticated")
         except Exception as exc:
-            print(f"      [{idx}] LOGIN FAILED: {exc}", file=sys.stderr)
+            print_error(
+                "E02",
+                f"[{idx}] LOGIN FAILED: {exc}",
+                "Check api_username/api_password and MFA exemption.",
+                "Self-signed cert: answer y on Proceed anyway, or set LAB_MODE=True.",
+                "URL must be https://<fqdn>:8443/admin (not 443).",
+            )
     if not clients:
-        raise ValueError("No Controller accepted login")
+        halt(
+            "E02",
+            "No Controller accepted login",
+            "Fix API creds, TLS prompt, or agip fallback. Other collectives can still be added.",
+        )
     return clients
 
 
@@ -110,11 +126,20 @@ def _inventory(clients: ClientMap) -> List[Target]:
         except Exception as exc:
             print(f"      [{idx}] list failed: {exc}", file=sys.stderr)
     if not inventory:
-        raise ValueError("No activated appliances with an SSH address were found")
+        halt(
+            "E03",
+            "No activated appliances with an SSH address were found",
+            "Appliances must be activated and have hostname/SSH IP.",
+            "Admin role needs Appliance View (and tags) on those boxes.",
+        )
     print(f"      Found {len(inventory)} selectable appliance(s)")
     selected = prompt_exclusions(inventory)
     if not selected:
-        raise ValueError("Nothing left after exclusions")
+        halt(
+            "E04",
+            "Nothing left after exclusions",
+            "Press Enter at the exclude prompt to keep all, or exclude fewer numbers.",
+        )
     print(f"      Selected {len(selected)} appliance(s)")
     return selected
 
@@ -228,7 +253,11 @@ def main() -> None:
     creds = load_credentials(CREDENTIALS_PATH)
     collectives = _parse_collectives(creds)
     if not collectives:
-        raise ValueError("No collectives defined (collectives[] or agip)")
+        halt(
+            "E01",
+            "No collectives defined (collectives[] or agip)",
+            "Add collectives[].fqdn (and agip) to credentials.json, or enter them when prompted.",
+        )
     prepare_collectives(creds, collectives)
 
     mode = _prompt_mode()
@@ -269,6 +298,8 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nOperation cancelled by user", file=sys.stderr)
+        sys.exit(1)
+    except HaltError:
         sys.exit(1)
     except Exception as exc:
         print(f"\nError: {exc}", file=sys.stderr)

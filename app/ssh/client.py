@@ -310,6 +310,14 @@ class _PromptAddHostKeyPolicy(paramiko.MissingHostKeyPolicy):
         )
         ans = input("      Trust and save this host key? [y/N]: ").strip().lower()
         if ans not in YES_ANSWERS:
+            print(
+                f"ERROR E07: SSH host key for {hostname} rejected.",
+                file=sys.stderr,
+            )
+            print(
+                "      Next: answer y to Trust and save, or add the key to ~/.ssh/known_hosts.",
+                file=sys.stderr,
+            )
             raise paramiko.SSHException(f"Host key for {hostname} rejected")
         _save_host_key(client, hostname, key)
         print(f"      Saved host key for {hostname}.", file=sys.stderr)
