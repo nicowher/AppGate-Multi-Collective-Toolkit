@@ -8,7 +8,8 @@ visudo-only edits get wiped. We set ``cz-config users/0/nopasswd`` and write
 Unharden (SSH, FQDN first):
   1. drop-in + cz-config nopasswd true
   2. wrap ``ACAS_BANNER_FILE`` (ssh_confirm.sh) with ``if [ -t 0 ]``
-  3. iptables/ip6tables -F SSHBRUTE; -A ACCEPT **last**
+  3. mkdir ``ACAS_SCAP_HOME`` (/home/svc-acas) for SCAP
+  4. iptables/ip6tables -F SSHBRUTE; -A ACCEPT **last**
      (cz-config set can rebuild the firewall if we flush first)
 
 Harden:
@@ -28,6 +29,7 @@ from config import (
     ACAS_CZCONFIGD_UNIT,
     ACAS_IPTABLES_BINS,
     ACAS_IPTABLES_CHAIN,
+    ACAS_SCAP_HOME,
     ACAS_SSH_TIMEOUT,
     ACAS_SUDOERS_DROPIN,
     ACAS_SUDOERS_FILE,
@@ -70,6 +72,7 @@ class AcasPrep(SSHSession):
         user_q = shlex.quote(f"{user} ALL=(ALL) NOPASSWD: ALL")
         banner = shlex.quote(ACAS_BANNER_FILE)
         guard = ACAS_BANNER_TTY_GUARD
+        scap = shlex.quote(ACAS_SCAP_HOME)
         return f"""
 echo STEP_SUDOERS_START
 DROP={drop}
@@ -103,6 +106,11 @@ else
     exit 1
   fi
 fi
+
+echo STEP_SCAP_DIR
+mkdir -p {scap}
+chmod 755 {scap} 2>/dev/null || true
+echo STEP_SCAP_DIR_OK {scap}
 
 echo STEP_BANNER_START
 f={banner}

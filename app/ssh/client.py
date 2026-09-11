@@ -14,12 +14,15 @@ except ImportError:
     ensure_package("paramiko", "paramiko")
     import paramiko
 
+import logging
 import os
 import shlex
 import socket
 import sys
 import threading
 from getpass import getpass
+
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple, Union
 
@@ -35,10 +38,25 @@ from config import (
 )
 
 
+def _host_resolves(host: str) -> bool:
+    """False if DNS fails (Windows 11001). Skip FQDN, try ssh_ip — not a password problem."""
+    name = (host or "").strip()
+    if name.startswith("[") and name.endswith("]"):
+        name = name[1:-1]
+    if not name:
+        return False
+    try:
+        socket.getaddrinfo(name, SSH_PORT, type=socket.SOCK_STREAM)
+        return True
+    except (socket.gaierror, OSError, ValueError):
+        return False
+
+
 class SSHSession:
     def __init__(self, ssh_user: str, ssh_password: str) -> None:
         self.ssh_user = ssh_user
         self.ssh_password = ssh_password
+        self._ssh_fail_kind = ""
 
     @staticmethod
     def _hosts(host: Union[str, Sequence[str]]) -> List[str]:
@@ -76,6 +94,10 @@ class SSHSession:
     def prime_host_keys(self, hosts: Union[str, Sequence[str]]) -> None:
         """Accept unknown keys on this thread (call from main before a pool)."""
         for host in self._hosts(hosts):
+            # print(f"DEBUG ssh: resolve {host}={_host_resolves(host)}")
+            if not _host_resolves(host):
+                print(f"      Skipping unresolvable SSH host {host}", file=sys.stderr)
+                continue
             if _hostname_known(host):
                 continue
             print(f"      Checking SSH host key for {host}...", file=sys.stderr)
@@ -100,23 +122,29 @@ class SSHSession:
                 look_for_keys=False,
                 auth_timeout=SSH_AUTH_TIMEOUT,
             )
+            self._ssh_fail_kind = ""
             return fn(client)
         except paramiko.AuthenticationException as exc:
+            self._ssh_fail_kind = "auth"
             print(
                 f"      SSH authentication failed: {exc}. "
                 "Trying keyboard-interactive fallback...",
                 file=sys.stderr,
             )
             return self._with_ssh_keyboard_interactive(ip, fn)
+        except (socket.gaierror, OSError, socket.timeout, TimeoutError) as exc:
+            self._ssh_fail_kind = "network"
+            print(
+                f"      SSH network error ({type(exc).__name__}): {exc}",
+                file=sys.stderr,
+            )
         except paramiko.SSHException as exc:
+            self._ssh_fail_kind = "network"
             print(
                 f"      SSH connection error ({type(exc).__name__}): "
                 f"{str(exc)[:SSH_LOG_PREVIEW]}",
                 file=sys.stderr,
             )
-            # print(f"DEBUG ssh: connect fail host={ip} user={self.ssh_user}")
-        except (OSError, socket.timeout, TimeoutError) as exc:
-            print(f"      SSH network error ({type(exc).__name__}): {exc}", file=sys.stderr)
         finally:
             try:
                 client.close()
@@ -180,7 +208,13 @@ class SSHSession:
         addrs = self._hosts(host)
         if not addrs:
             raise ValueError("No SSH endpoint")
+        self._ssh_fail_kind = ""
+        last = addrs[-1]
         for i, addr in enumerate(addrs):
+            if not _host_resolves(addr):
+                print(f"      SSH {addr} did not resolve; trying next...", file=sys.stderr)
+                continue
+            last = addr
             result = self._with_ssh(addr, fn)
             if result is False:
                 raise ValueError(f"{error} (connected but failed) ({addr})")
@@ -188,9 +222,9 @@ class SSHSession:
                 return result
             if i < len(addrs) - 1:
                 print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
-        last = addrs[-1]
         if (
             prompt_password
+            and self._ssh_fail_kind == "auth"
             and threading.current_thread() is threading.main_thread()
         ):
             new_pw = prompt_retry_ssh_password(last)
@@ -199,7 +233,8 @@ class SSHSession:
                 return self._with_ssh_endpoints(
                     host, fn, error=error, prompt_password=False
                 )
-        raise ValueError(f"{error} ({last})")
+        kind = self._ssh_fail_kind or "network"
+        raise ValueError(f"{error} ({kind}) ({last})")
 
     def _sudo(self, client: paramiko.SSHClient, command: str, check: bool = True) -> str:
         return self._run(client, f"sudo -S {command}", sudo=True, check=check)
@@ -335,14 +370,13 @@ def prime_target_host_keys(targets, collectives) -> None:
     seen = set()
     for target in targets:
         col = collective_for_target(target, collectives)
-        host = target.ssh_fqdn or (
-            target.ssh_endpoints()[0] if target.ssh_endpoints() else ""
-        )
-        marker = (col.get("ssh_username"), host)
-        if not host or marker in seen:
-            continue
-        seen.add(marker)
-        SSHSession(col["ssh_username"], col["ssh_password"]).prime_host_keys([host])
+        session = SSHSession(col["ssh_username"], col["ssh_password"])
+        for host in target.ssh_endpoints():
+            marker = (col.get("ssh_username"), host)
+            if not host or marker in seen:
+                continue
+            seen.add(marker)
+            session.prime_host_keys([host])
 
 
 def ssh_password_for(target, col: dict) -> str:
@@ -384,12 +418,7 @@ def run_ssh_batch(
     for target, exc in failed:
         label = target.label() if hasattr(target, "label") else str(target)
         msg = str(exc).lower()
-        sshish = "connected but failed" not in msg and (
-            "ssh failed" in msg
-            or "authentication" in msg
-            or "engine id via ssh" in msg
-            or "no ssh endpoint" in msg
-        )
+        sshish = "(auth)" in msg or "authentication" in msg
         if (
             sshish
             and threading.current_thread() is threading.main_thread()

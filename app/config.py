@@ -262,6 +262,7 @@ SSH_AUTH_TIMEOUT = 10
 ACAS_SSH_TIMEOUT = 90
 # ACAS unharden is SSH overlay only (API would persist STIG-hostile state).
 ACAS_SUDOERS_DROPIN = "/etc/sudoers.d/cz-acas-scan"
+ACAS_SCAP_HOME = "/home/svc-acas"
 ACAS_IPTABLES_CHAIN = "SSHBRUTE"
 ACAS_IPTABLES_BINS = ("iptables", "ip6tables")
 ACAS_CZCONFIGD_UNIT = "cz-configd.service"

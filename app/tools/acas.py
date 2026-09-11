@@ -54,7 +54,8 @@ def _fail(target: Target, message: str) -> None:
         "E14",
         f"{target.label()}: {message}",
         "This box is skipped; others continue.",
-        "SSH after FQDN+IP: answer Try a new password, or check ssh_username/password.",
+        "If getaddrinfo failed: FQDN does not resolve — use SSH IP or fix DNS.",
+        "Password prompt only after a real auth failure, not DNS/timeout.",
         "Unharden: confirm you are on the selected hostname, not another appliance.",
     )
 
@@ -155,6 +156,7 @@ def _summarize_output(text: str) -> str:
         "STEP_CZCONFIG_NOPASSWD_TRUE",
         "STEP_BANNER_OK",
         "STEP_BANNER_ALREADY",
+        "STEP_SCAP_DIR_OK",
         "STEP_BANNER_SKIP",
         "STEP_HARDEN_DONE",
         "STEP_UNHARDEN_DONE",
