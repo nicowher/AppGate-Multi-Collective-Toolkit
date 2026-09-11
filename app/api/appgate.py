@@ -390,7 +390,8 @@ class AppGateClient:
                     file=sys.stderr,
                 )
                 continue
-            ssh_fqdn, ssh_ip = appliance_hosts(appliance)
+            ssh_fqdn, ssh_ips = appliance_hosts(appliance)
+            ssh_ip = ssh_ips[0] if ssh_ips else ""
             if not ssh_fqdn and not ssh_ip:
                 print(f"      skip {name}: no FQDN or IP for SSH", file=sys.stderr)
                 continue
@@ -400,6 +401,7 @@ class AppGateClient:
                     hostname=name,
                     ssh_fqdn=ssh_fqdn,
                     ssh_ip=ssh_ip,
+                    ssh_ips=ssh_ips,
                     collective=collective,
                     collective_fqdn=collective_fqdn or self.fqdn,
                     collective_ip=fallback_ip or self.fallback_ip,

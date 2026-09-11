@@ -31,6 +31,7 @@ class Target:
     hostname: str
     ssh_fqdn: str = ""
     ssh_ip: str = ""
+    ssh_ips: List[str] = field(default_factory=list)
     collective: int = 1
     collective_fqdn: str = ""
     collective_ip: str = ""
@@ -61,8 +62,9 @@ class Target:
             out.append(self.ssh_fqdn)
         if self._is_controller_box() and self.collective_ip and self.collective_ip not in out:
             out.append(self.collective_ip)
-        if self.ssh_ip and self.ssh_ip not in out:
-            out.append(self.ssh_ip)
+        for ip in self.ssh_ips or ([self.ssh_ip] if self.ssh_ip else []):
+            if ip and ip not in out:
+                out.append(ip)
         return out
 
     def _is_controller_box(self) -> bool:
@@ -175,8 +177,44 @@ def _is_ip(value: str) -> bool:
         return False
 
 
-def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, str]:
-    """Return (fqdn, ip) from 6.7 admin/peer/client hostname, then NICs."""
+def _nic_addresses(nic: Dict[str, Any]) -> List[str]:
+    found: List[str] = []
+    for family in ("ipv4", "ipv6"):
+        block = nic.get(family) or {}
+        if not isinstance(block, dict):
+            continue
+        for key in ("static", "dhcp", "addresses"):
+            val = block.get(key)
+            rows = val if isinstance(val, list) else [val] if val else []
+            for addr in rows:
+                if isinstance(addr, dict):
+                    ip = (addr.get("address") or "").strip()
+                else:
+                    ip = str(addr or "").strip()
+                if ip:
+                    found.append(ip)
+    return found
+
+
+def _block_ips(block: Dict[str, Any]) -> List[str]:
+    """IPs on admin/peer/client interface objects (not only NIC static)."""
+    found: List[str] = []
+    if not isinstance(block, dict):
+        return found
+    for key in ("ipv4", "ipv6", "address", "ip"):
+        val = block.get(key)
+        if isinstance(val, str) and val.strip():
+            found.append(val.strip())
+        elif isinstance(val, dict):
+            ip = (val.get("address") or val.get("ip") or "").strip()
+            if ip:
+                found.append(ip)
+            found.extend(_nic_addresses({"ipv4": val} if key == "ipv4" else {"ipv6": val}))
+    return found
+
+
+def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """Return (primary fqdn, every interface/NIC IP). SSH tries them all."""
     candidates: List[str] = []
     for block_name in ("adminInterface", "peerInterface", "clientInterface"):
         block = appliance.get(block_name) or {}
@@ -184,28 +222,23 @@ def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, str]:
             host = (block.get("hostname") or "").strip()
             if host:
                 candidates.append(host)
+            candidates.extend(_block_ips(block))
     for key in ("hostname", "applianceHostname"):
         host = (appliance.get(key) or "").strip()
         if host:
             candidates.append(host)
-    for nic in appliance.get("networking", {}).get("nics", []):
-        for addr in nic.get("ipv4", {}).get("static", []):
-            ip = (addr.get("address") or "").strip()
-            if ip:
-                candidates.append(ip)
-        for addr in nic.get("ipv6", {}).get("static", []):
-            ip = (addr.get("address") or "").strip()
-            if ip:
-                candidates.append(ip)
+    for nic in appliance.get("networking", {}).get("nics", []) or []:
+        if isinstance(nic, dict):
+            candidates.extend(_nic_addresses(nic))
     fqdn = ""
-    ip = ""
+    ips: List[str] = []
     for host in candidates:
         if _is_ip(host):
-            if not ip:
-                ip = host
+            if host not in ips:
+                ips.append(host)
         elif not fqdn:
             fqdn = host
-    return fqdn, ip
+    return fqdn, ips
 
 
 def is_selectable(health: str, skip_status: tuple) -> bool:
