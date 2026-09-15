@@ -6,7 +6,8 @@ visudo-only edits get wiped. We set ``cz-config users/0/nopasswd`` and write
 ``#includedir`` drop-in ``ACAS_SUDOERS_DROPIN``.
 
 Unharden (SSH, FQDN first):
-  1. drop-in + cz-config nopasswd true
+  1. drop-in + cz-config nopasswd true; rewrite /etc/sudoers to **one**
+     ACAS NOPASSWD block (re-runs do not append duplicates)
   2. wrap ``ACAS_BANNER_FILE`` (ssh_confirm.sh) with ``if [ -t 0 ]``
   3. mkdir ``ACAS_SCAP_HOME`` (/home/svc-acas) for SCAP
   4. iptables/ip6tables -F SSHBRUTE; -A ACCEPT **last**
@@ -93,18 +94,23 @@ if command -v cz-config >/dev/null 2>&1; then
     echo STEP_CZCONFIG_NOPASSWD_FAIL
   fi
 fi
-if grep -qF {mark_b} "$SUDOERS"; then
-  echo STEP_SUDOERS_ALREADY
+[ -f "${{SUDOERS}}.pre-acas" ] || cp -a "$SUDOERS" "${{SUDOERS}}.pre-acas"
+tmp="${{SUDOERS}}.acas.$$"
+awk -v b={mark_b} -v e={mark_e} -v line={user_q} '
+  $0 == b {{ skip=1; next }}
+  $0 == e {{ skip=0; next }}
+  skip {{ next }}
+  $0 == line {{ next }}
+  {{ print }}
+' "$SUDOERS" > "$tmp"
+printf '\\n%s\\n%s\\n%s\\n' {mark_b} {user_q} {mark_e} >> "$tmp"
+if visudo -cf "$tmp" >/dev/null 2>&1; then
+  mv "$tmp" "$SUDOERS"
+  echo STEP_SUDOERS_OK
 else
-  [ -f "${{SUDOERS}}.pre-acas" ] || cp -a "$SUDOERS" "${{SUDOERS}}.pre-acas"
-  printf '\\n%s\\n%s\\n%s\\n' {mark_b} {user_q} {mark_e} >> "$SUDOERS"
-  if visudo -cf "$SUDOERS" >/dev/null 2>&1; then
-    echo STEP_SUDOERS_OK
-  else
-    mv "${{SUDOERS}}.pre-acas" "$SUDOERS"
-    echo STEP_SUDOERS_FAIL visudo
-    exit 1
-  fi
+  rm -f "$tmp"
+  echo STEP_SUDOERS_FAIL visudo
+  exit 1
 fi
 
 echo STEP_SCAP_DIR
@@ -117,7 +123,7 @@ f={banner}
 if [ ! -f "$f" ]; then
   echo STEP_BANNER_SKIP missing "$f"
 else
-if grep -qF {shlex.quote(guard)} "$f"; then
+if grep -q -- '-t 0' "$f"; then
   echo "STEP_BANNER_ALREADY $f"
 else
   [ -f "${{f}}.pre-acas" ] || cp -a "$f" "${{f}}.pre-acas"
@@ -152,10 +158,14 @@ echo STEP_UNHARDEN_DONE
 """
 
     def _harden_script(self) -> str:
+        user = (self.ssh_user or "").strip() or "cz"
         drop = shlex.quote(ACAS_SUDOERS_DROPIN)
         banner = shlex.quote(ACAS_BANNER_FILE)
         sudoers = shlex.quote(ACAS_SUDOERS_FILE)
         unit = shlex.quote(ACAS_CZCONFIGD_UNIT)
+        mark_b = shlex.quote(ACAS_SUDOERS_MARK_BEGIN)
+        mark_e = shlex.quote(ACAS_SUDOERS_MARK_END)
+        user_q = shlex.quote(f"{user} ALL=(ALL) NOPASSWD: ALL")
         return f"""
 if command -v cz-config >/dev/null 2>&1; then
   cz-config set -j users/0/nopasswd false && echo STEP_CZCONFIG_NOPASSWD_FALSE || true
@@ -173,7 +183,19 @@ if [ -f "${{SUDOERS}}.pre-acas" ]; then
   mv "${{SUDOERS}}.pre-acas" "$SUDOERS"
   echo STEP_SUDOERS_RESTORED
 else
-  sed -i '/{ACAS_SUDOERS_MARK_BEGIN}/,/{ACAS_SUDOERS_MARK_END}/d' "$SUDOERS" || true
+  tmp="${{SUDOERS}}.acas.$$"
+  awk -v b={mark_b} -v e={mark_e} -v line={user_q} '
+    $0 == b {{ skip=1; next }}
+    $0 == e {{ skip=0; next }}
+    skip {{ next }}
+    $0 == line {{ next }}
+    {{ print }}
+  ' "$SUDOERS" > "$tmp"
+  if visudo -cf "$tmp" >/dev/null 2>&1; then
+    mv "$tmp" "$SUDOERS"
+  else
+    rm -f "$tmp"
+  fi
 fi
 echo STEP_CZCONFIGD_RESTART
 nohup systemctl restart {unit} >/dev/null 2>&1 &
