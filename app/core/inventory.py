@@ -54,8 +54,9 @@ class Target:
         """Ordered SSH targets: name first, private/admin IP if name fails.
 
         Why FQDN first: AppGate expects admin hostname for management access.
-        Why IP second: NAT/lab DNS may resolve the FQDN to an unreachable address
-        while credentials agip (Controller) or appliance ssh_ip (Gateway) works.
+        Why IP second: DNS may fail (Windows 11001) or hit the wrong NIC.
+        Tries admin/peer/client IPs then every NIC address. Gateways never use
+        Controller agip.
         """
         out: List[str] = []
         if self.ssh_fqdn:

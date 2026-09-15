@@ -19,6 +19,7 @@ EDITABLE = (
     ("DRY_RUN", bool, "force preview; skip pin/push/purge/walk"),
     ("WRITE_RUN_REPORT", bool, "write reports/*.json"),
     ("SSH_TIMEOUT", int, "SSH command timeout (seconds)"),
+    ("SSH_PRIME_TIMEOUT", int, "host-key prime timeout (skip dead IPs)"),
     ("SSH_AUTH_TIMEOUT", int, "SSH connect/auth timeout (seconds)"),
     ("SSH_CONCURRENCY", int, "parallel SSH sessions"),
     ("SSH_PORT", int, "SSH port"),

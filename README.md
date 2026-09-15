@@ -28,7 +28,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **FQDN first**, then IP. Gateways never use the Controller IP.
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **`DEBUG` and `DRY_RUN` are separate.**
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
-- **SSH keys:** unknown hosts are prompted **on the main thread** before parallel SSH (`Trust and save this host key?`) into `~/.ssh/known_hosts` (`0600`). Workers never call `input()`. After FQDN **and IP** fail: `Try a new password? [y/N]` (main thread only; not for “connected but command failed”).
+- **SSH:** FQDN first, then **every** admin/peer/client/NIC IP. Unresolvable names are skipped (`getaddrinfo`). Host-key prime stops after the first working address (`SSH_PRIME_TIMEOUT`, default 3s) so overlay IPs do not hang the run. Password retry only after **auth** failure, not DNS. Workers never call `input()`.
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
 - Missing packages install from `app/vendor/wheels` first, then optional online pip.
 
@@ -224,6 +224,7 @@ Other knobs:
 | Variable | Meaning |
 | --- | --- |
 | `SSH_KNOWN_HOSTS` | Empty = `~/.ssh/known_hosts` (created `0600` if missing) |
+| `SSH_PRIME_TIMEOUT` | Seconds per address when priming host keys (default 3; skip dead NICs) |
 | `SSH_CONCURRENCY` / `WALK_CONCURRENCY` | Parallel SSH / SNMP walks (default 5) |
 | `SNMP_HASH_ALGO` / `SNMP_AUTH_PROTOCOL` / `SNMP_PRIV_PROTOCOL` | Must stay in sync (SHA-256 / AES-256) |
 | `CZ_PASSWORD_VERIFY_DELAY` | Seconds to wait before SSH login-verify after cz-config set |
@@ -275,7 +276,8 @@ Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue
 | Engine ID not found | `engineIDType 3`, SSH/sudo, MAC on `ETH_IFACE` |
 | Walk / digest error | Leftover `usmUser`, algorithm mismatch |
 | Unknown SSH host key | Answer the **main-thread** prompt |
-| SSH hang on host-key prompt | Old bug; keys are primed before the pool |
+| SSH hang while priming keys | Overlay IPs: prime stops after first working address (`SSH_PRIME_TIMEOUT`) |
+| Gateway getaddrinfo / wrong NIC | FQDN skipped if DNS fails; SSH tries every admin/peer/client/NIC IP |
 | ACAS banner still hangs **interactive** SSH | Intended. Test: `ssh -T user@host` |
 | ACAS visudo shows no NOPASSWD | Check `cz-config get users/0/nopasswd` and the drop-in |
 | Menu U fails on air-gap | Use **D**, copy `app/vendor/` |

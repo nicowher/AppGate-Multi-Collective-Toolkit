@@ -258,6 +258,8 @@ API_AUTH_FAIL_CODES = (401, 403)
 # too short and legitimate operations time out on slow networks.
 SSH_TIMEOUT = 10
 SSH_AUTH_TIMEOUT = 10
+# Host-key prime only (skip dead overlay IPs quickly).
+SSH_PRIME_TIMEOUT = 3
 # cz-configd restart (ACAS harden) can outlast a normal SSH command.
 ACAS_SSH_TIMEOUT = 90
 # ACAS unharden is SSH overlay only (API would persist STIG-hostile state).

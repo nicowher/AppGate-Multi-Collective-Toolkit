@@ -33,6 +33,7 @@ from config import (
     SSH_LOG_PREVIEW,
     SSH_PORT,
     SSH_STRICT_HOST_KEY,
+    SSH_PRIME_TIMEOUT,
     SSH_TIMEOUT,
     YES_ANSWERS,
 )
@@ -91,19 +92,20 @@ class SSHSession:
         else:
             client.set_missing_host_key_policy(paramiko.WarningPolicy())
 
-    def prime_host_keys(self, hosts: Union[str, Sequence[str]]) -> None:
-        """Accept unknown keys on this thread (call from main before a pool)."""
+    def prime_host_keys(self, hosts: Union[str, Sequence[str]]) -> bool:
+        """Try hosts until one SSH session works. Short timeout. True if any connected."""
         for host in self._hosts(hosts):
-            # print(f"DEBUG ssh: resolve {host}={_host_resolves(host)}")
             if not _host_resolves(host):
                 print(f"      Skipping unresolvable SSH host {host}", file=sys.stderr)
                 continue
             if _hostname_known(host):
-                continue
+                return True
             print(f"      Checking SSH host key for {host}...", file=sys.stderr)
-            self._with_ssh(host, lambda _c: True)
+            if self._with_ssh(host, lambda _c: True, timeout=SSH_PRIME_TIMEOUT) is not None:
+                return True
+        return False
 
-    def _with_ssh(self, ip: str, fn):
+    def _with_ssh(self, ip: str, fn, timeout: Optional[int] = None):
         """Open an SSH session, run *fn(client)*, then close.
 
         Password auth first; keyboard-interactive is the fallback some
@@ -111,16 +113,17 @@ class SSHSession:
         """
         client = paramiko.SSHClient()
         self._apply_host_key_policy(client)
+        wait = SSH_TIMEOUT if timeout is None else timeout
         try:
             client.connect(
                 hostname=ip,
                 port=SSH_PORT,
                 username=self.ssh_user,
                 password=self.ssh_password,
-                timeout=SSH_TIMEOUT,
+                timeout=wait,
                 allow_agent=False,
                 look_for_keys=False,
-                auth_timeout=SSH_AUTH_TIMEOUT,
+                auth_timeout=min(wait, SSH_AUTH_TIMEOUT),
             )
             self._ssh_fail_kind = ""
             return fn(client)
@@ -359,7 +362,11 @@ class _PromptAddHostKeyPolicy(paramiko.MissingHostKeyPolicy):
 
 
 def prime_target_host_keys(targets, collectives) -> None:
-    """Prompt for unknown FQDN keys on the main thread before a worker pool."""
+    """Main thread: try each appliance's SSH endpoints until one connects.
+
+    Stops after the first working address so overlay/data-plane IPs do not
+    add 10s timeouts (SSH_PRIME_TIMEOUT). Unresolvable FQDNs are skipped.
+    """
     from core.prompts import collective_for_target
 
     # print(f"DEBUG prime_keys: n={len(targets)}")
@@ -371,12 +378,12 @@ def prime_target_host_keys(targets, collectives) -> None:
     for target in targets:
         col = collective_for_target(target, collectives)
         session = SSHSession(col["ssh_username"], col["ssh_password"])
-        for host in target.ssh_endpoints():
-            marker = (col.get("ssh_username"), host)
-            if not host or marker in seen:
-                continue
-            seen.add(marker)
-            session.prime_host_keys([host])
+        endpoints = [h for h in target.ssh_endpoints() if h and (col.get("ssh_username"), h) not in seen]
+        if not endpoints:
+            continue
+        for h in endpoints:
+            seen.add((col.get("ssh_username"), h))
+        session.prime_host_keys(endpoints)
 
 
 def ssh_password_for(target, col: dict) -> str:
