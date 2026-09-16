@@ -2,9 +2,12 @@
 
 Reached via ``python app/main.py 3`` or launcher menu option 3.
 
-  1) Single IP / FQDN — walk, then ask to walk another
-  2) Controller list — same login / exclude as configure steps 1–2, then walk
-      (FQDN first, then IP; gateway never uses Controller agip)
+  1) Single IP / FQDN — SNMP walk only (snmp_*). Never asks for SSH.
+  2) Controller list — API login + inventory/exclude, then walk
+      (FQDN first, then this appliance's IPs). No SSH secrets.
+
+If snmp_* / agip live only under collectives[], they are promoted so the
+global prompt is skipped when every collective already has the field.
 """
 import os
 import sys
@@ -34,6 +37,7 @@ from core.prompts import (
     _require,
     collective_for_target,
     prepare_collectives,
+    promote_shared_fields,
 )
 from core.snmp_validate import SNMPValidator
 from core.utils import (
@@ -66,6 +70,9 @@ def _single_walk_hosts(creds: dict, typed: str) -> list:
 
 
 def _snmp_creds(creds: dict):
+    promote_shared_fields(
+        creds, ("snmp_user", "snmp_auth", "snmp_priv", "agip")
+    )
     user = _require(
         creds,
         "snmp_user",
@@ -111,7 +118,7 @@ def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
     return 1 if any_fail else 0
 
 
-def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
+def _walk_inventory(creds: dict) -> int:
     collectives = _parse_collectives(creds)
     if not collectives:
         halt(
@@ -119,7 +126,7 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
             "No collectives defined (collectives[] or agip)",
             "Add collectives[].fqdn to credentials.json or enter when prompted.",
         )
-    prepare_collectives(creds, collectives, need_snmp=True)
+    prepare_collectives(creds, collectives, need_ssh=False, need_snmp=True)
 
     print("\n[1/3] Authenticating to Controller API(s)...")
     clients = {}
@@ -185,9 +192,9 @@ def _walk_inventory(creds: dict, user: str, auth: str, priv: str) -> int:
         col = collective_for_target(target, collectives)
         ok = SNMPValidator().validate_snmp_walk(
             target.walk_endpoints(),
-            col.get("snmp_user") or user,
-            col.get("snmp_auth") or auth,
-            col.get("snmp_priv") or priv,
+            col.get("snmp_user") or "",
+            col.get("snmp_auth") or "",
+            col.get("snmp_priv") or "",
             engine_id=target.engine_id or None,
         )
         target.walk_ok = ok
@@ -251,10 +258,8 @@ def main() -> None:
         choice = input("Select 1 or 2: ").strip()
     if choice == "1":
         user, auth, priv = _snmp_creds(creds)
-        _require(creds, "ssh_username", "SSH Username")
-        _require(creds, "ssh_password", "SSH Password", sensitive=True)
         sys.exit(_walk_single(creds, user, auth, priv))
-    sys.exit(_walk_inventory(creds, user, auth, priv))
+    sys.exit(_walk_inventory(creds))
 
 
 if __name__ == "__main__":

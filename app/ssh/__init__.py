@@ -1,8 +1,10 @@
 """Shared SSH for appliance work.
 
 SSHSession is the reusable connect / sudo / run layer (password then
-keyboard-interactive). SNMPEngineFetcher adds step 4 engine-ID read and
-step 7 persistent USM purge. AcasPrep is menu 2 unharden/harden.
+keyboard-interactive). Host-key TOFU runs on the main thread only
+(worker input() deadlocks). SNMPEngineFetcher adds step 4 engine-ID read
+and step 7 persistent USM purge. AcasPrep is menu 2. CzPassword is menu 4.
+NtpSsh restarts cz-customization after the NTP PUT (no REST for that unit).
 """
 from .acas import AcasPrep
 from .client import SSHSession, run_ssh_batch

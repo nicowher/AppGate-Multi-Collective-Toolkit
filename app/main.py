@@ -1,7 +1,11 @@
 """AppGate Multi-Collective Toolkit — CLI menu.
 
 OS launchers only run this file so menu/args stay in one place (not duplicated
-in .bat/.sh). ``cli()`` shows the menu or dispatches 1/2/3/4/d/u.
+in .bat/.sh). ``cli()`` shows the menu or dispatches 1/2/3/4/5/c/d/u/q.
+
+Why a menu here, not in each launcher: Windows .bat, Linux .sh, and macOS
+.command stay thin wrappers. HaltError from a tool returns to this menu
+instead of reprinting the traceback.
 
 ``app/`` is menu + config plus folders: ``tools/``, ``api/``, ``ssh/``, ``core/``.
 """

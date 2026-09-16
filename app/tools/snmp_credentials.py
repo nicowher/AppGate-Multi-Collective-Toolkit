@@ -61,6 +61,7 @@ from core.prompts import (
     _require,
     collective_for_target,
     prepare_collectives,
+    promote_shared_fields,
 )
 from core.snmp_hashgen import SNMPHashGenerator
 from core.snmp_validate import SNMPValidator
@@ -128,6 +129,7 @@ def main() -> None:
                 "Add collectives[].fqdn to credentials.json or enter when prompted.",
             )
         prepare_collectives(creds, collectives, need_snmp=True)
+        promote_shared_fields(creds, ("rouser",))
         inputs = {
             "snmp_user": collectives[0].get("snmp_user") or "",
             "snmp_auth": collectives[0].get("snmp_auth") or "",
@@ -347,7 +349,7 @@ def _run_phases_3_to_8(
         col = collective_for_target(target, collectives)
         engine_id = SNMPEngineFetcher(
             col["ssh_username"], ssh_password_for(target, col)
-        ).get_engine_id(target.ssh_endpoints(), restart_snmpd=not dry_run)
+        ).get_engine_id(target, restart_snmpd=not dry_run)
         if engine_id.lower().startswith("0x"):
             engine_id = engine_id[2:]
         target.engine_id = engine_id
@@ -414,7 +416,7 @@ def _run_phases_3_to_8(
             SNMPEngineFetcher(
                 col["ssh_username"], ssh_password_for(target, col)
             ).purge_persistent_user(
-                target.ssh_endpoints(),
+                target,
                 col.get("snmp_user") or user,
                 keep_hash=target.auth_hash,
             )

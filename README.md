@@ -22,13 +22,13 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 
 ## Shared behavior (all mutating / inventory tools)
 
-- **`credentials.json`** (gitignored): global defaults plus `collectives[]`. Required per collective: `fqdn` (`agip` recommended). SSH user/pass and API user/pass are required for every tool; SNMP only for 1 and 3; `ssh_password_new` only for 4; `ntp_servers` only for 5; `mibs` never required. Old `admin_*` keys still load as `api_*`.
-- **Credential entry** (2+ collectives): **1) global**, **2) per collective**, **3) global then override** selected rows. Short file secrets are discarded; typed replacements are kept. Short/missing `snmp_priv` reuses `snmp_auth`.
+- **`credentials.json`** (gitignored): global defaults plus `collectives[]`. Required per collective: `fqdn` (`agip` recommended). API user/pass for every tool that talks to the Controller. SSH user/pass for 1, 2, 4, 5 (not walk). SNMP only for 1 and 3; `ssh_password_new` only for 4; `ntp_servers` only for 5; `mibs` never required. Old `admin_*` keys still load as `api_*`.
+- **Credential entry:** if **every** collective already has a field (including a single collective with per-row secrets and empty top-level keys), that field is **not** prompted globally. Gaps only: 1 collective fills that row; 2+ collectives then offer **1) global**, **2) per collective**, **3) global then override**. Short file secrets are discarded; typed replacements are kept. Short/missing `snmp_priv` reuses `snmp_auth`.
 - **Exclude collectives** (number or FQDN) then **exclude appliances** (`1.hostname`).
 - **FQDN first**, then IP. Gateways never use the Controller IP.
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **`DEBUG` and `DRY_RUN` are separate.**
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
-- **SSH:** FQDN first, then **every** admin/peer/client/NIC IP. Unresolvable names are skipped (`getaddrinfo`). Host-key prime stops after the first working address (`SSH_PRIME_TIMEOUT`, default 3s) so overlay IPs do not hang the run. Password retry only after **auth** failure, not DNS. Workers never call `input()`.
+- **SSH:** this appliance's FQDN (appliance/admin/client hostname — never `peerInterface.hostname`, that is another box), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` is tried only on the **login** Controller (sharing it made both Controllers SSH the same host). Unresolvable names are skipped (`getaddrinfo`). Host-key prime **connects** until the first working address (`SSH_PRIME_TIMEOUT`, default 3s); a name already in `known_hosts` does not skip later IPs. Password retry only after **auth** failure, not DNS. Workers never call `input()`.
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
 - Missing packages install from `app/vendor/wheels` first, then optional online pip.
 
@@ -70,8 +70,8 @@ Report: `reports/acas-unharden-*.json` / `acas-harden-*.json`.
 
 Validate-only: **no SSH to appliances and no config push.** Confirms authPriv with current `snmp_*`.
 
-- **1) Single IP / FQDN** — walk that host (then *Walk another?*). SNMP secrets required; no Controller login.
-- **2) Pull from Controller(s)** — `[1/3]` login, `[2/3]` inventory / exclude, `[3/3]` parallel walks (`WALK_CONCURRENCY`). SSH/API secrets still required for inventory. Health from `GET /admin/appliances/status` (often `n/a`).
+- **1) Single IP / FQDN** — walk that host (then *Walk another?*). SNMP secrets only; **no SSH**. If `snmp_*` / `agip` exist on every collective and not at top-level, they are used without a global prompt.
+- **2) Pull from Controller(s)** — `[1/3]` login, `[2/3]` inventory / exclude, `[3/3]` parallel walks (`WALK_CONCURRENCY`). API secrets for inventory; **no SSH**. Health from `GET /admin/appliances/status` (often `n/a`).
 
 Each host: FQDN then IP, `WALK_FQDN_ATTEMPTS` / `WALK_IP_ATTEMPTS`. pysnmp if Net-SNMP is not on PATH. Report: `reports/walk-*.json`.
 
@@ -139,8 +139,8 @@ Copy `credentials.example.json` to `credentials.json` next to the launchers. Mis
 
 | Field | Required | Used by | Meaning |
 | --- | --- | --- | --- |
-| `ssh_username` | All tools | SSH | Appliance login (usually `cz`) |
-| `ssh_password` | All tools | SSH | Current sudo/SSH password |
+| `ssh_username` | Menus 1, 2, 4, 5 | SSH | Appliance login (usually `cz`). Not used by walk. |
+| `ssh_password` | Menus 1, 2, 4, 5 | SSH | Current sudo/SSH password. Not used by walk. |
 | `ssh_password_new` | Menu 4 only | cz password | Replacement cz password. Prefer per-collective. Global-only prints a warning |
 | `api_username` | All tools | Controller API | Admin API user (old name: `admin_username`) |
 | `api_password` | All tools | Controller API | Admin API password (old name: `admin_password`) |
@@ -200,13 +200,13 @@ Applies mainly to **menu 1** (SNMP) and **menu 4** (cz password).
 | RFC 3414 | Password-to-key localization (SHA-256). |
 | RFC 7630 / 7860 | Auth HMAC-SHA-256. |
 | RFC 3826 family | Privacy AES-256 CFB. |
-| CNSA 2.0 | Default SHA-256 + AES-256. MD5 and SHA-1 rejected. |
+| CNSA 2.0 | Default SHA-256 + AES-256. MD5 and SHA-1 rejected for SNMP. NTP `keyType` MD5/SHA1 refused when `LAB_MODE=False`. |
 | DISA | authPriv only; v1/v2c stripped; passphrase floor; STIG cz password when `LAB_MODE=False`. |
 
 **Known deviations (`app/config.py`):**
 
 - `LAB_MODE=False`: TLS on, SSH TOFU, no ESXi Kul dump, SNMP passphrase ≥15, STIG cz password on. Set `LAB_MODE=True` only in lab.
-- `DEBUG` is **False**.
+- `DEBUG` is **False** (do not dump engine IDs / inventory to the console in production).
 - AppGate `createUser` stores a vendor priv OID that is still AES-256 CFB.
 
 ## Tunables (`app/config.py`)
@@ -223,7 +223,7 @@ Other knobs:
 
 | Variable | Meaning |
 | --- | --- |
-| `SSH_KNOWN_HOSTS` | Empty = `~/.ssh/known_hosts` (created `0600` if missing) |
+| `SSH_KNOWN_HOSTS` | Empty = `~/.ssh/known_hosts` (created `SSH_KNOWN_HOSTS_MODE` / `0600` if missing) |
 | `SSH_PRIME_TIMEOUT` | Seconds per address when priming host keys (default 3; skip dead NICs) |
 | `SSH_CONCURRENCY` / `WALK_CONCURRENCY` | Parallel SSH / SNMP walks (default 5) |
 | `SNMP_HASH_ALGO` / `SNMP_AUTH_PROTOCOL` / `SNMP_PRIV_PROTOCOL` | Must stay in sync (SHA-256 / AES-256) |
@@ -277,7 +277,9 @@ Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue
 | Walk / digest error | Leftover `usmUser`, algorithm mismatch |
 | Unknown SSH host key | Answer the **main-thread** prompt |
 | SSH hang while priming keys | Overlay IPs: prime stops after first working address (`SSH_PRIME_TIMEOUT`) |
-| Gateway getaddrinfo / wrong NIC | FQDN skipped if DNS fails; SSH tries every admin/peer/client/NIC IP |
+| Gateway getaddrinfo / wrong NIC | FQDN skipped if DNS fails; SSH tries this box's private IPv4 first, then public, then IPv6 |
+| Connector SSH'd a Controller | `peerInterface.hostname` is the peer, not this appliance — ignored for FQDN |
+| Both Controllers same engine ID | `agip` is only used on the login Controller |
 | ACAS banner still hangs **interactive** SSH | Intended. Test: `ssh -T user@host` |
 | ACAS visudo shows no NOPASSWD | Check `cz-config get users/0/nopasswd` and the drop-in |
 | Menu U fails on air-gap | Use **D**, copy `app/vendor/` |

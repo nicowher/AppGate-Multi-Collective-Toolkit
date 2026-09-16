@@ -6,12 +6,11 @@ shared by SNMP credentials and walk.
 
 
   Target.label()          → 1.hostname so two sites can share a hostname safely
-  Target.ssh_endpoints()  → FQDN first (admin hostname best practice), then IP
-                            when DNS/NAT is wrong. Controllers also try credentials
-                            agip; gateways use their own ssh_ip — never the
-                            Controller IP (that would SSH the wrong box).
-  Target.walk_endpoints() → same order as ssh_endpoints(). Gateways must not
-                            walk Controller agip.
+  Target.ssh_endpoints()  → pinned working IP first (ssh_ok_host), then FQDN,
+                            public IPv4, IPv6). Credentials agip only if this box
+                            is the login Controller. Never peer-interface hostname
+                            (that is another appliance).
+  Target.walk_endpoints() → same order as ssh_endpoints().
 
 Health from GET /appliances/status (6.7 labels). error is still configurable;
 offline/not active/warning are skipped so we do not push to unreachable boxes.
@@ -44,6 +43,7 @@ class Target:
     error: str = ""
     walk_ok: Optional[bool] = None
     ssh_password_override: Optional[str] = None
+    ssh_ok_host: str = ""
 
     def label(self) -> str:
         """Human handle: 1.ctrl-a (collective index + hostname)."""
@@ -51,19 +51,23 @@ class Target:
         return f"{self.collective}.{host}"
 
     def ssh_endpoints(self) -> List[str]:
-        """Ordered SSH targets: name first, private/admin IP if name fails.
+        """This appliance's FQDN, then its IPs (private v4, public v4, v6).
 
-        Why FQDN first: AppGate expects admin hostname for management access.
-        Why IP second: DNS may fail (Windows 11001) or hit the wrong NIC.
-        Tries admin/peer/client IPs then every NIC address. Gateways never use
-        Controller agip.
+        Credentials agip is only appended when this box is the login Controller.
+        Trying every Controller's shared agip used to SSH the wrong appliance.
         """
         out: List[str] = []
-        if self.ssh_fqdn:
+        # print(f"DEBUG ssh_endpoints: pin={self.ssh_ok_host!r} fqdn={self.ssh_fqdn!r} ips={self.ssh_ips!r}")
+        if self.ssh_ok_host:
+            out.append(self.ssh_ok_host)
+        if self.ssh_fqdn and self.ssh_fqdn not in out:
             out.append(self.ssh_fqdn)
-        if self._is_controller_box() and self.collective_ip and self.collective_ip not in out:
+        if self._owns_collective_ip() and self.collective_ip not in out:
             out.append(self.collective_ip)
-        for ip in self.ssh_ips or ([self.ssh_ip] if self.ssh_ip else []):
+        for ip in sorted(
+            self.ssh_ips or ([self.ssh_ip] if self.ssh_ip else []),
+            key=_ip_rank,
+        ):
             if ip and ip not in out:
                 out.append(ip)
         return out
@@ -74,6 +78,14 @@ class Target:
             and bool(self.ssh_fqdn)
             and self.ssh_fqdn.lower() == self.collective_fqdn.lower()
         )
+
+    def _owns_collective_ip(self) -> bool:
+        if not self.collective_ip or not self._is_controller_box():
+            return False
+        if self.ssh_fqdn and self.collective_fqdn:
+            if self.ssh_fqdn.lower() == self.collective_fqdn.lower():
+                return True
+        return self.ssh_ip == self.collective_ip
 
     def walk_endpoints(self) -> List[str]:
         """Same order as ssh_endpoints(): FQDN first, then IP."""
@@ -178,6 +190,19 @@ def _is_ip(value: str) -> bool:
         return False
 
 
+def _ip_rank(ip: str) -> int:
+    text = ip.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return 9
+    if addr.version == 4:
+        return 0 if addr.is_private else 1
+    return 2
+
+
 def _nic_addresses(nic: Dict[str, Any]) -> List[str]:
     found: List[str] = []
     for family in ("ipv4", "ipv6"):
@@ -215,30 +240,47 @@ def _block_ips(block: Dict[str, Any]) -> List[str]:
 
 
 def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, List[str]]:
-    """Return (primary fqdn, every interface/NIC IP). SSH tries them all."""
-    candidates: List[str] = []
-    for block_name in ("adminInterface", "peerInterface", "clientInterface"):
+    """Return (this appliance's FQDN, its interface/NIC IPs).
+
+    Hostname order: appliance hostname, admin, client. Peer hostname is the
+    other box and is not used. IPs: RFC1918 IPv4, public IPv4, then IPv6.
+    """
+    names: List[str] = []
+    ips: List[str] = []
+
+    def add_ip(raw: str) -> None:
+        ip = (raw or "").strip()
+        if ip and _is_ip(ip) and ip not in ips:
+            ips.append(ip)
+
+    def add_name(raw: str) -> None:
+        host = (raw or "").strip()
+        if not host:
+            return
+        if _is_ip(host):
+            add_ip(host)
+            return
+        if host not in names:
+            names.append(host)
+
+    for key in ("hostname", "applianceHostname"):
+        add_name(appliance.get(key) or "")
+    for block_name in ("adminInterface", "clientInterface"):
         block = appliance.get(block_name) or {}
         if isinstance(block, dict):
-            host = (block.get("hostname") or "").strip()
-            if host:
-                candidates.append(host)
-            candidates.extend(_block_ips(block))
-    for key in ("hostname", "applianceHostname"):
-        host = (appliance.get(key) or "").strip()
-        if host:
-            candidates.append(host)
+            add_name(block.get("hostname") or "")
+            for ip in _block_ips(block):
+                add_ip(ip)
+    peer = appliance.get("peerInterface") or {}
+    if isinstance(peer, dict):
+        for ip in _block_ips(peer):
+            add_ip(ip)
     for nic in appliance.get("networking", {}).get("nics", []) or []:
         if isinstance(nic, dict):
-            candidates.extend(_nic_addresses(nic))
-    fqdn = ""
-    ips: List[str] = []
-    for host in candidates:
-        if _is_ip(host):
-            if host not in ips:
-                ips.append(host)
-        elif not fqdn:
-            fqdn = host
+            for ip in _nic_addresses(nic):
+                add_ip(ip)
+    fqdn = next((h for h in names if "." in h), "")
+    ips.sort(key=_ip_rank)
     return fqdn, ips
 
 

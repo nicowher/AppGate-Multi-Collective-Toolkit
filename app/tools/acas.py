@@ -238,9 +238,9 @@ def _apply(
         col = collective_for_target(target, collectives)
         session = AcasPrep(col["ssh_username"], ssh_password_for(target, col))
         if mode == "unharden":
-            out = session.unharden(target.ssh_endpoints())
+            out = session.unharden(target)
         else:
-            out = session.harden(target.ssh_endpoints())
+            out = session.harden(target)
         target.status = "ok"
         print(f"      {target.label()}: {_summarize_output(out)}")
         for ln in out.splitlines():

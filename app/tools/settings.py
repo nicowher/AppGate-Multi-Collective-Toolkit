@@ -1,4 +1,9 @@
-"""Menu C: edit common knobs in config.py (DEBUG, LAB_MODE, SSH timeouts)."""
+"""Menu C: edit common knobs in config.py (DEBUG, LAB_MODE, SSH timeouts).
+
+Why a dedicated editor: operators on air-gap hosts should not hand-edit
+Python. LAB_MODE derived knobs (TLS_VERIFY, SSH_STRICT_HOST_KEY, Kul print,
+SNMP min passphrase) are recomputed on save so they cannot drift.
+"""
 import os
 import re
 import sys
@@ -82,7 +87,11 @@ def _apply_runtime(name: str, value) -> None:
         config.TLS_VERIFY = not value
         config.SSH_STRICT_HOST_KEY = not value
         config.PRINT_ESXI_KEYS = value
-        config.SNMP_MIN_PASSPHRASE_LEN = 8 if value else 15
+        config.SNMP_MIN_PASSPHRASE_LEN = (
+            config.SNMP_MIN_PASSPHRASE_LEN_LAB
+            if value
+            else config.SNMP_MIN_PASSPHRASE_LEN_STIG
+        )
 
 
 def main() -> None:

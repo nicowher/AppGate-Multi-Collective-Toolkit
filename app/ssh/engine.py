@@ -163,18 +163,14 @@ class SNMPEngineFetcher(SSHSession):
             )
             return True
 
-        last_result = None
-        for addr in self._hosts(host):
-            last_result = self._with_ssh(addr, _purge)
-            if last_result is True:
-                time.sleep(SNMP_RELOAD_DELAY)
-                return
-            if last_result is False:
-                raise RuntimeError(
-                    f"Could not purge persistent SNMP user '{user}' on {addr}"
-                )
-            print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
-        raise RuntimeError(f"Could not purge persistent SNMP user '{user}' via SSH")
+        ok = self._with_ssh_endpoints(
+            host,
+            _purge,
+            error=f"Could not purge persistent SNMP user '{user}' via SSH",
+        )
+        if not ok:
+            raise RuntimeError(f"Could not purge persistent SNMP user '{user}' via SSH")
+        time.sleep(SNMP_RELOAD_DELAY)
 
     def _configure_and_read_engine_id(
         self, client: paramiko.SSHClient, *, restart_snmpd: bool = True

@@ -67,7 +67,7 @@ class SNMPValidator:
         hosts: List[str] = [host] if isinstance(host, str) else [h for h in host if h]
         if not hosts:
             return False
-        # print(f"DEBUG walk: hosts={hosts} engine={engine_id}")
+        # print(f"DEBUG walk: hosts={hosts!r} engine={engine_id!r} user={user!r}")
         if DEBUG:
             print(f"      DEBUG walk: hosts={hosts} engine_set={bool(engine_id)}", file=sys.stderr)
         self._last_walk_error = ""

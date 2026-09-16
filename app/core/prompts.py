@@ -1,10 +1,15 @@
 """Shared credential / Controller prompts used by more than one tool.
 
 Lives in ``core/``. Step 0 for SNMP credentials and walk-inventory: turn
-credentials.json into a
-numbered Controller list. `_require` never exits on bad input (re-prompt).
-`_parse_collectives` prefers collectives[]; old single-controller files still
-work. Duplicate FQDNs warn but still run (operator may have copied a row).
+credentials.json into a numbered Controller list. `_require` never exits on
+bad input (re-prompt). `_parse_collectives` prefers collectives[]; old
+single-controller files still work. Duplicate FQDNs warn but still run
+(operator may have copied a row).
+
+``prepare_collectives`` inherits omitted keys from top-level, then prompts
+only for gaps. If every collective already has a field, that field is not
+asked globally (one collective with per-row secrets never sees "Global …").
+Walk passes ``need_ssh=False``.
 """
 import os
 import re
@@ -349,7 +354,7 @@ def collective_for_target(target: Any, collectives: List[Dict[str, Any]]) -> Dic
 
 
 def _prompt_cred_scope(count: int) -> str:
-    """1=global 2=per-collective 3=global then override selected. One box = global."""
+    """1=global 2=per-collective 3=global then override. Not used when 0–1 collectives."""
     if count < 2:
         return "global"
     print("\nCredential entry:")
@@ -381,79 +386,170 @@ def _require_new_password(bucket: dict, label: str) -> str:
         bucket["ssh_password_new"] = ""
 
 
+def _field_filled(bucket: dict, key: str, *, min_len: int = 0) -> bool:
+    val = (bucket.get(key) or "").strip()
+    return bool(val) and (not min_len or len(val) >= min_len)
+
+
+def _secret_keys(*, need_ssh: bool, need_snmp: bool, need_new_password: bool) -> List[str]:
+    keys: List[str] = []
+    if need_ssh:
+        keys.extend(("ssh_username", "ssh_password"))
+    if need_snmp:
+        keys.extend(("snmp_user", "snmp_auth", "snmp_priv"))
+    if need_new_password:
+        keys.append("ssh_password_new")
+    return keys
+
+
+def _col_secrets_ready(
+    col: dict, *, need_ssh: bool, need_snmp: bool, need_new_password: bool
+) -> bool:
+    if need_ssh and not (
+        _field_filled(col, "ssh_username") and _field_filled(col, "ssh_password")
+    ):
+        return False
+    if need_snmp and not (
+        _field_filled(col, "snmp_user")
+        and _field_filled(col, "snmp_auth", min_len=SNMP_MIN_PASSPHRASE_LEN)
+    ):
+        return False
+    if need_new_password:
+        pw = (col.get("ssh_password_new") or "").strip()
+        if not pw or (not LAB_MODE and stig_password_errors(pw)):
+            return False
+    return True
+
+
+def _global_skip_keys(
+    collectives: List[Dict[str, Any]],
+    *,
+    need_ssh: bool,
+    need_snmp: bool,
+    need_new_password: bool,
+) -> set:
+    skip = set()
+    for key in _secret_keys(
+        need_ssh=need_ssh, need_snmp=need_snmp, need_new_password=need_new_password
+    ):
+        min_len = SNMP_MIN_PASSPHRASE_LEN if key in ("snmp_auth", "snmp_priv") else 0
+        if key == "snmp_priv":
+            if all(
+                _field_filled(c, "snmp_priv", min_len=min_len)
+                or _field_filled(c, "snmp_auth", min_len=SNMP_MIN_PASSPHRASE_LEN)
+                for c in collectives
+            ):
+                skip.add(key)
+            continue
+        if all(_field_filled(c, key, min_len=min_len) for c in collectives):
+            skip.add(key)
+    return skip
+
+
 def _fill_secret_fields(
     bucket: dict,
     label: str,
     *,
+    need_ssh: bool = True,
     need_snmp: bool,
     need_new_password: bool,
+    skip: Optional[set] = None,
 ) -> None:
-    bucket["ssh_username"] = _require(bucket, "ssh_username", f"{label} SSH Username")
-    bucket["ssh_password"] = _require(
-        bucket, "ssh_password", f"{label} SSH Password", sensitive=True
-    )
-    if need_snmp:
-        bucket["snmp_user"] = _require(bucket, "snmp_user", f"{label} SNMP User")
-        bucket["snmp_auth"] = _require(
-            bucket,
-            "snmp_auth",
-            f"{label} SNMP Auth",
-            sensitive=True,
-            min_len=SNMP_MIN_PASSPHRASE_LEN,
-        )
-        priv = (bucket.get("snmp_priv") or "").strip()
-        if not priv or len(priv) < SNMP_MIN_PASSPHRASE_LEN:
-            bucket["snmp_priv"] = bucket["snmp_auth"]
-            print(
-                f"      {label} SNMP Priv missing or short — using SNMP Auth.",
-                file=sys.stderr,
+    skip = skip or set()
+    if need_ssh:
+        if "ssh_username" not in skip:
+            bucket["ssh_username"] = _require(
+                bucket, "ssh_username", f"{label} SSH Username"
             )
-        else:
-            bucket["snmp_priv"] = _require(
+        if "ssh_password" not in skip:
+            bucket["ssh_password"] = _require(
+                bucket, "ssh_password", f"{label} SSH Password", sensitive=True
+            )
+    if need_snmp:
+        if "snmp_user" not in skip:
+            bucket["snmp_user"] = _require(bucket, "snmp_user", f"{label} SNMP User")
+        if "snmp_auth" not in skip:
+            bucket["snmp_auth"] = _require(
                 bucket,
-                "snmp_priv",
-                f"{label} SNMP Priv",
+                "snmp_auth",
+                f"{label} SNMP Auth",
                 sensitive=True,
                 min_len=SNMP_MIN_PASSPHRASE_LEN,
             )
-    if need_new_password:
+        if "snmp_priv" not in skip:
+            priv = (bucket.get("snmp_priv") or "").strip()
+            if not priv or len(priv) < SNMP_MIN_PASSPHRASE_LEN:
+                bucket["snmp_priv"] = bucket.get("snmp_auth") or ""
+                if bucket["snmp_priv"]:
+                    print(
+                        f"      {label} SNMP Priv missing or short — using SNMP Auth.",
+                        file=sys.stderr,
+                    )
+            else:
+                bucket["snmp_priv"] = _require(
+                    bucket,
+                    "snmp_priv",
+                    f"{label} SNMP Priv",
+                    sensitive=True,
+                    min_len=SNMP_MIN_PASSPHRASE_LEN,
+                )
+    if need_new_password and "ssh_password_new" not in skip:
         bucket["ssh_password_new"] = _require_new_password(bucket, label)
 
 
 def _copy_secret_fields(
-    src: dict, dest: dict, *, need_snmp: bool, need_new_password: bool
+    src: dict,
+    dest: dict,
+    *,
+    need_ssh: bool = True,
+    need_snmp: bool,
+    need_new_password: bool,
+    skip: Optional[set] = None,
 ) -> None:
-    dest["ssh_username"] = src.get("ssh_username") or ""
-    dest["ssh_password"] = src.get("ssh_password") or ""
-    if need_snmp:
-        dest["snmp_user"] = src.get("snmp_user") or ""
-        dest["snmp_auth"] = src.get("snmp_auth") or ""
-        dest["snmp_priv"] = src.get("snmp_priv") or ""
-    if need_new_password:
-        dest["ssh_password_new"] = src.get("ssh_password_new") or ""
+    skip = skip or set()
+    for key in _secret_keys(
+        need_ssh=need_ssh, need_snmp=need_snmp, need_new_password=need_new_password
+    ):
+        if key in skip:
+            continue
+        dest[key] = src.get(key) or ""
 
 
-def _clear_secret_fields(col: dict, *, need_snmp: bool, need_new_password: bool) -> None:
-    for key in ("ssh_username", "ssh_password"):
+def _clear_secret_fields(
+    col: dict, *, need_ssh: bool = True, need_snmp: bool, need_new_password: bool
+) -> None:
+    for key in _secret_keys(
+        need_ssh=need_ssh, need_snmp=need_snmp, need_new_password=need_new_password
+    ):
         col[key] = ""
-    if need_snmp:
-        for key in ("snmp_user", "snmp_auth", "snmp_priv"):
-            col[key] = ""
-    if need_new_password:
-        col["ssh_password_new"] = ""
+
+
+def promote_shared_fields(creds: dict, keys: tuple) -> None:
+    """If top-level is empty and every collective has the key, copy the first."""
+    raw = creds.get("collectives")
+    rows = [x for x in raw if isinstance(x, dict)] if isinstance(raw, list) else []
+    if not rows:
+        return
+    for key in keys:
+        if str(creds.get(key) or "").strip():
+            continue
+        vals = [_optional_str(r, key) for r in rows]
+        if vals and all(vals):
+            creds[key] = vals[0]
 
 
 def prepare_collectives(
     creds: dict,
     collectives: List[Dict[str, Any]],
     *,
+    need_ssh: bool = True,
     need_snmp: bool = False,
     need_new_password: bool = False,
 ) -> List[Dict[str, Any]]:
-    """SSH (always), SNMP, and new-password: global, per-collective, or override.
+    """SSH/SNMP/new-password: skip prompts when every collective already has the field.
 
-    File values win first. Then a scope prompt (2+ collectives). Global entry
-    is stored on creds and copied; override re-prompts only the selected rows.
+    File values win first (per-collective, else top-level). Scope prompt only
+    if 2+ collectives still have gaps. One collective fills that row, not Global.
     """
     had_local_new = any((c.get("ssh_password_new") or "").strip() for c in collectives)
     global_new = (creds.get("ssh_password_new") or "").strip()
@@ -476,12 +572,37 @@ def prepare_collectives(
                 ):
                     inherited = ""
                 col[key] = inherited
+        if need_snmp:
+            auth = (col.get("snmp_auth") or "").strip()
+            priv = (col.get("snmp_priv") or "").strip()
+            if auth and (not priv or len(priv) < SNMP_MIN_PASSPHRASE_LEN):
+                col["snmp_priv"] = auth
         if not col.get("mibs"):
             col["mibs"] = resolve_mibs(col, creds)
         if not col.get("ntp_servers"):
             col["ntp_servers"] = resolve_ntp_servers(col, creds)
 
-    flags = {"need_snmp": need_snmp, "need_new_password": need_new_password}
+    flags = {
+        "need_ssh": need_ssh,
+        "need_snmp": need_snmp,
+        "need_new_password": need_new_password,
+    }
+    if all(_col_secrets_ready(c, **flags) for c in collectives):
+        # print(f"DEBUG prepare: skip prompts n={len(collectives)} ssh={need_ssh} snmp={need_snmp}")
+        if DEBUG:
+            print(
+                f"      DEBUG prepare: every collective already has required secrets "
+                f"(n={len(collectives)} ssh={need_ssh} snmp={need_snmp})",
+                file=sys.stderr,
+            )
+        return collectives
+
+    if len(collectives) < 2:
+        _fill_secret_fields(
+            collectives[0], f"Collective {collectives[0].get('index', '1')}", **flags
+        )
+        return collectives
+
     scope = _prompt_cred_scope(len(collectives))
     # print(f"DEBUG prepare: scope={scope}")
 
@@ -490,9 +611,10 @@ def prepare_collectives(
             _fill_secret_fields(col, f"Collective {col.get('index', '?')}", **flags)
         return collectives
 
-    _fill_secret_fields(creds, "Global", **flags)
+    skip = _global_skip_keys(collectives, **flags)
+    _fill_secret_fields(creds, "Global", skip=skip, **flags)
     for col in collectives:
-        _copy_secret_fields(creds, col, **flags)
+        _copy_secret_fields(creds, col, skip=skip, **flags)
 
     if scope == "override":
         raw = input(

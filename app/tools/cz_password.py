@@ -126,13 +126,12 @@ def _apply(
     def _one(target: Target) -> None:
         col = collective_for_target(target, collectives)
         # print(f"DEBUG czpw: {target.label()} user={col.get('ssh_username')}")
-        hosts = target.ssh_endpoints()
         out = CzPassword(col["ssh_username"], ssh_password_for(target, col)).set_password(
-            hosts, col["ssh_password_new"]
+            target, col["ssh_password_new"]
         )
         time.sleep(CZ_PASSWORD_VERIFY_DELAY)
         # print(f"DEBUG czpw: verify user={col.get('ssh_username')}")
-        ok = CzPassword(col["ssh_username"], col["ssh_password_new"]).verify_login(hosts)
+        ok = CzPassword(col["ssh_username"], col["ssh_password_new"]).verify_login(target)
         if DEBUG:
             for ln in out.splitlines():
                 if ln.startswith("STEP_"):

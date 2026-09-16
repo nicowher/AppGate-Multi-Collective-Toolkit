@@ -128,6 +128,7 @@ def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
         f"      Current NTP on {sample.label()}: "
         + (", ".join(current) if current else "(none / not in GET)")
     )
+    # print(f"DEBUG ntp: peek hosts={current!r} sample={sample.label()}")
     print("  1) Add (update key if hostname matches, else append)")
     print("  2) Overwrite (replace the whole NTP list with credentials.json)")
     choice = ""
@@ -202,7 +203,7 @@ def _apply(
         col = collective_for_target(target, collectives)
         try:
             NtpSsh(col["ssh_username"], ssh_password_for(target, col)).restart_customization(
-                target.ssh_endpoints()
+                target
             )
             print(f"      {target.label()}: {NTP_CUSTOMIZATION_UNIT} restarted")
         except Exception as exc:
@@ -215,7 +216,7 @@ def _apply(
         servers = col.get("ntp_servers") or []
         try:
             out = NtpSsh(col["ssh_username"], ssh_password_for(target, col)).ntpdata(
-                target.ssh_endpoints()
+                target
             )
             if DEBUG:
                 print(f"      DEBUG ntpdata {target.label()}: {out[:300]!r}", file=sys.stderr)

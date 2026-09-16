@@ -14,6 +14,7 @@ except ImportError:
     ensure_package("paramiko", "paramiko")
     import paramiko
 
+import ipaddress
 import logging
 import os
 import shlex
@@ -24,12 +25,13 @@ from getpass import getpass
 
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 from config import (
     DEBUG,
     SSH_AUTH_TIMEOUT,
     SSH_KNOWN_HOSTS,
+    SSH_KNOWN_HOSTS_MODE,
     SSH_LOG_PREVIEW,
     SSH_PORT,
     SSH_STRICT_HOST_KEY,
@@ -37,6 +39,25 @@ from config import (
     SSH_TIMEOUT,
     YES_ANSWERS,
 )
+
+
+def _addr_is_ip(value: str) -> bool:
+    text = (value or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _ssh_display_name(addrs: Sequence[str]) -> str:
+    """Hostname/FQDN for operator prompts — never the last IPv6 tried."""
+    for addr in addrs:
+        if addr and not _addr_is_ip(addr):
+            return addr
+    return addrs[0] if addrs else ""
 
 
 def _host_resolves(host: str) -> bool:
@@ -60,10 +81,23 @@ class SSHSession:
         self._ssh_fail_kind = ""
 
     @staticmethod
-    def _hosts(host: Union[str, Sequence[str]]) -> List[str]:
+    def _unwrap(host: Any) -> Tuple[Any, List[str]]:
+        if getattr(host, "ssh_endpoints", None) is not None and not isinstance(
+            host, (str, bytes, list, tuple)
+        ):
+            return host, [h for h in host.ssh_endpoints() if h]
         if isinstance(host, str):
-            return [host] if host else []
-        return [h for h in host if h]
+            return None, [host] if host else []
+        return None, [h for h in host if h]
+
+    @staticmethod
+    def _hosts(host: Union[str, Sequence[str], Any]) -> List[str]:
+        return SSHSession._unwrap(host)[1]
+
+    @staticmethod
+    def _pin(target: Any, addr: str) -> None:
+        if target is not None and addr:
+            target.ssh_ok_host = addr
 
     def _apply_host_key_policy(self, client: paramiko.SSHClient) -> None:
         path = SSH_KNOWN_HOSTS.strip() or str(Path.home() / ".ssh" / "known_hosts")
@@ -73,7 +107,9 @@ class SSHSession:
             if parent:
                 os.makedirs(parent, exist_ok=True)
             if not os.path.isfile(path):
-                fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+                fd = os.open(
+                    path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, SSH_KNOWN_HOSTS_MODE
+                )
                 os.close(fd)
             client.load_host_keys(path)
         except OSError as exc:
@@ -93,16 +129,25 @@ class SSHSession:
             client.set_missing_host_key_policy(paramiko.WarningPolicy())
 
     def prime_host_keys(self, hosts: Union[str, Sequence[str]]) -> bool:
-        """Try hosts until one SSH session works. Short timeout. True if any connected."""
-        for host in self._hosts(hosts):
+        """Try hosts until one SSH session works. Short timeout. True if any connected.
+
+        A name already in known_hosts still gets a connect attempt. Returning
+        early on a cached FQDN used to skip this box's working private IP.
+        Pins the address that answered on the Target for later SSH steps.
+        """
+        target, addrs = self._unwrap(hosts)
+        for host in addrs:
             if not _host_resolves(host):
                 print(f"      Skipping unresolvable SSH host {host}", file=sys.stderr)
                 continue
-            if _hostname_known(host):
-                return True
+            # print(f"DEBUG prime: try {host!r} known={_hostname_known(host)}")
             print(f"      Checking SSH host key for {host}...", file=sys.stderr)
             if self._with_ssh(host, lambda _c: True, timeout=SSH_PRIME_TIMEOUT) is not None:
+                self._pin(target, host)
                 return True
+            if self._ssh_fail_kind in ("auth", "keyonly"):
+                self._pin(target, host)
+                return False
         return False
 
     def _with_ssh(self, ip: str, fn, timeout: Optional[int] = None):
@@ -127,14 +172,29 @@ class SSHSession:
             )
             self._ssh_fail_kind = ""
             return fn(client)
+        except paramiko.BadAuthenticationType as exc:
+            allowed = [str(a).lower() for a in (exc.allowed_types or [])]
+            if "keyboard-interactive" in allowed:
+                print(
+                    f"      SSH {ip}: password not offered; trying keyboard-interactive...",
+                    file=sys.stderr,
+                )
+                return self._with_ssh_keyboard_interactive(ip, fn)
+            if "password" not in allowed:
+                self._ssh_fail_kind = "keyonly"
+                print(
+                    f"      SSH {ip} does not allow password login "
+                    f"(allowed: {allowed or ['?']})",
+                    file=sys.stderr,
+                )
+                return None
+            self._ssh_fail_kind = "auth"
+            print(f"      SSH authentication failed on {ip}: {exc}", file=sys.stderr)
+            return None
         except paramiko.AuthenticationException as exc:
             self._ssh_fail_kind = "auth"
-            print(
-                f"      SSH authentication failed: {exc}. "
-                "Trying keyboard-interactive fallback...",
-                file=sys.stderr,
-            )
-            return self._with_ssh_keyboard_interactive(ip, fn)
+            print(f"      SSH authentication failed on {ip}: {exc}", file=sys.stderr)
+            return None
         except (socket.gaierror, OSError, socket.timeout, TimeoutError) as exc:
             self._ssh_fail_kind = "network"
             print(
@@ -156,6 +216,7 @@ class SSHSession:
         return None
 
     def _with_ssh_keyboard_interactive(self, ip: str, fn):
+        """Password-auth fallback. TCP connect uses SSH_TIMEOUT so a dead IP cannot hang."""
         def handler(title, instructions, prompt_list):
             responses = []
             for prompt in prompt_list:
@@ -166,10 +227,13 @@ class SSHSession:
             return responses
 
         transport = None
+        sock = None
         client = paramiko.SSHClient()
         self._apply_host_key_policy(client)
         try:
-            transport = paramiko.Transport((ip, SSH_PORT))
+            sock = socket.create_connection((ip, SSH_PORT), timeout=SSH_TIMEOUT)
+            sock.settimeout(SSH_TIMEOUT)
+            transport = paramiko.Transport(sock)
             transport.banner_timeout = SSH_TIMEOUT
             transport.auth_timeout = SSH_AUTH_TIMEOUT
             transport.start_client(timeout=SSH_TIMEOUT)
@@ -191,6 +255,11 @@ class SSHSession:
                     transport.close()
                 except OSError:
                     pass
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
         return None
 
     def _with_ssh_endpoints(
@@ -206,13 +275,18 @@ class SSHSession:
         None = connect miss, try the next address.
         False = connected but the work failed — do not retry the other NIC
         (that would bounce snmpd / re-run ACAS on the same box).
-        After the last IP fails, main thread may ask for a new SSH password.
+        Auth failure stops the IP walk (same wrong password on every NIC
+        trips SSHBRUTE). Main thread may then ask for a new password.
         """
-        addrs = self._hosts(host)
+        target, addrs = self._unwrap(host)
         if not addrs:
             raise ValueError("No SSH endpoint")
         self._ssh_fail_kind = ""
+        label = _ssh_display_name(addrs)
+        if target is not None:
+            label = target.label() or label
         last = addrs[-1]
+        auth_hit = ""
         for i, addr in enumerate(addrs):
             if not _host_resolves(addr):
                 print(f"      SSH {addr} did not resolve; trying next...", file=sys.stderr)
@@ -220,9 +294,14 @@ class SSHSession:
             last = addr
             result = self._with_ssh(addr, fn)
             if result is False:
-                raise ValueError(f"{error} (connected but failed) ({addr})")
+                raise ValueError(f"{error} (connected but failed) ({label or addr})")
             if result is not None:
+                self._pin(target, addr)
                 return result
+            if self._ssh_fail_kind in ("auth", "keyonly"):
+                auth_hit = addr
+                self._pin(target, addr)
+                break
             if i < len(addrs) - 1:
                 print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
         if (
@@ -230,14 +309,17 @@ class SSHSession:
             and self._ssh_fail_kind == "auth"
             and threading.current_thread() is threading.main_thread()
         ):
-            new_pw = prompt_retry_ssh_password(last)
+            new_pw = prompt_retry_ssh_password(label or last)
             if new_pw:
                 self.ssh_password = new_pw
+                retry_host = target if target is not None else (
+                    [auth_hit] + [a for a in addrs if a != auth_hit] if auth_hit else addrs
+                )
                 return self._with_ssh_endpoints(
-                    host, fn, error=error, prompt_password=False
+                    retry_host, fn, error=error, prompt_password=False
                 )
         kind = self._ssh_fail_kind or "network"
-        raise ValueError(f"{error} ({kind}) ({last})")
+        raise ValueError(f"{error} ({kind}) ({label or last})")
 
     def _sudo(self, client: paramiko.SSHClient, command: str, check: bool = True) -> str:
         return self._run(client, f"sudo -S {command}", sudo=True, check=check)
@@ -374,16 +456,10 @@ def prime_target_host_keys(targets, collectives) -> None:
         "      SSH host keys: accept each new host before parallel work starts.",
         file=sys.stderr,
     )
-    seen = set()
     for target in targets:
         col = collective_for_target(target, collectives)
-        session = SSHSession(col["ssh_username"], col["ssh_password"])
-        endpoints = [h for h in target.ssh_endpoints() if h and (col.get("ssh_username"), h) not in seen]
-        if not endpoints:
-            continue
-        for h in endpoints:
-            seen.add((col.get("ssh_username"), h))
-        session.prime_host_keys(endpoints)
+        session = SSHSession(col["ssh_username"], ssh_password_for(target, col))
+        session.prime_host_keys(target)
 
 
 def ssh_password_for(target, col: dict) -> str:
@@ -394,19 +470,25 @@ def ssh_password_for(target, col: dict) -> str:
 
 
 def prompt_retry_ssh_password(label: str) -> str:
-    """After FQDN and IP failed. Main thread only. Empty = skip."""
+    """Wrong password on a reachable box. Main thread only. Empty = skip host."""
     # print(f"DEBUG ssh: password retry prompt for {label}")
     ans = input(
-        f"      SSH failed for {label} after FQDN and IP. Try a new password? [y/N]: "
+        f"      SSH password failed for {label}. Try a different password? [y/N]: "
     ).strip().lower()
     if ans not in YES_ANSWERS:
         return ""
-    pw = getpass("      SSH Password: ").strip()
-    confirm = getpass("      SSH Password (confirm): ").strip()
-    if not pw or pw != confirm:
-        print("      Passwords did not match or empty.", file=sys.stderr)
-        return ""
-    return pw
+    while True:
+        pw = getpass(f"      SSH Password ({label}): ").strip()
+        if not pw:
+            skip = input("      Empty password. Skip this host? [y/N]: ").strip().lower()
+            if skip in YES_ANSWERS:
+                return ""
+            continue
+        confirm = getpass(f"      SSH Password confirm ({label}): ").strip()
+        if pw != confirm:
+            print("      Passwords did not match. Try again.", file=sys.stderr)
+            continue
+        return pw
 
 
 def run_ssh_batch(
@@ -425,7 +507,7 @@ def run_ssh_batch(
     for target, exc in failed:
         label = target.label() if hasattr(target, "label") else str(target)
         msg = str(exc).lower()
-        sshish = "(auth)" in msg or "authentication" in msg
+        sshish = "(auth)" in msg and "(keyonly)" not in msg
         if (
             sshish
             and threading.current_thread() is threading.main_thread()

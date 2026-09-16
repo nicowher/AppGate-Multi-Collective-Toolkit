@@ -45,6 +45,10 @@ from config import (
     APPLIANCE_STATUS_PATH,
     ENGINE_ID_TYPE,
     DEFAULT_SNMP_PORT,
+    LAB_MODE,
+    NTP_KEY_HEX_PREFIX,
+    NTP_KEY_TYPE_MAP,
+    NTP_WEAK_KEY_TYPES,
     SNMP_AUTH_PROTOCOL,
     SNMP_PRIV_PROTOCOL,
     STRIP_V1V2_COMMUNITIES,
@@ -536,12 +540,16 @@ class AppGateClient:
         key = str(entry.get("key") or "").strip()
         if key_type:
             compact = key_type.replace("-", "").upper()
-            out["keyType"] = {
-                "SHA256": "SHA256",
-                "SHA2": "SHA256",
-                "SHA1": "SHA1",
-                "MD5": "MD5",
-            }.get(compact, key_type)
+            mapped = NTP_KEY_TYPE_MAP.get(compact, key_type)
+            if str(mapped).upper() in NTP_WEAK_KEY_TYPES:
+                msg = (
+                    f"NTP keyType {mapped} is not CNSA 2.0 / DISA (use SHA256). "
+                    f"hostname={host}"
+                )
+                if not LAB_MODE:
+                    raise ValueError(msg)
+                print(f"      WARNING: {msg}", file=sys.stderr)
+            out["keyType"] = mapped
         if key_no not in ("", None):
             try:
                 out["keyNo"] = int(key_no)
@@ -549,8 +557,9 @@ class AppGateClient:
                 out["keyNo"] = key_no
         if key:
             compact = (out.get("keyType") or key_type).replace("-", "").upper()
-            if compact == "SHA256" and not key.upper().startswith("HEX:"):
-                key = "HEX:" + key
+            prefix = NTP_KEY_HEX_PREFIX
+            if compact == "SHA256" and not key.upper().startswith(prefix.upper()):
+                key = prefix + key
             out["key"] = key
         return out
 

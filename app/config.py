@@ -21,8 +21,10 @@ SNMP_PRIV_PROTOCOL = "AES256"
 # CNSA 2.0 / DISA: do not localize with MD5 or SHA-1.
 ALLOWED_HASH_ALGOS = ("sha256", "sha384", "sha512")
 # RFC 3414 floor is 8. DISA SNMP STIG often wants 15 — raise here for those sites.
-# Floor 8 (RFC 3414). LAB_MODE=False at bottom raises this to 15 (DISA).
-SNMP_MIN_PASSPHRASE_LEN = 8
+# Floor 8 (RFC 3414). LAB_MODE=False at bottom raises this to STIG (DISA).
+SNMP_MIN_PASSPHRASE_LEN_LAB = 8
+SNMP_MIN_PASSPHRASE_LEN_STIG = 15
+SNMP_MIN_PASSPHRASE_LEN = SNMP_MIN_PASSPHRASE_LEN_LAB
 # RFC 3414 password-to-key expansion (1 MiB).
 RFC3414_KDF_LEN = 1048576
 # DISA: do not leave SNMPv1/v2c community strings in the pushed config.
@@ -113,17 +115,17 @@ def confirm_skip_tls_verify() -> bool:
 SSH_PORT = 22
 # Empty = ~/.ssh/known_hosts (created if missing). Used when SSH_STRICT_HOST_KEY.
 SSH_KNOWN_HOSTS = ""
+# Unix mode for new known_hosts (owner read/write). Windows ignores most bits.
+SSH_KNOWN_HOSTS_MODE = 0o600
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
 # Parallel SNMP walks (menu 3 inventory + credentials step 8). One validator per worker.
 WALK_CONCURRENCY = 5
 # Lab troubleshooting: full JSON dump to the console at end of run (no passwords/tokens).
-# DISA: set False before a production run so engine IDs / inventory stay off the console.
+# DISA: keep False in production so engine IDs / inventory stay off the console.
 DEBUG = False
 # Write timestamped reports/*.json; console dump only if DEBUG is on.
 WRITE_RUN_REPORT = True
-# Overridden at bottom from LAB_MODE (lab prints Kul; production does not).
-PRINT_ESXI_KEYS = True
 # Unix mode for new report files (owner read/write only). Windows ignores most bits.
 REPORT_FILE_MODE = 0o600
 # When True: first pass is dry-run without asking. Prompt can still enable dry-run when False.
@@ -319,9 +321,21 @@ LAB_MODE = False
 TLS_VERIFY = not LAB_MODE
 SSH_STRICT_HOST_KEY = not LAB_MODE
 PRINT_ESXI_KEYS = LAB_MODE
-SNMP_MIN_PASSPHRASE_LEN = 8 if LAB_MODE else 15
-STIG_PASSWORD_MIN_LEN = 15
+SNMP_MIN_PASSPHRASE_LEN = (
+    SNMP_MIN_PASSPHRASE_LEN_LAB if LAB_MODE else SNMP_MIN_PASSPHRASE_LEN_STIG
+)
+STIG_PASSWORD_MIN_LEN = SNMP_MIN_PASSPHRASE_LEN_STIG
 # Pause after cz-config set so SSH login-verify uses the new hash.
 CZ_PASSWORD_VERIFY_DELAY = 2
 NTP_CUSTOMIZATION_UNIT = "cz-customization.service"
 NTP_VERIFY_DELAY = 5
+# 6.7 ntp.servers[].key: SHA256 values without this prefix get it prepended.
+NTP_KEY_HEX_PREFIX = "HEX:"
+# CNSA 2.0 / DISA: reject these NTP MAC algorithms when LAB_MODE=False.
+NTP_WEAK_KEY_TYPES = ("MD5", "SHA1")
+NTP_KEY_TYPE_MAP = {
+    "SHA256": "SHA256",
+    "SHA2": "SHA256",
+    "SHA1": "SHA1",
+    "MD5": "MD5",
+}

@@ -11,6 +11,7 @@ from .client import SSHSession
 
 class NtpSsh(SSHSession):
     def restart_customization(self, host: Union[str, Sequence[str]]) -> str:
+        # print(f"DEBUG ntp-ssh: restart {NTP_CUSTOMIZATION_UNIT} hosts={host!r}")
         def _run(client) -> str:
             return self._run(
                 client,
