@@ -25,10 +25,10 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **`credentials.json`** (gitignored): global defaults plus `collectives[]`. Required per collective: `fqdn` (`agip` recommended). API user/pass for every tool that talks to the Controller. SSH user/pass for 1, 2, 4, 5 (not walk). SNMP only for 1 and 3; `ssh_password_new` only for 4; `ntp_servers` only for 5; `mibs` never required. Old `admin_*` keys still load as `api_*`.
 - **Credential entry:** if **every** collective already has a field (including a single collective with per-row secrets and empty top-level keys), that field is **not** prompted globally. Gaps only: 1 collective fills that row; 2+ collectives then offer **1) global**, **2) per collective**, **3) global then override**. Short file secrets are discarded; typed replacements are kept. Short/missing `snmp_priv` reuses `snmp_auth`.
 - **Exclude collectives** (number or FQDN) then **exclude appliances** (`1.hostname`).
-- **FQDN first**, then IP. Gateways never use the Controller IP.
-- **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **`DEBUG` and `DRY_RUN` are separate.**
+- **FQDN first**, then IP (pinned working IP first after a successful SSH). Gateways never use the Controller IP.
+- **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **Defaults off.** **`DEBUG` and `DRY_RUN` are separate.**
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
-- **SSH:** this appliance's FQDN (appliance/admin/client hostname — never `peerInterface.hostname`, that is another box), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` is tried only on the **login** Controller (sharing it made both Controllers SSH the same host). Unresolvable names are skipped (`getaddrinfo`). Host-key prime **connects** until the first working address (`SSH_PRIME_TIMEOUT`, default 3s); a name already in `known_hosts` does not skip later IPs. Password retry only after **auth** failure, not DNS. Workers never call `input()`.
+- **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime connects until the first working address (`SSH_PRIME_TIMEOUT`). Auth failure stops the IP walk (SSHBRUTE). Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. With `DEBUG=False`, each try is one line (`label address timeout|ok|auth failed`).
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
 - Missing packages install from `app/vendor/wheels` first, then optional online pip.
 
@@ -215,8 +215,8 @@ Three switches people actually flip:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `LAB_MODE` | `False` | **Security posture.** `True`: skip TLS verify, WarningPolicy SSH keys, print ESXi Kul, SNMP passphrase min 8, skip STIG cz-password check. `False`: verify TLS (prompt after cert fail), prompt/save SSH host keys, hide Kul, SNMP min 15, STIG cz password on. |
-| `DEBUG` | `False` | **Console noise.** `True`: step traces (`DEBUG step2:…`) and full JSON report dump. Does **not** change TLS, SSH keys, or STIG. Unrelated to `LAB_MODE`. |
+| `LAB_MODE` | `False` | **Security posture (keep off in production).** `True`: skip TLS verify, WarningPolicy SSH keys, print ESXi Kul, SNMP passphrase min 8, skip STIG cz-password check. `False`: verify TLS (prompt after cert fail), prompt/save SSH host keys, hide Kul, SNMP min 15, STIG cz password on. |
+| `DEBUG` | `False` | **Console noise (keep off in production).** `True`: step traces, full JSON dump, pysnmp CFB warning, MAC/oldEngineID lines. Does **not** change TLS, SSH keys, or STIG. Unrelated to `LAB_MODE`. |
 | `DRY_RUN` | `False` | **Force preview.** `True`: skip the “Dry-run only?” prompt and never pin/push/purge/walk/restart snmpd. You can still dry-run when this is `False` by answering `y` at the prompt. Unrelated to `LAB_MODE`. |
 
 Other knobs:

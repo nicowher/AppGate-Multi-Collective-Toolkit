@@ -79,6 +79,8 @@ class SSHSession:
         self.ssh_user = ssh_user
         self.ssh_password = ssh_password
         self._ssh_fail_kind = ""
+        self._log_label = ""
+        self._last_reason = ""
 
     @staticmethod
     def _unwrap(host: Any) -> Tuple[Any, List[str]]:
@@ -91,13 +93,36 @@ class SSHSession:
         return None, [h for h in host if h]
 
     @staticmethod
-    def _hosts(host: Union[str, Sequence[str], Any]) -> List[str]:
-        return SSHSession._unwrap(host)[1]
-
-    @staticmethod
     def _pin(target: Any, addr: str) -> None:
         if target is not None and addr:
             target.ssh_ok_host = addr
+
+    def _set_log_label(self, target: Any) -> None:
+        self._log_label = ""
+        if target is not None and hasattr(target, "label"):
+            self._log_label = target.label() or ""
+
+    def _tag(self, addr: str = "") -> str:
+        if self._log_label and addr:
+            return f"{self._log_label} {addr}"
+        return self._log_label or addr
+
+    def _log(self, msg: str, *, noise: bool = False) -> None:
+        if noise and not DEBUG:
+            return
+        print(f"      {msg}", file=sys.stderr)
+
+    @staticmethod
+    def _net_reason(exc: BaseException) -> str:
+        text = str(exc).lower()
+        name = type(exc).__name__
+        if name in ("TimeoutError", "timeout") or "timed out" in text:
+            return "timeout"
+        if "10051" in str(exc) or "unreachable" in text:
+            return "unreachable"
+        if name == "gaierror" or "getaddrinfo" in text or "11001" in str(exc):
+            return "no DNS"
+        return name
 
     def _apply_host_key_policy(self, client: paramiko.SSHClient) -> None:
         path = SSH_KNOWN_HOSTS.strip() or str(Path.home() / ".ssh" / "known_hosts")
@@ -136,15 +161,17 @@ class SSHSession:
         Pins the address that answered on the Target for later SSH steps.
         """
         target, addrs = self._unwrap(hosts)
+        self._set_log_label(target)
         for host in addrs:
             if not _host_resolves(host):
-                print(f"      Skipping unresolvable SSH host {host}", file=sys.stderr)
+                self._log(f"{self._tag(host)} skip (no DNS)")
                 continue
             # print(f"DEBUG prime: try {host!r} known={_hostname_known(host)}")
-            print(f"      Checking SSH host key for {host}...", file=sys.stderr)
             if self._with_ssh(host, lambda _c: True, timeout=SSH_PRIME_TIMEOUT) is not None:
+                self._log(f"{self._tag(host)} ok")
                 self._pin(target, host)
                 return True
+            self._log(f"{self._tag(host)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
             if self._ssh_fail_kind in ("auth", "keyonly"):
                 self._pin(target, host)
                 return False
@@ -171,42 +198,37 @@ class SSHSession:
                 auth_timeout=min(wait, SSH_AUTH_TIMEOUT),
             )
             self._ssh_fail_kind = ""
+            self._last_reason = "ok"
             return fn(client)
         except paramiko.BadAuthenticationType as exc:
             allowed = [str(a).lower() for a in (exc.allowed_types or [])]
             if "keyboard-interactive" in allowed:
-                print(
-                    f"      SSH {ip}: password not offered; trying keyboard-interactive...",
-                    file=sys.stderr,
+                self._log(
+                    f"{self._tag(ip)}: password not offered; keyboard-interactive",
+                    noise=True,
                 )
                 return self._with_ssh_keyboard_interactive(ip, fn)
             if "password" not in allowed:
                 self._ssh_fail_kind = "keyonly"
-                print(
-                    f"      SSH {ip} does not allow password login "
-                    f"(allowed: {allowed or ['?']})",
-                    file=sys.stderr,
-                )
+                self._last_reason = "key-only"
                 return None
             self._ssh_fail_kind = "auth"
-            print(f"      SSH authentication failed on {ip}: {exc}", file=sys.stderr)
+            self._last_reason = "auth failed"
             return None
-        except paramiko.AuthenticationException as exc:
+        except paramiko.AuthenticationException:
             self._ssh_fail_kind = "auth"
-            print(f"      SSH authentication failed on {ip}: {exc}", file=sys.stderr)
+            self._last_reason = "auth failed"
             return None
         except (socket.gaierror, OSError, socket.timeout, TimeoutError) as exc:
             self._ssh_fail_kind = "network"
-            print(
-                f"      SSH network error ({type(exc).__name__}): {exc}",
-                file=sys.stderr,
-            )
+            self._last_reason = self._net_reason(exc)
+            self._log(f"{self._tag(ip)} {type(exc).__name__}: {exc}", noise=True)
         except paramiko.SSHException as exc:
             self._ssh_fail_kind = "network"
-            print(
-                f"      SSH connection error ({type(exc).__name__}): "
-                f"{str(exc)[:SSH_LOG_PREVIEW]}",
-                file=sys.stderr,
+            self._last_reason = type(exc).__name__
+            self._log(
+                f"{self._tag(ip)} {type(exc).__name__}: {str(exc)[:SSH_LOG_PREVIEW]}",
+                noise=True,
             )
         finally:
             try:
@@ -241,9 +263,10 @@ class SSHSession:
             client._transport = transport
             return fn(client)
         except (paramiko.SSHException, OSError, socket.timeout, TimeoutError) as exc:
-            print(
-                f"      Keyboard-interactive SSH failed ({type(exc).__name__}): {exc}",
-                file=sys.stderr,
+            self._last_reason = self._net_reason(exc)
+            self._log(
+                f"{self._tag(ip)} keyboard-interactive {type(exc).__name__}: {exc}",
+                noise=True,
             )
         finally:
             try:
@@ -279,6 +302,7 @@ class SSHSession:
         trips SSHBRUTE). Main thread may then ask for a new password.
         """
         target, addrs = self._unwrap(host)
+        self._set_log_label(target)
         if not addrs:
             raise ValueError("No SSH endpoint")
         self._ssh_fail_kind = ""
@@ -289,21 +313,22 @@ class SSHSession:
         auth_hit = ""
         for i, addr in enumerate(addrs):
             if not _host_resolves(addr):
-                print(f"      SSH {addr} did not resolve; trying next...", file=sys.stderr)
+                self._log(f"{self._tag(addr)} skip (no DNS)")
                 continue
             last = addr
             result = self._with_ssh(addr, fn)
             if result is False:
                 raise ValueError(f"{error} (connected but failed) ({label or addr})")
             if result is not None:
+                self._log(f"{self._tag(addr)} ok")
                 self._pin(target, addr)
                 return result
+            self._log(f"{self._tag(addr)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
             if self._ssh_fail_kind in ("auth", "keyonly"):
                 auth_hit = addr
                 self._pin(target, addr)
                 break
-            if i < len(addrs) - 1:
-                print(f"      SSH {addr} failed; trying next endpoint...", file=sys.stderr)
+            self._log(f"{self._tag(addr)} trying next", noise=True)
         if (
             prompt_password
             and self._ssh_fail_kind == "auth"

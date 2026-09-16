@@ -28,7 +28,7 @@ class HashgenTests(unittest.TestCase):
 
     def test_generate_hashes_lengths(self) -> None:
         data = self.gen.generate_hashes(
-            "user", "authpass", "privpass", "8000000001020304"
+            "user", "authpassphrase15", "privpassphrase15", "8000000001020304"
         )
         self.assertEqual(len(data["hashes"]["auth"]), 64)
         self.assertEqual(len(data["hashes"]["priv"]), 64)
@@ -43,6 +43,8 @@ class HashgenTests(unittest.TestCase):
     def test_rejects_short_passphrase(self) -> None:
         with self.assertRaises(ValueError):
             self.gen._localize("short", "8000000001020304", "sha256")
+        with self.assertRaises(ValueError):
+            self.gen.generate_hashes("user", "authpass", "privpass", "8000000001020304")
 
     def test_0x_prefix_same_as_bare(self) -> None:
         a = self.gen._localize("authpass", "8000000001020304", "sha256")

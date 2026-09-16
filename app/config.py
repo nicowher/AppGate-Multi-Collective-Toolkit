@@ -58,19 +58,28 @@ def get_priv_protocol():
         except ImportError:
             return (1, 3, 6, 1, 4, 1, 9, 12, 6, 1, 102)
 
-# ============================================================================
-# Cryptography Deprecation Warning Suppression
-# ============================================================================
-# pysnmp uses cryptography's CFB mode which moved to a deprecated location.
-# This is safe to suppress until pysnmp updates its dependency.
-warnings.filterwarnings(
-    "ignore",
-    message="CFB has been moved to cryptography.hazmat.decrepit.ciphers.modes.CFB",
-    category=DeprecationWarning,
-)
+def silence_third_party_warnings() -> None:
+    """Hide pysnmp/cryptography CFB noise unless DEBUG is on.
+
+    The warning is CryptographyDeprecationWarning (UserWarning), not
+    DeprecationWarning — a DeprecationWarning filter never matched.
+    """
+    if DEBUG:
+        return
+    try:
+        from cryptography.utils import CryptographyDeprecationWarning
+    except ImportError:
+        CryptographyDeprecationWarning = UserWarning
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*CFB has been moved to cryptography\.hazmat\.decrepit.*",
+        category=CryptographyDeprecationWarning,
+    )
+
 
 def warn_insecure_transport() -> None:
     """LAB_MODE on: warning only, never blocks. Off: no prompt here (ask after TLS fail)."""
+    silence_third_party_warnings()
     if LAB_MODE:
         print(
             "WARNING: LAB_MODE=True — TLS/SSH verification off; STIG new-password skipped.",

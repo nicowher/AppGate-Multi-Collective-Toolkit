@@ -95,6 +95,7 @@ def _apply_runtime(name: str, value) -> None:
 
 
 def main() -> None:
+    # print(f"DEBUG settings: path={CONFIG_PATH} DEBUG={config.DEBUG} LAB_MODE={config.LAB_MODE}")
     print("Configure config.py (Enter keeps the current value).")
     print("TLS_VERIFY / SSH_STRICT_HOST_KEY follow LAB_MODE.")
     print()

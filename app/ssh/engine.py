@@ -175,48 +175,44 @@ class SNMPEngineFetcher(SSHSession):
     def _configure_and_read_engine_id(
         self, client: paramiko.SSHClient, *, restart_snmpd: bool = True
     ) -> Optional[str]:
+        tag = self._tag() or "snmpd"
         if restart_snmpd:
-            print(
-                f"      Restarting snmpd so it applies engineIDType {ENGINE_ID_TYPE}...",
-                file=sys.stderr,
-            )
+            self._log(f"{tag}: restarting snmpd...")
             if not self._restart_snmpd(client):
-                print("      snmpd restart failed.", file=sys.stderr)
+                self._log(f"{tag}: snmpd restart failed")
                 return False
             time.sleep(SNMP_RELOAD_DELAY)
         else:
-            print("      Reading existing oldEngineID (no snmpd restart)...", file=sys.stderr)
+            self._log(f"{tag}: reading oldEngineID (no snmpd restart)")
 
         raw = self._sudo(client, f"grep -E '^oldEngineID' {SNMP_PERSISTENT_CONF} | tail -n 1")
         match = OLD_ENGINE_RE.search(raw or "")
         if not match:
-            print(
-                f"      No oldEngineID in {SNMP_PERSISTENT_CONF} after restart. "
-                f"Output: {(raw or '').strip()[:200]}",
-                file=sys.stderr,
+            self._log(
+                f"{tag}: no oldEngineID in {SNMP_PERSISTENT_CONF} "
+                f"{(raw or '').strip()[:200]}"
             )
             return False
         engine_id = match.group(1).lower()
-        print(f"      oldEngineID: {engine_id}", file=sys.stderr)
         # print(f"DEBUG step4: raw oldEngineID line={raw!r}")
-        if DEBUG:
-            print(f"      DEBUG step4: oldEngineID={engine_id} restart={restart_snmpd}", file=sys.stderr)
+        self._log(f"{tag}: oldEngineID {engine_id}", noise=True)
 
         mac = self._read_iface_mac(client)
         if not mac:
-            print(f"      Could not read {ETH_IFACE} MAC via ip addr.", file=sys.stderr)
+            self._log(f"{tag}: could not read {ETH_IFACE} MAC")
             return False
-        print(f"      {ETH_IFACE} MAC: {mac}", file=sys.stderr)
+        self._log(f"{tag}: {ETH_IFACE} MAC {mac}", noise=True)
 
         expected_suffix = mac.replace(":", "").lower()
         if not self._engine_id_matches_mac(engine_id, expected_suffix):
-            print(
-                "      Engine ID does not match RFC 3411 type-3 MAC calculation "
-                f"(expected ...03{expected_suffix}, got {engine_id}).",
-                file=sys.stderr,
+            self._log(
+                f"{tag}: engine ID does not match RFC 3411 type-3 "
+                f"(expected ...03{expected_suffix}, got {engine_id})"
             )
             return False
-        print(f"      Engine ID matches {ETH_IFACE} MAC (engineIDType {ENGINE_ID_TYPE}).", file=sys.stderr)
+        self._log(
+            f"{tag}: engine ID matches {ETH_IFACE} MAC", noise=True
+        )
         return engine_id
 
     def _stop_snmpd(self, client: paramiko.SSHClient) -> bool:

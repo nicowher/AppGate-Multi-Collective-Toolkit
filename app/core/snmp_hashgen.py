@@ -29,6 +29,7 @@ from config import (
     RFC3414_KDF_LEN,
     SNMP_HASH_ALGO,
     SNMP_MIN_PASSPHRASE_LEN,
+    SNMP_MIN_PASSPHRASE_LEN_LAB,
 )
 
 HASH_HEX_LEN = {
@@ -47,7 +48,11 @@ class SNMPHashGenerator:
         engine_id: str,
         hash_algo: str = SNMP_HASH_ALGO,
     ) -> Dict[str, Any]:
-        """Step 5: localize *auth* and *priv* against *engine_id*."""
+        """Step 5: localize *auth* and *priv* against *engine_id*.
+
+        DISA/CNSA floor is SNMP_MIN_PASSPHRASE_LEN (15 when LAB_MODE is off).
+        RFC 3414 math still allows 8 in _localize (known test vectors).
+        """
         algo = hash_algo.lower()
         if algo not in ALLOWED_HASH_ALGOS or algo not in HASH_HEX_LEN:
             raise ValueError(
@@ -61,6 +66,11 @@ class SNMPHashGenerator:
                 f"(engine_id {len(engine_id or '')} hex chars)",
                 file=sys.stderr,
             )
+        for secret in (auth, priv):
+            if not secret or len(secret) < SNMP_MIN_PASSPHRASE_LEN:
+                raise ValueError(
+                    f"SNMP passphrase must be at least {SNMP_MIN_PASSPHRASE_LEN} characters"
+                )
         auth_hash = self._localize(auth, engine_id, algo)
         priv_hash = self._localize(priv, engine_id, algo)
         print("      Hashed passwords in-process (RFC 3414).", file=sys.stderr)
@@ -73,9 +83,9 @@ class SNMPHashGenerator:
 
     @staticmethod
     def _localize(passphrase: str, engine_id: str, hash_algo: str) -> str:
-        if not passphrase or len(passphrase) < SNMP_MIN_PASSPHRASE_LEN:
+        if not passphrase or len(passphrase) < SNMP_MIN_PASSPHRASE_LEN_LAB:
             raise ValueError(
-                f"SNMP passphrase must be at least {SNMP_MIN_PASSPHRASE_LEN} characters"
+                f"SNMP passphrase must be at least {SNMP_MIN_PASSPHRASE_LEN_LAB} characters (RFC 3414)"
             )
         digest = getattr(hashlib, hash_algo)
         # Repeat passphrase to exactly 1 MiB, then hash → Ku.
