@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from config import APPLIANCE_FUNCTION_NAMES, HEALTH_STATUS_KEYS, INVENTORY_NAME_WIDTH
+from core.utils import expand_exclude_tokens
 
 
 @dataclass
@@ -291,8 +292,9 @@ def is_selectable(health: str, skip_status: tuple) -> bool:
 def prompt_exclusions(targets: List[Target]) -> List[Target]:
     """Step 2: print the table; Enter keeps all.
 
-    Tokens: row number, 1.hostname, unique hostname, SSH IP, or appliance UUID.
-    A hostname that exists in two collectives only matches as N.hostname.
+    Tokens: row number, ranges (1-10,12-20), 1.hostname, unique hostname,
+    SSH IP, or appliance UUID. A hostname in two collectives only matches
+    as N.hostname.
     """
     print(
         "\n      #  Collective  Hostname                        SSH IP              Functions              Health"
@@ -304,11 +306,11 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
             f"     {i:2d}  {t.collective:<10}  {t.hostname[:INVENTORY_NAME_WIDTH]:<{INVENTORY_NAME_WIDTH}}  {host:<22}  {funcs:<22}  {t.health}"
         )
     raw = input(
-        "\n      Exclude (comma-separated numbers, e.g. 1,3 or 1.hostname; Enter for all): "
+        "\n      Exclude (e.g. 1,3 or 1-10,12-20 or 1.hostname; Enter for all): "
     ).strip()
     if not raw:
         return list(targets)
-    tokens = {part.strip().lower() for part in raw.split(",") if part.strip()}
+    tokens = expand_exclude_tokens(raw)
     host_counts = Counter(t.hostname.lower() for t in targets)
     kept = []
     for i, t in enumerate(targets, 1):

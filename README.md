@@ -24,7 +24,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 
 - **`credentials.json`** (gitignored): global defaults plus `collectives[]`. Required per collective: `fqdn` (`agip` recommended). API user/pass for every tool that talks to the Controller. SSH user/pass for 1, 2, 4, 5 (not walk). SNMP only for 1 and 3; `ssh_password_new` only for 4; `ntp_servers` only for 5; `mibs` never required. Old `admin_*` keys still load as `api_*`.
 - **Credential entry:** if **every** collective already has a field (including a single collective with per-row secrets and empty top-level keys), that field is **not** prompted globally. Gaps only: 1 collective fills that row; 2+ collectives then offer **1) global**, **2) per collective**, **3) global then override**. Short file secrets are discarded; typed replacements are kept. Short/missing `snmp_priv` reuses `snmp_auth`.
-- **Exclude collectives** (number or FQDN) then **exclude appliances** (`1.hostname`).
+- **Exclude collectives** (number, range `1-3`, or FQDN) then **exclude appliances** (`1,3` / `1-10,12-20` / `1.hostname`). `1-10,12-20` leaves row 11.
 - **FQDN first**, then IP (pinned working IP first after a successful SSH). Gateways never use the Controller IP.
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **Defaults off.** **`DEBUG` and `DRY_RUN` are separate.**
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.

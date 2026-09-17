@@ -26,7 +26,7 @@ from config import (
 )
 from getpass import getpass
 
-from core.utils import REPO_ROOT, halt, is_valid_host, prompt_until_valid
+from core.utils import REPO_ROOT, expand_exclude_tokens, halt, is_valid_host, prompt_until_valid
 
 CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
 
@@ -318,16 +318,16 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
 
 
 def _exclude_collectives(cols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Same idea as appliance exclude: Enter keeps all. Tokens: index or FQDN/IP."""
+    """Same idea as appliance exclude: Enter keeps all. Tokens: index, range, FQDN/IP."""
     if len(cols) < 2:
         return cols
     raw = input(
-        "      Exclude collectives (comma-separated numbers or FQDN; Enter for all): "
+        "      Exclude collectives (e.g. 1,3 or 1-3 or FQDN; Enter for all): "
     ).strip()
     if not raw:
         return cols
     # print(f"DEBUG collectives: exclude raw={raw!r}")
-    tokens = {part.strip().lower() for part in raw.split(",") if part.strip()}
+    tokens = expand_exclude_tokens(raw)
     kept: List[Dict[str, Any]] = []
     for col in cols:
         keys = {
