@@ -63,6 +63,7 @@ class SNMPValidator:
         auth: str,
         priv: str,
         engine_id: Optional[str] = None,
+        label: str = "",
     ) -> bool:
         hosts: List[str] = [host] if isinstance(host, str) else [h for h in host if h]
         if not hosts:
@@ -71,16 +72,18 @@ class SNMPValidator:
         if DEBUG:
             print(f"      DEBUG walk: hosts={hosts} engine_set={bool(engine_id)}", file=sys.stderr)
         self._last_walk_error = ""
-        for addr in hosts:
+        tag = label or "walk"
+        failed: List[str] = []
+        total = len(hosts)
+        for i, addr in enumerate(hosts, 1):
             target = self._walk_target(addr)
             attempts = WALK_IP_ATTEMPTS if self._addr_is_ip(target) else WALK_FQDN_ATTEMPTS
-            if DEBUG:
-                kind = "IP" if self._addr_is_ip(target) else "FQDN"
-                print(f"      Walk {kind} {target} ({attempts} attempt(s))...", file=sys.stderr)
+            print(f"      {tag} {i}/{total} {target}...", file=sys.stderr, flush=True)
             if self._validate_snmp_walk_one(target, user, auth, priv, engine_id, attempts):
+                print(f"      {tag} {i} ok", file=sys.stderr, flush=True)
                 return True
-        if self._last_walk_error and not DEBUG:
-            print(f"      {self._last_walk_error}", file=sys.stderr)
+            failed.append(str(i))
+        print(f"      {tag} failed {' '.join(failed)}", file=sys.stderr, flush=True)
         return False
 
     @staticmethod
@@ -423,7 +426,15 @@ class SNMPValidator:
         try:
             loop = asyncio.new_event_loop()
             try:
-                return loop.run_until_complete(_async_walk())
+                budget = SNMPWALK_TIMEOUT * (1 + SNMPWALK_RETRIES)
+                return loop.run_until_complete(
+                    asyncio.wait_for(_async_walk(), timeout=budget)
+                )
+            except asyncio.TimeoutError:
+                self._set_walk_error(
+                    f"SNMP walk (pysnmp): timed out after {SNMPWALK_TIMEOUT}s"
+                )
+                return False
             finally:
                 pending = asyncio.all_tasks(loop)
                 for task in pending:

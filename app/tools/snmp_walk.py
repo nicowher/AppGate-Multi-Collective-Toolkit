@@ -108,7 +108,7 @@ def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
         if DEBUG:
             print(f"      DEBUG walk-single: hosts={hosts}", file=sys.stderr)
         print(f"\n      SNMP walk {hosts}...")
-        ok = validator.validate_snmp_walk(hosts, user, auth, priv)
+        ok = validator.validate_snmp_walk(hosts, user, auth, priv, label=ip)
         print(f"      {ip}: walk {'PASSED' if ok else 'FAILED'}")
         if not ok:
             any_fail = True
@@ -196,6 +196,7 @@ def _walk_inventory(creds: dict) -> int:
             col.get("snmp_auth") or "",
             col.get("snmp_priv") or "",
             engine_id=target.engine_id or None,
+            label=target.label(),
         )
         target.walk_ok = ok
         print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")

@@ -440,6 +440,7 @@ def _run_phases_3_to_8(
                 col.get("snmp_auth") or snmp_auth,
                 col.get("snmp_priv") or snmp_priv,
                 engine_id=target.engine_id,
+                label=target.label(),
             )
             target.walk_ok = ok
             print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
