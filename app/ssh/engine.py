@@ -206,9 +206,15 @@ class SNMPEngineFetcher(SSHSession):
         expected_suffix = mac.replace(":", "").lower()
         if not self._engine_id_matches_mac(engine_id, expected_suffix):
             self._log(
-                f"{tag}: engine ID does not match RFC 3411 type-3 "
+                f"{tag}: engine ID is not RFC 3411 type-3 yet "
                 f"(expected ...03{expected_suffix}, got {engine_id})"
             )
+            if not restart_snmpd:
+                self._log(
+                    f"{tag}: dry-run — using current engine ID; live run pins "
+                    f"engineIDType {ENGINE_ID_TYPE} then restarts snmpd"
+                )
+                return engine_id
             return False
         self._log(
             f"{tag}: engine ID matches {ETH_IFACE} MAC", noise=True
