@@ -16,9 +16,8 @@ is never sent to site B (403 / wrong collective).
       cz-configd owns /etc/snmp/snmpd.conf; SSH edits get overwritten.
 
 Why no exactEngineID: cz-configd has truncated type-3 IDs and broken localization.
-Why site sanitize/retry: GET often expands site to an object; PUT wants a UUID.
-  422 on site usually means View without Edit/Site — hint the operator, don't
-  only dump raw JSON.
+SNMP PUTs only id+snmpServer (never site, never a new tcpPort). Full appliance
+PUT is NTP only; site object is collapsed to UUID and is never stripped.
 """
 from core.utils import ensure_package
 
@@ -473,43 +472,40 @@ class AppGateClient:
 
     @staticmethod
     def _sanitize_appliance_for_put(appliance: Dict[str, Any]) -> Dict[str, Any]:
-        """GET often expands site to an object; PUT wants a UUID or omits it."""
+        """GET often expands site to an object; PUT wants the site UUID. Never drop site."""
         body = dict(appliance)
         site = body.get("site")
         if isinstance(site, dict):
             site_id = site.get("id") or site.get("siteId")
             if site_id:
                 body["site"] = site_id
-            else:
-                body.pop("site", None)
         return body
 
     def _put_snmpd_conf(self, appliance: Dict[str, Any], new_conf: str, enabled: bool) -> None:
-        """PUT the appliance with a replaced snmpd.conf blob."""
+        """PUT only snmpServer (snmpd.conf). Do not send site, NICs, or a new tcpPort."""
         existing = appliance.get("snmpServer")
         if not isinstance(existing, dict):
             existing = {}
-        appliance["snmpServer"] = {
-            **existing,
-            "enabled": enabled,
-            "snmpd.conf": new_conf,
-            "tcpPort": existing.get("tcpPort", DEFAULT_SNMP_PORT),
-            "udpPort": existing.get("udpPort", DEFAULT_SNMP_PORT),
-        }
-        self._put_appliance(appliance, what="SNMP config")
+        snmp = dict(existing)
+        snmp["enabled"] = enabled
+        snmp["snmpd.conf"] = new_conf
+        if existing.get("tcpPort") in (None, "", 0):
+            snmp.pop("tcpPort", None)
+        if existing.get("udpPort") in (None, "", 0):
+            snmp["udpPort"] = DEFAULT_SNMP_PORT
+        self._put_appliance_body(
+            {"id": appliance.get("id"), "snmpServer": snmp},
+            what="SNMP config",
+        )
 
     def _put_appliance(self, appliance: Dict[str, Any], *, what: str) -> None:
-        body = self._sanitize_appliance_for_put(appliance)
-        url = f"{self.base_url}/appliances/{appliance.get('id')}"
+        self._put_appliance_body(self._sanitize_appliance_for_put(appliance), what=what)
+
+    def _put_appliance_body(self, body: Dict[str, Any], *, what: str) -> None:
+        url = f"{self.base_url}/appliances/{body.get('id')}"
         put_response = requests.put(
             url, headers=self.headers, json=body, verify=_tls_verify, timeout=API_TIMEOUT
         )
-        if put_response.status_code == 422 and "site" in (put_response.text or "").lower():
-            body.pop("site", None)
-            print("      Retrying PUT without site (422 site privilege/shape).", file=sys.stderr)
-            put_response = requests.put(
-                url, headers=self.headers, json=body, verify=_tls_verify, timeout=API_TIMEOUT
-            )
         if put_response.status_code != 200:
             body_preview = (put_response.text or "")[:API_ERROR_BODY_PREVIEW]
             hint = ""
