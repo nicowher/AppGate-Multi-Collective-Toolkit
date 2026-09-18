@@ -326,7 +326,7 @@ VENDOR_PACKAGES = ("requests", "paramiko", "pysnmp")
 # LAB_MODE only (DEBUG stays independent).
 # True: skip TLS/SSH verify, print ESXi Kul, SNMP pw min 8, skip STIG cz pw.
 # False: TLS verify (prompt after fail), SSH TOFU into known_hosts, SNMP pw min 15, STIG cz pw.
-LAB_MODE = True
+LAB_MODE = False
 TLS_VERIFY = not LAB_MODE
 SSH_STRICT_HOST_KEY = not LAB_MODE
 PRINT_ESXI_KEYS = LAB_MODE
