@@ -40,10 +40,10 @@ Configures **authPriv** SNMPv3 USM on selected appliances so a scanner (e.g. ESX
 
 1. **Authenticate** to each Controller (`POST /admin/login`). FQDN first; IP if TLS/connect fails (not on 401/403). Self-signed: `Proceed anyway? [y/N]`.
 2. **Inventory** `GET /admin/appliances` + status. **Dry-run only? [y/N]** (preview hashes; no pin/push/purge/walk/snmpd restart). Then the exclude table (Enter = all).
-3. **Pin** `engineIDType 3` via appliance PUT (dry-run prints only).
+3. **Pin** `engineIDType 3` via appliance PUT (dry-run prints only). PUT is the full GET document: only `snmpd.conf` / `enabled` may change; `site` object becomes the same UUID (never stripped); `tcpPort` is never added. Any other field diff aborts (`DEBUG` dumps redacted GET/PUT).
 4. **SSH** (host keys primed on the main thread, then up to `SSH_CONCURRENCY` in parallel). Read `oldEngineID` from persistent snmpd.conf and check it against `eth0` MAC (RFC 3411 type 3). **Live** restarts snmpd so type 3 applies; **dry-run does not**.
 5. **Localize** auth/priv in-process (RFC 3414 SHA-256) per engine ID. Uses that collective’s `snmp_*` if set. Prints ESXi `user/Kul/Kul/priv` when `PRINT_ESXI_KEYS` (follows `LAB_MODE`).
-6. **Push** via Controller: `deleteUser`, `createUser` with localized `-l 0x…` hashes, optional `rouser`, `engineIDType 3`. No `exactEngineID` (cz-configd truncates it). SNMPv1/v2c community lines are stripped.
+6. **Push** via Controller: same guarded PUT as step 3 with `deleteUser`, `createUser` (localized `-l 0x…`), optional `rouser`, `engineIDType 3`. No `exactEngineID` (cz-configd truncates it). SNMPv1/v2c community lines are stripped.
 7. **SSH purge:** stop snmpd, delete leftover persistent `usmUser`, start snmpd so `createUser` recreates the user.
 8. **Walk** in parallel (`WALK_CONCURRENCY`): FQDN then IP, `WALK_*_ATTEMPTS` each. First success wins.
 
@@ -96,7 +96,7 @@ Pushes NTP the Admin UI way (`ntp.servers` on the appliance object) so it surviv
 
 `[1/4]` login, `[2/4]` inventory / exclude. Shows **current NTP from GET** (one sample appliance). **1) Add** (update `key`/`keyType`/`keyNo` if hostname matches, else append) or **2) Overwrite** the whole list.
 
-`[3/4]` PUT `/admin/appliances/{id}` with `ntp: { servers: [ { hostname, keyType?, keyNo?, key? } ] }`. SHA256 keys without `HEX:` get that prefix. GET does not return the secret; put `key` in `credentials.json`.
+`[3/4]` GET appliance, set `ntp.servers`, PUT the same document. Only `ntp` / legacy `ntpServer(s)` plus `site` UUID reshape may differ; otherwise abort. SHA256 keys without `HEX:` get that prefix. GET does not return the secret; put `key` in `credentials.json`.
 
 `[4/4]` SSH `systemctl restart cz-customization.service` (needed so NTP actually applies), wait `NTP_VERIFY_DELAY`, then `chronyc ntpdata` → PASS if the configured hostname or Leap status appears. Report: `reports/ntp-*.json` (hostnames only, no keys).
 
@@ -283,6 +283,9 @@ Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue
 | ACAS banner still hangs **interactive** SSH | Intended. Test: `ssh -T user@host` |
 | ACAS visudo shows no NOPASSWD | Check `cz-config get users/0/nopasswd` and the drop-in |
 | Menu U fails on air-gap | Use **D**, copy `app/vendor/` |
+| Appliance dropped out of a Site | Old bug: 422 retry stripped `site`. Now refuse if site has no UUID; PUT keeps the GET body |
+| SNMP PUT added TCP 161 | No longer injects `tcpPort`. Unexpected diffs abort |
+| Refusing PUT; unexpected field changes | `DEBUG=True` dumps redacted GET/PUT. Only snmpd.conf/enabled (SNMP) or ntp (NTP) may change |
 | Need a flow trace | `DEBUG = True`; optional `# print(f"DEBUG ...")` |
 
 ## Layout

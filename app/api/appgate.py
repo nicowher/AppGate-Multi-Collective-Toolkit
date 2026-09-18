@@ -16,8 +16,9 @@ is never sent to site B (403 / wrong collective).
       cz-configd owns /etc/snmp/snmpd.conf; SSH edits get overwritten.
 
 Why no exactEngineID: cz-configd has truncated type-3 IDs and broken localization.
-SNMP PUTs only id+snmpServer (never site, never a new tcpPort). Full appliance
-PUT is NTP only; site object is collapsed to UUID and is never stripped.
+SNMP: GET full appliance, change only snmpd.conf, PUT the same document.
+Site object → UUID (never stripped). tcpPort is never added. Any other field
+diff refuses the PUT and dumps GET/PUT when DEBUG.
 """
 from core.utils import ensure_package
 
@@ -43,7 +44,6 @@ from config import (
     APPLIANCE_LIST_PAGE,
     APPLIANCE_STATUS_PATH,
     ENGINE_ID_TYPE,
-    DEFAULT_SNMP_PORT,
     LAB_MODE,
     NTP_KEY_HEX_PREFIX,
     NTP_KEY_TYPE_MAP,
@@ -54,6 +54,8 @@ from config import (
     TLS_VERIFY,
     confirm_skip_tls_verify,
 )
+import copy
+import json
 import re
 import sys
 from typing import Any, Dict, List, Optional
@@ -77,6 +79,117 @@ def _disable_tls_verify() -> None:
     _tls_verify = False
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
     requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+
+SNMP_PUT_ALLOWED = ("snmpServer.snmpd.conf", "snmpServer.enabled")
+NTP_PUT_ALLOWED = ("ntp", "ntpServers", "ntpServer")
+# Top-level keys we already know. Unknown GET keys are still PUT unchanged;
+# DEBUG lists them so a new 6.x field is visible without aborting the run.
+APPLIANCE_GET_KNOWN_TOP = frozenset(
+    {
+        "id",
+        "name",
+        "notes",
+        "tags",
+        "created",
+        "updated",
+        "version",
+        "hostname",
+        "site",
+        "networking",
+        "adminInterface",
+        "peerInterface",
+        "clientInterface",
+        "controller",
+        "gateway",
+        "logServer",
+        "logForwarder",
+        "connector",
+        "portal",
+        "metricsAggregator",
+        "connectionBroker",
+        "snmpServer",
+        "ntp",
+        "ntpServer",
+        "ntpServers",
+        "sshServer",
+        "ping",
+        "rsyslogDestinations",
+        "healthcheckServer",
+        "prometheusExporter",
+        "customization",
+        "customizations",
+        "activated",
+        "extraHostnames",
+        "dnsServers",
+        "hosts",
+    }
+)
+
+
+def _log_unknown_appliance_keys(appliance: Dict[str, Any], where: str) -> None:
+    extra = sorted(str(k) for k in appliance if k not in APPLIANCE_GET_KNOWN_TOP)
+    if extra:
+        # print(f"DEBUG get-unknown: {where} extra={extra!r}")
+        if DEBUG:
+            print(
+                f"      DEBUG {where}: unknown GET keys (preserved on PUT): {extra}",
+                file=sys.stderr,
+            )
+
+
+def _redact_appliance_for_debug(obj: Any) -> Any:
+    """Strip snmpd.conf hashes and NTP keys before DEBUG dumps."""
+    data = copy.deepcopy(obj)
+    if not isinstance(data, dict):
+        return data
+    snmp = data.get("snmpServer")
+    if isinstance(snmp, dict) and snmp.get("snmpd.conf"):
+        snmp["snmpd.conf"] = "<redacted snmpd.conf>"
+    ntp = data.get("ntp")
+    if isinstance(ntp, dict):
+        for row in ntp.get("servers") or []:
+            if isinstance(row, dict) and row.get("key"):
+                row["key"] = "<redacted>"
+    return data
+
+
+def _site_uuid_reshape(before: Any, after: Any) -> bool:
+    if not isinstance(before, dict):
+        return False
+    site_id = before.get("id") or before.get("siteId")
+    return bool(site_id) and str(after) == str(site_id)
+
+
+def _changed_paths(before: Any, after: Any, prefix: str = "") -> List[str]:
+    """JSON-pointer-ish list of added/removed/changed paths. Lists compare as one node."""
+    if before == after:
+        return []
+    diffs: List[str] = []
+    if isinstance(before, dict) and isinstance(after, dict):
+        for key in sorted(set(before) | set(after), key=str):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in before:
+                diffs.append(f"+{path}")
+            elif key not in after:
+                diffs.append(f"-{path}")
+            else:
+                diffs.extend(_changed_paths(before[key], after[key], path))
+        return diffs
+    if isinstance(before, list) and isinstance(after, list):
+        if before != after:
+            diffs.append(prefix or ".")
+        return diffs
+    diffs.append(prefix or ".")
+    return diffs
+
+
+def _path_allowed(item: str, allowed: tuple) -> bool:
+    path = item.lstrip("+-")
+    for rule in allowed:
+        if path == rule or path.startswith(rule + "."):
+            return True
+    return False
 
 
 class AppGateClient:
@@ -468,7 +581,11 @@ class AppGateClient:
             timeout=API_TIMEOUT,
         )
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"GET appliance {aid} returned non-object JSON")
+        _log_unknown_appliance_keys(payload, f"GET /appliances/{aid}")
+        return payload
 
     @staticmethod
     def _sanitize_appliance_for_put(appliance: Dict[str, Any]) -> Dict[str, Any]:
@@ -477,29 +594,67 @@ class AppGateClient:
         site = body.get("site")
         if isinstance(site, dict):
             site_id = site.get("id") or site.get("siteId")
-            if site_id:
-                body["site"] = site_id
+            if not site_id:
+                raise RuntimeError(
+                    "Appliance site object has no id; refusing PUT that would drop site"
+                )
+            body["site"] = str(site_id)
         return body
 
     def _put_snmpd_conf(self, appliance: Dict[str, Any], new_conf: str, enabled: bool) -> None:
-        """PUT only snmpServer (snmpd.conf). Do not send site, NICs, or a new tcpPort."""
+        """GET body + snmpd.conf only. Keep site/NICs/tcpPort exactly as retrieved."""
+        original = copy.deepcopy(appliance)
         existing = appliance.get("snmpServer")
         if not isinstance(existing, dict):
             existing = {}
         snmp = dict(existing)
         snmp["enabled"] = enabled
         snmp["snmpd.conf"] = new_conf
-        if existing.get("tcpPort") in (None, "", 0):
-            snmp.pop("tcpPort", None)
-        if existing.get("udpPort") in (None, "", 0):
-            snmp["udpPort"] = DEFAULT_SNMP_PORT
-        self._put_appliance_body(
-            {"id": appliance.get("id"), "snmpServer": snmp},
+        appliance["snmpServer"] = snmp
+        body = self._sanitize_appliance_for_put(appliance)
+        self._assert_put_safe(
+            original,
+            body,
+            allowed=SNMP_PUT_ALLOWED,
             what="SNMP config",
         )
+        self._put_appliance_body(body, what="SNMP config")
 
-    def _put_appliance(self, appliance: Dict[str, Any], *, what: str) -> None:
-        self._put_appliance_body(self._sanitize_appliance_for_put(appliance), what=what)
+    def _assert_put_safe(
+        self,
+        original: Dict[str, Any],
+        body: Dict[str, Any],
+        *,
+        allowed: tuple,
+        what: str,
+    ) -> None:
+        """Refuse PUT if anything outside *allowed* (plus site UUID reshape) changed."""
+        diffs = _changed_paths(original, body)
+        unexpected = []
+        for item in diffs:
+            path = item.lstrip("+-")
+            if path == "site" and _site_uuid_reshape(original.get("site"), body.get("site")):
+                continue
+            if item == "+snmpServer":
+                extra = set((body.get("snmpServer") or {})) - {"enabled", "snmpd.conf"}
+                if extra:
+                    unexpected.append(f"+snmpServer extra={sorted(extra)}")
+                continue
+            if _path_allowed(item, allowed):
+                continue
+            unexpected.append(item)
+        if not unexpected:
+            return
+        # print(f"DEBUG put-safe: what={what!r} unexpected={unexpected!r}")
+        if DEBUG:
+            print(f"      DEBUG {what} PUT original:", file=sys.stderr)
+            print(json.dumps(_redact_appliance_for_debug(original), indent=2, default=str), file=sys.stderr)
+            print(f"      DEBUG {what} PUT body:", file=sys.stderr)
+            print(json.dumps(_redact_appliance_for_debug(body), indent=2, default=str), file=sys.stderr)
+        raise RuntimeError(
+            f"Refusing {what} PUT; unexpected field changes {unexpected}. "
+            "Set DEBUG=True to dump GET/PUT bodies."
+        )
 
     def _put_appliance_body(self, body: Dict[str, Any], *, what: str) -> None:
         url = f"{self.base_url}/appliances/{body.get('id')}"
@@ -507,6 +662,10 @@ class AppGateClient:
             url, headers=self.headers, json=body, verify=_tls_verify, timeout=API_TIMEOUT
         )
         if put_response.status_code != 200:
+            if DEBUG:
+                print(f"      DEBUG {what} PUT HTTP {put_response.status_code}", file=sys.stderr)
+                print(json.dumps(_redact_appliance_for_debug(body), indent=2, default=str), file=sys.stderr)
+                print((put_response.text or "")[:4000], file=sys.stderr)
             body_preview = (put_response.text or "")[:API_ERROR_BODY_PREVIEW]
             hint = ""
             text_l = (put_response.text or "").lower()
@@ -600,6 +759,7 @@ class AppGateClient:
     ) -> List[Dict[str, Any]]:
         """PUT appliance.ntp so cz-configd applies (survives reboot)."""
         appliance = self._get_appliance(appliance_id)
+        original = copy.deepcopy(appliance)
         existing_list = self._ntp_list_from_appliance(appliance)
         desired = [self._ntp_key_for_api(s) for s in servers if self._ntp_hostname(s)]
         if overwrite:
@@ -638,5 +798,12 @@ class AppGateClient:
                 f"      DEBUG ntp PUT ntp.servers={safe!r}",
                 file=sys.stderr,
             )
-        self._put_appliance(appliance, what="NTP servers")
+        body = self._sanitize_appliance_for_put(appliance)
+        self._assert_put_safe(
+            original,
+            body,
+            allowed=NTP_PUT_ALLOWED,
+            what="NTP servers",
+        )
+        self._put_appliance_body(body, what="NTP servers")
         return merged
