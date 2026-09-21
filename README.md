@@ -125,6 +125,15 @@ Double-click the launcher for the menu, or pass a tool: `MultiCollectiveToolkit-
 - SSH to the appliance with sudo
 - AppGate admin API (MFA-exempt local user recommended)
 
+**API Admin Role** (6.7: Privileges = action + target). Scope All, or tags/IDs that cover the objects on the selected appliances. `View` + target **All** works but is broader than needed.
+
+| Action | Target | Needed for |
+| --- | --- | --- |
+| View | Appliance | All API tools (login / inventory) |
+| Edit | Appliance | Menus 1 and 5 (full appliance PUT) |
+| View | Site | Menus 1 and 5 (PUT re-checks `site`) |
+| View | Client Profile | Menus 1 and 5 on **portal** appliances (`portal.profiles[]` are client profile names; missing View → HTTP 422) |
+
 Optional walk backend: Linux `snmp` / `net-snmp-utils`, macOS `brew install net-snmp`, or Windows Net-SNMP. Otherwise walks use `pysnmp`.
 
 ```bash
