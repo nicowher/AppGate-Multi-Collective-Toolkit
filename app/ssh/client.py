@@ -1,7 +1,9 @@
 """Reusable SSH sessions for appliance work.
 
 Password auth first; keyboard-interactive is the fallback some AppGate
-boxes require. Timeouts come from config (SSH_TIMEOUT / SSH_AUTH_TIMEOUT)
+boxes require (allowed_types has keyboard-interactive but not password).
+kbd-int uses Transport, so host keys are verified separately (fingerprint
+printed on TOFU). Timeouts come from config (SSH_TIMEOUT / SSH_AUTH_TIMEOUT)
 so a dead host cannot hang the toolkit. Host-key policy is
 SSH_STRICT_HOST_KEY (lab WarningPolicy / production TOFU: prompt on the
 main thread, then save ~/.ssh/known_hosts). Never input() from a worker.
@@ -14,6 +16,7 @@ except ImportError:
     ensure_package("paramiko", "paramiko")
     import paramiko
 
+import hashlib
 import ipaddress
 import logging
 import os
@@ -237,6 +240,25 @@ class SSHSession:
                 pass
         return None
 
+    def _verify_transport_host_key(self, client, ip: str, remote_key) -> None:
+        """Transport.connect skips SSHClient host-key checks — apply the same policy."""
+        path = _known_hosts_path()
+        known = paramiko.HostKeys()
+        if os.path.isfile(path):
+            try:
+                known.load(path)
+            except OSError:
+                pass
+        name = remote_key.get_name()
+        entry = known.lookup(ip)
+        stored = entry.get(name) if entry is not None else None
+        if stored is not None:
+            if stored != remote_key:
+                self._ssh_fail_kind = "network"
+                raise paramiko.SSHException(f"Host key mismatch for {ip}")
+            return
+        client._policy.missing_host_key(client, ip, remote_key)
+
     def _with_ssh_keyboard_interactive(self, ip: str, fn):
         """Password-auth fallback. TCP connect uses SSH_TIMEOUT so a dead IP cannot hang."""
         def handler(title, instructions, prompt_list):
@@ -259,10 +281,20 @@ class SSHSession:
             transport.banner_timeout = SSH_TIMEOUT
             transport.auth_timeout = SSH_AUTH_TIMEOUT
             transport.start_client(timeout=SSH_TIMEOUT)
+            remote_key = transport.get_remote_server_key()
+            self._verify_transport_host_key(client, ip, remote_key)
             transport.auth_interactive(self.ssh_user, handler)
+            self._ssh_fail_kind = ""
+            self._last_reason = "ok"
             client._transport = transport
             return fn(client)
+        except paramiko.AuthenticationException:
+            self._ssh_fail_kind = "auth"
+            self._last_reason = "auth failed"
+            # print(f"DEBUG ssh: kbd-int auth failed ip={ip!r}")
         except (paramiko.SSHException, OSError, socket.timeout, TimeoutError) as exc:
+            if not self._ssh_fail_kind:
+                self._ssh_fail_kind = "network"
             self._last_reason = self._net_reason(exc)
             self._log(
                 f"{self._tag(ip)} keyboard-interactive {type(exc).__name__}: {exc}",
@@ -449,8 +481,13 @@ class _PromptAddHostKeyPolicy(paramiko.MissingHostKeyPolicy):
     """TOFU: prompt on the main thread only (worker input() deadlocks)."""
 
     def missing_host_key(self, client, hostname, key) -> None:
+        digest = hashlib.sha256(key.asbytes()).hexdigest()
         print(
             f"      SSH host key for {hostname} is not in known_hosts.",
+            file=sys.stderr,
+        )
+        print(
+            f"      {key.get_name()} SHA256:{digest}",
             file=sys.stderr,
         )
         ans = input("      Trust and save this host key? [y/N]: ").strip().lower()

@@ -20,6 +20,7 @@ from config import (
     CREDENTIALS_FILENAME,
     DEBUG,
     LAB_MODE,
+    NTP_WEAK_KEY_TYPES,
     SNMP_MIN_PASSPHRASE_LEN,
     STIG_PASSWORD_MIN_LEN,
     YES_ANSWERS,
@@ -172,6 +173,9 @@ def ensure_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
             print("      At least one NTP hostname is required.", file=sys.stderr)
             continue
         key_type = input("      keyType (e.g. SHA256, empty if none): ").strip()
+        if key_type.replace("-", "").upper() in NTP_WEAK_KEY_TYPES and not LAB_MODE:
+            print("      DISA/CNSA: MD5/SHA1 NTP keys are rejected. Use SHA256.", file=sys.stderr)
+            continue
         key_no = input("      keyNo (empty if none): ").strip()
         key = ""
         if key_type:
@@ -350,7 +354,7 @@ def collective_for_target(target: Any, collectives: List[Dict[str, Any]]) -> Dic
                 return col
         except (TypeError, ValueError):
             continue
-    return collectives[0]
+    raise RuntimeError(f"No collective matching index {idx}")
 
 
 def _prompt_cred_scope(count: int) -> str:

@@ -71,7 +71,7 @@ def _single_walk_hosts(creds: dict, typed: str) -> list:
 
 def _snmp_creds(creds: dict):
     promote_shared_fields(
-        creds, ("snmp_user", "snmp_auth", "snmp_priv", "agip")
+        creds, ("snmp_user", "snmp_auth", "snmp_priv")
     )
     user = _require(
         creds,
@@ -92,11 +92,9 @@ def _snmp_creds(creds: dict):
 def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
     validator = SNMPValidator()
     any_fail = False
-    first = True
     while True:
-        # First pass may use agip from the file; later passes always prompt.
-        source = creds if first else {}
-        first = False
+        # Always prompt. Do not default to Controller agip (that walks the Controller).
+        source = {}
         ip = _require(
             source,
             "agip",
@@ -255,8 +253,10 @@ def main() -> None:
     print("  1) Single IP / FQDN")
     print("  2) Pull appliance list from Controller(s)")
     choice = ""
-    while choice not in ("1", "2"):
-        choice = input("Select 1 or 2: ").strip()
+    while choice not in ("1", "2", "q"):
+        choice = input("Select 1, 2, or Q: ").strip().lower()
+    if choice == "q":
+        return
     if choice == "1":
         user, auth, priv = _snmp_creds(creds)
         sys.exit(_walk_single(creds, user, auth, priv))

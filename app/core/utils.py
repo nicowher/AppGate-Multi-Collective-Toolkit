@@ -291,6 +291,16 @@ def load_credentials(path: str) -> Dict[str, Any]:
             data = json.load(fh)
         if not isinstance(data, dict):
             return {}
+        try:
+            mode = os.stat(path).st_mode & 0o077
+            if mode and os.name == "posix":
+                print(
+                    f"WARNING: {path} is group/world-readable (mode {mode:03o}). "
+                    "chmod 600 this file.",
+                    file=sys.stderr,
+                )
+        except OSError:
+            pass
         # print(f"DEBUG creds: loaded keys={list(data)} from {path}")
         if DEBUG:
             print(f"      DEBUG creds: loaded {path} keys={sorted(data)}", file=sys.stderr)
@@ -318,7 +328,7 @@ def is_yes(answer: str, *, default_yes: bool = False) -> bool:
 def write_json_report(prefix: str, payload: Dict[str, Any]) -> None:
     """Write reports/<prefix>-<utc>.json (mode 600). Console dump only if DEBUG.
 
-    Reports never include passwords, tokens, or full localized USM keys.
+    Callers must omit passwords, tokens, and Kul hex. This function dumps payload as-is.
     """
     from datetime import datetime, timezone
 

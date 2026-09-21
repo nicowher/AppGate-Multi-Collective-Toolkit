@@ -4,7 +4,8 @@ import warnings
 # ============================================================================
 # SNMPv3 Algorithm Configuration
 # ============================================================================
-# Why SHA-256 + AES-256: CNSA 2.0 / DISA baseline for SNMPv3 authPriv.
+# Why SHA-256 + AES-256: DISA SNMP STIG / CNSA 1.0 baseline for SNMPv3 authPriv.
+# CNSA 2.0 hash profile is SHA-384/SHA-512 — change HASH/AUTH/PRIV together if required.
 # All three paths must use the same trio or walks fail with digest errors:
 #   1. createUser line (api/appgate.py)
 #   2. RFC 3414 localization (core/snmp_hashgen.py)
@@ -21,7 +22,7 @@ SNMP_PRIV_PROTOCOL = "AES256"
 # CNSA 2.0 / DISA: do not localize with MD5 or SHA-1.
 ALLOWED_HASH_ALGOS = ("sha256", "sha384", "sha512")
 # RFC 3414 floor is 8. DISA SNMP STIG often wants 15 — raise here for those sites.
-# Floor 8 (RFC 3414). LAB_MODE=False at bottom raises this to STIG (DISA).
+# Floor 8 (RFC 3414). LAB_MODE at bottom overwrites SNMP_MIN_PASSPHRASE_LEN (STIG=15 when off).
 SNMP_MIN_PASSPHRASE_LEN_LAB = 8
 SNMP_MIN_PASSPHRASE_LEN_STIG = 15
 SNMP_MIN_PASSPHRASE_LEN = SNMP_MIN_PASSPHRASE_LEN_LAB
@@ -139,6 +140,8 @@ WRITE_RUN_REPORT = True
 REPORT_FILE_MODE = 0o600
 # When True: first pass is dry-run without asking. Prompt can still enable dry-run when False.
 DRY_RUN = False
+# When True: menu 1 live push skips step 8 walk. Menu 3 is unchanged.
+SKIP_CREDENTIAL_WALK = False
 # Directory for run-*.json / dryrun-*.json / walk-*.json (under repo root).
 REPORTS_DIRNAME = "reports"
 SNMPD_STOP_RETRIES = 5
@@ -163,7 +166,7 @@ ENGINE_ID_MAX_OCTETS = 32
 # Accepted answers for yes/no prompts (Add another Controller, Walk another IP).
 YES_ANSWERS = ("y", "yes")
 NO_ANSWERS = ("n", "no")
-# CLI menu first-arg aliases → 1 configure | 2 acas | 3 walk | 4 cz-password | d deps | u pip-upgrade | q quit
+# CLI menu first-arg aliases → 1 SNMP | 2 acas | 3 walk | 4 cz-password | 5 ntp | c settings | d deps | u pip-upgrade | q quit
 MENU_CHOICE_ALIASES = {
     "1": "1",
     "configure": "1",
@@ -217,6 +220,7 @@ APPLIANCE_SKIP_STATUS = (
 # Safe for snmpd.conf lines and remote sed (DISA: no metacharacters).
 SNMP_NAME_RE = r"^[A-Za-z0-9_.-]+$"
 # Keys searched in GET /appliances/status JSON (not metrics like volume).
+HEALTH_STATUS_MAX_DEPTH = 4
 HEALTH_STATUS_KEYS = (
     "status",
     "health",
@@ -246,7 +250,7 @@ APPLIANCE_FUNCTION_NAMES = (
     "connectionBroker",
 )
 SNMP_WALK_OID = "1.3.6.1.2.1.1"
-SNMPWALK_PROBE_TIMEOUT = 5
+SNMPWALK_PROBE_TIMEOUT = 4
 SNMPWALK_RETRIES = 1
 CREDENTIALS_FILENAME = "credentials.json"
 
@@ -265,14 +269,13 @@ API_AUTH_FAIL_CODES = (401, 403)
 # ============================================================================
 # Timeouts (seconds)
 # ============================================================================
-# Keep these reasonable — too long and failures feel sluggish,
-# too short and legitimate operations time out on slow networks.
-SSH_TIMEOUT = 10
-SSH_AUTH_TIMEOUT = 10
+# WAN-safe: 8s covers satellite/DoD RTT; 3s prime skips dead NICs.
+SSH_TIMEOUT = 8
+SSH_AUTH_TIMEOUT = 8
 # Host-key prime only (skip dead overlay IPs quickly).
 SSH_PRIME_TIMEOUT = 3
 # cz-configd restart (ACAS harden) can outlast a normal SSH command.
-ACAS_SSH_TIMEOUT = 90
+ACAS_SSH_TIMEOUT = 60
 # ACAS unharden is SSH overlay only (API would persist STIG-hostile state).
 ACAS_SUDOERS_DROPIN = "/etc/sudoers.d/cz-acas-scan"
 ACAS_SCAP_HOME = "/home/svc-acas"
@@ -285,8 +288,8 @@ ACAS_SUDOERS_FILE = "/etc/sudoers"
 ACAS_SUDOERS_MARK_BEGIN = "# BEGIN ACAS-SCAN"
 ACAS_SUDOERS_MARK_END = "# END ACAS-SCAN"
 ACAS_MODES = ("unharden", "deharden", "harden", "reharden")
-API_TIMEOUT = 15
-SNMPWALK_TIMEOUT = 15
+API_TIMEOUT = 12
+SNMPWALK_TIMEOUT = 8
 SNMPWALK_DETECT_TIMEOUT = 1
 SNMPWALK_HELP_TIMEOUT = 3
 
@@ -295,7 +298,7 @@ SNMPWALK_HELP_TIMEOUT = 3
 # ============================================================================
 # The appliance SNMP daemon needs time to reload after config push.
 # A brief delay + retry tolerance handles this without being excessive.
-VALIDATION_RETRY_DELAY = 3
+VALIDATION_RETRY_DELAY = 2
 # Step 8 / SNMP-Walk: attempts per FQDN then per IP (NAT: name often fails UDP).
 WALK_FQDN_ATTEMPTS = 2
 WALK_IP_ATTEMPTS = 2
@@ -305,7 +308,7 @@ WALK_IP_ATTEMPTS = 2
 # ============================================================================
 # After pushing config, wait this long before validating.
 # The appliance's cz-configd must regenerate the running config.
-SNMP_RELOAD_DELAY = 5
+SNMP_RELOAD_DELAY = 4
 
 # ============================================================================
 # Package Install Timeouts (seconds)
@@ -337,7 +340,7 @@ STIG_PASSWORD_MIN_LEN = SNMP_MIN_PASSPHRASE_LEN_STIG
 # Pause after cz-config set so SSH login-verify uses the new hash.
 CZ_PASSWORD_VERIFY_DELAY = 2
 NTP_CUSTOMIZATION_UNIT = "cz-customization.service"
-NTP_VERIFY_DELAY = 5
+NTP_VERIFY_DELAY = 3
 # 6.7 ntp.servers[].key: SHA256 values without this prefix get it prepended.
 NTP_KEY_HEX_PREFIX = "HEX:"
 # CNSA 2.0 / DISA: reject these NTP MAC algorithms when LAB_MODE=False.

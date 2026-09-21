@@ -125,7 +125,12 @@ class SNMPEngineFetcher(SSHSession):
                         check=False,
                     )
             if leftover.strip():
-                print(f"      usmUser still present after purge:\n{leftover}", file=sys.stderr)
+                n_left = len([ln for ln in leftover.splitlines() if ln.strip()])
+                print(
+                    f"      usmUser still present after purge ({n_left} line(s); keys redacted)",
+                    file=sys.stderr,
+                )
+                # print(f"DEBUG step7: leftover usmUser redacted count={n_left}")
                 self._start_snmpd(client)
                 return False
             print(
@@ -185,7 +190,12 @@ class SNMPEngineFetcher(SSHSession):
         else:
             self._log(f"{tag}: reading oldEngineID (no snmpd restart)")
 
-        raw = self._sudo(client, f"grep -E '^oldEngineID' {SNMP_PERSISTENT_CONF} | tail -n 1")
+        raw = self._sudo(
+            client,
+            f"grep -hE '^oldEngineID' {SNMP_PERSISTENT_CONF} "
+            f"{SNMP_PERSISTENT_CONF_ALT} 2>/dev/null | tail -n 1",
+            check=False,
+        )
         match = OLD_ENGINE_RE.search(raw or "")
         if not match:
             self._log(

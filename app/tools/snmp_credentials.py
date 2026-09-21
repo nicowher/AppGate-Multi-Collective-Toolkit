@@ -32,17 +32,17 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from api.appgate import AppGateClient
+from api.appgate import AppGateClient, AppliancePutError
 from config import (
     APPGATE_API_VERSION,
     DEBUG,
     DRY_RUN,
+    SKIP_CREDENTIAL_WALK,
     PRINT_ESXI_KEYS,
     ENGINE_ID_TYPE,
     ETH_IFACE,
     SNMP_AUTH_PROTOCOL,
     SNMP_HASH_ALGO,
-    SNMP_MIN_PASSPHRASE_LEN,
     SNMP_NAME_RE,
     SNMP_PRIV_PROTOCOL,
     SNMP_RELOAD_DELAY,
@@ -77,16 +77,16 @@ def _ok(targets: List[Target]) -> List[Target]:
     return [t for t in targets if t.status != "failed"]
 
 
-def _fail(target: Target, message: str) -> None:
+def _fail(target: Target, message: str, code: str = "E09") -> None:
     """Mark one appliance failed and keep going (fail-soft)."""
     target.status = "failed"
     target.error = message
     print_error(
-        "E09",
+        code,
         f"{target.label()}: {message}",
         "This box is skipped; others continue.",
         "SSH: after FQDN+IP fail, Try a new password, or check ssh_username/password.",
-        "Engine ID: need engineIDType 3, eth0 MAC, sudo on the appliance.",
+        f"Engine ID: need engineIDType 3, {ETH_IFACE} MAC, sudo on the appliance.",
         "Walk/digest fail: leftover usmUser — re-run live so step 7 can purge.",
     )
 
@@ -113,6 +113,8 @@ def _api_by_collective(
         for target in by_col[col]:
             try:
                 worker(target, client)
+            except AppliancePutError as exc:
+                _fail(target, str(exc), code="E08")
             except Exception as exc:
                 _fail(target, str(exc))
 
@@ -329,6 +331,7 @@ def _run_phases_3_to_8(
     dry_run=False: mutate via API + SSH, then prove with a walk.
     """
     print("\n[3/8] Pinning engineIDType via API...")
+    # print(f"DEBUG step3: dry_run={dry_run} n={len(_ok(selected))}")
     if dry_run:
         for target in _ok(selected):
             print(f"      {target.label()}: would set engineIDType {ENGINE_ID_TYPE}")
@@ -341,6 +344,7 @@ def _run_phases_3_to_8(
         time.sleep(SNMP_RELOAD_DELAY)
 
     print(f"\n[4/8] SSH engine ID (up to {SSH_CONCURRENCY} at a time)...")
+    # print(f"DEBUG step4: restart_snmpd={not dry_run}")
     prime_target_host_keys(_ok(selected), collectives)
 
     def _ssh_engine(target: Target) -> None:
@@ -425,9 +429,13 @@ def _run_phases_3_to_8(
         run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 
     print(f"\n[8/8] Validating SNMP walks (up to {WALK_CONCURRENCY} at a time)...")
-    if dry_run:
+    # print(f"DEBUG step8: dry_run={dry_run} skip={SKIP_CREDENTIAL_WALK}")
+    if dry_run or SKIP_CREDENTIAL_WALK:
         for target in _ok(selected):
-            print(f"      {target.label()}: would walk {target.walk_endpoints()}")
+            if SKIP_CREDENTIAL_WALK:
+                print(f"      {target.label()}: skipped (SKIP_CREDENTIAL_WALK)")
+            else:
+                print(f"      {target.label()}: would walk {target.walk_endpoints()}")
             target.walk_ok = None
     else:
         time.sleep(SNMP_RELOAD_DELAY)
@@ -472,7 +480,9 @@ def _print_summary(
             current_col = target.collective
             print(f"  --- collective {current_col} ---")
         state = target.status.upper()
-        extra = target.engine_id or target.error
+        extra = target.error
+        if DEBUG:
+            extra = target.engine_id or target.error
         host = target.ssh_fqdn or target.ssh_ip
         print(f"  [{state:<7}] {target.label():<32} {host:<22} {extra}")
         if PRINT_ESXI_KEYS and target.auth_hash and target.status in ("ok", "preview"):
@@ -519,6 +529,7 @@ def _build_run_report(
             "ssh_concurrency": SSH_CONCURRENCY,
             "reload_delay": SNMP_RELOAD_DELAY,
             "dry_run": dry_run,
+            "skip_credential_walk": SKIP_CREDENTIAL_WALK,
         },
         "inventory_count": len(inventory),
         "selected_count": len(selected),
@@ -539,7 +550,7 @@ def _build_run_report(
             "ssh_endpoints": t.ssh_endpoints(),
             "functions": t.functions,
             "health": t.health,
-            "engine_id": t.engine_id,
+            "engine_id": t.engine_id if DEBUG else "",
             "engine_id_len": len(t.engine_id),
             "auth_hash_len": len(t.auth_hash),
             "priv_hash_len": len(t.priv_hash),
@@ -552,7 +563,7 @@ def _build_run_report(
             entry["planned_actions"] = [
                 f"engineIDType {ENGINE_ID_TYPE}",
                 f"deleteUser {user}",
-                f"createUser {user} {SNMP_AUTH_PROTOCOL}/AES (localized)",
+                f"createUser {user} {SNMP_AUTH_PROTOCOL}/{SNMP_PRIV_PROTOCOL} (localized)",
                 f"purge persistent usmUser {user}",
                 f"walk {t.walk_endpoints()}",
             ]

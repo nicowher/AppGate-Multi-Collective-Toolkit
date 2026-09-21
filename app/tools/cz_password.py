@@ -3,8 +3,10 @@
 Reached via ``python app/main.py 4`` or launcher menu option 4.
 
 Uses current ssh_password to log in. Sets users/0/encrypted-password
-(openssl passwd -6) and users/0/nopasswd false, then SSH-verifies the
-new password. Does not rewrite credentials.json.
+(openssl passwd -6 / SHA-512 crypt — AppGate GUI/cz-configd default)
+and users/0/nopasswd false, then SSH-verifies the new password.
+Does not rewrite credentials.json so other tools keep using ssh_password
+until the operator updates the file.
 """
 import os
 import sys

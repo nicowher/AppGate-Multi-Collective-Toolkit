@@ -44,7 +44,7 @@ class HashgenTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.gen._localize("short", "8000000001020304", "sha256")
         with self.assertRaises(ValueError):
-            self.gen.generate_hashes("user", "authpass", "privpass", "8000000001020304")
+            self.gen.generate_hashes("user", "short", "short", "8000000001020304")
 
     def test_0x_prefix_same_as_bare(self) -> None:
         a = self.gen._localize("authpass", "8000000001020304", "sha256")

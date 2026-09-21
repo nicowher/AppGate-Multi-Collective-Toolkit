@@ -10,7 +10,7 @@ shared by SNMP credentials and walk.
                             public IPv4, IPv6). Credentials agip only if this box
                             is the login Controller. Never peer-interface hostname
                             (that is another appliance).
-  Target.walk_endpoints() → same order as ssh_endpoints().
+  Target.walk_endpoints() → ssh_ok_host only after SSH; else same as ssh_endpoints().
 
 Health from GET /appliances/status (6.7 labels). error is still configurable;
 offline/not active/warning are skipped so we do not push to unreachable boxes.
@@ -20,7 +20,12 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import APPLIANCE_FUNCTION_NAMES, HEALTH_STATUS_KEYS, INVENTORY_NAME_WIDTH
+from config import (
+    APPLIANCE_FUNCTION_NAMES,
+    HEALTH_STATUS_KEYS,
+    HEALTH_STATUS_MAX_DEPTH,
+    INVENTORY_NAME_WIDTH,
+)
 from core.utils import expand_exclude_tokens
 
 
@@ -50,6 +55,12 @@ class Target:
         """Human handle: 1.ctrl-a (collective index + hostname)."""
         host = self.hostname or self.ssh_fqdn or self.ssh_ip or self.appliance_id
         return f"{self.collective}.{host}"
+
+    def __repr__(self) -> str:
+        return (
+            f"Target({self.label()!r}, status={self.status!r}, "
+            f"engine_len={len(self.engine_id)})"
+        )
 
     def ssh_endpoints(self) -> List[str]:
         """This appliance's FQDN, then its IPs (private v4, public v4, v6).
@@ -89,8 +100,10 @@ class Target:
         return self.ssh_ip == self.collective_ip
 
     def walk_endpoints(self) -> List[str]:
-        """Same order as ssh_endpoints(): FQDN first, then IP."""
-        # print(f"DEBUG walk_endpoints: {self.ssh_endpoints()!r}")
+        """Use the SSH-working address when set; otherwise FQDN then IPs."""
+        # print(f"DEBUG walk_endpoints: pin={self.ssh_ok_host!r}")
+        if self.ssh_ok_host:
+            return [self.ssh_ok_host]
         return self.ssh_endpoints()
 
 
@@ -107,13 +120,16 @@ def appliance_functions(appliance: Dict[str, Any]) -> List[str]:
 
 
 def _first_status_string(obj: Any, depth: int = 0) -> str:
-    """Pull a human status string from nested /appliances/status JSON."""
-    if depth > 4 or obj is None:
+    """Pull appliance health only from HEALTH_STATUS_KEYS.
+
+    Do not recurse into arbitrary nested dicts (disk/volume status would
+    skip a healthy box via APPLIANCE_SKIP_STATUS).
+    """
+    if depth > HEALTH_STATUS_MAX_DEPTH or obj is None:
         return ""
     if isinstance(obj, str) and obj.strip():
         return obj.strip()
     if isinstance(obj, dict):
-        # Prefer explicit health fields (6.7 UI: Healthy/Busy/Warning/Error/Offline).
         for key in HEALTH_STATUS_KEYS:
             value = obj.get(key)
             if isinstance(value, str) and value.strip():
@@ -122,16 +138,7 @@ def _first_status_string(obj: Any, depth: int = 0) -> str:
                 nested = _first_status_string(value, depth + 1)
                 if nested:
                     return nested
-        for value in obj.values():
-            if isinstance(value, (dict, list)):
-                nested = _first_status_string(value, depth + 1)
-                if nested:
-                    return nested
-    if isinstance(obj, list):
-        for item in obj:
-            nested = _first_status_string(item, depth + 1)
-            if nested:
-                return nested
+        # print(f"DEBUG health: no HEALTH_STATUS_KEYS at depth={depth} keys={list(obj)}")
     return ""
 
 
@@ -175,7 +182,7 @@ def _normalize_health_label(raw: str) -> str:
     if text in aliases:
         return aliases[text]
     for key, label in aliases.items():
-        if key in text:
+        if key == text or text.startswith(key + " ") or text.endswith(" " + key):
             return label
     return text[:24]
 

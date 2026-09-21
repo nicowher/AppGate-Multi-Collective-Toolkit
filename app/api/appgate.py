@@ -17,8 +17,10 @@ is never sent to site B (403 / wrong collective).
 
 Why no exactEngineID: cz-configd has truncated type-3 IDs and broken localization.
 SNMP: GET full appliance, change only snmpd.conf, PUT the same document.
-Site object → UUID (never stripped). tcpPort is never added. Any other field
-diff refuses the PUT and dumps GET/PUT when DEBUG.
+Site object → UUID (never stripped). tcpPort is never added. Unknown GET
+top-level keys are preserved on PUT (DEBUG lists them). Portal PUT may 422
+if the API user lacks Client Profile View (`portal.profiles[]`). Any other
+field diff refuses the PUT and dumps GET/PUT when DEBUG.
 """
 from core.utils import ensure_package
 
@@ -55,6 +57,7 @@ from config import (
     confirm_skip_tls_verify,
 )
 import copy
+import ipaddress
 import json
 import re
 import sys
@@ -67,6 +70,11 @@ from core.inventory import (
     appliance_hosts,
     is_selectable,
 )
+from core.utils import print_error
+
+
+class AppliancePutError(RuntimeError):
+    """GET/PUT guard or Controller rejected the appliance document (E08)."""
 
 _tls_verify = TLS_VERIFY
 if not _tls_verify:
@@ -218,7 +226,13 @@ class AppGateClient:
 
     def _set_endpoint(self, host: str) -> None:
         self.agip = host
-        self.base_url = f"https://{host}:{APPGATE_ADMIN_PORT}{APPGATE_ADMIN_PREFIX}"
+        h = host
+        try:
+            ipaddress.IPv6Address(host)
+            h = f"[{host}]"
+        except ValueError:
+            pass
+        self.base_url = f"https://{h}:{APPGATE_ADMIN_PORT}{APPGATE_ADMIN_PREFIX}"
 
     def login(self, username: str, password: str, provider: Optional[str] = None) -> str:
         """Step 1: POST /admin/login. FQDN first; IP if connect/HTTP fails (not 401/403)."""
@@ -277,13 +291,21 @@ class AppGateClient:
                 )
                 last_connect_error = RuntimeError(f"HTTP {response.status_code} from {host}")
                 continue
-            data = response.json()
+            # print(f"DEBUG login: host={host!r} status={response.status_code}")
+            try:
+                data = response.json()
+            except ValueError:
+                raise RuntimeError(
+                    f"Login returned non-JSON (HTTP {response.status_code}): "
+                    f"{(response.text or '')[:LOGIN_BODY_PREVIEW]}"
+                )
+            if not isinstance(data, dict):
+                raise RuntimeError("Login JSON was not an object")
             token = data.get("token")
             if not token:
-                body_preview = (response.text or "")[:LOGIN_BODY_PREVIEW]
                 raise ValueError(
-                    f"Login response did not contain an API token. "
-                    f"HTTP {response.status_code}. Response body: {body_preview}"
+                    "Login response did not contain an API token. "
+                    f"HTTP {response.status_code}."
                 )
             self.headers["Authorization"] = f"Bearer {token}"
             if host != self.fqdn and self.fqdn:
@@ -398,16 +420,28 @@ class AppGateClient:
             )
             if response.status_code not in (200, 206):
                 response.raise_for_status()
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError:
+                break
             body_range = ""
             if isinstance(payload, list):
                 chunk = payload
             elif isinstance(payload, dict):
-                chunk = payload.get("data", [])
+                chunk = payload.get("data")
                 body_range = str(payload.get("range") or "")
             else:
                 chunk = []
+            if not isinstance(chunk, list):
+                chunk = []
+            # print(f"DEBUG paged_get: path={path} start={start} n={len(chunk)}")
+            if not chunk:
+                break
+            if items and chunk and items[0] == chunk[0]:
+                break
             items.extend(chunk)
+            if len(items) >= APPLIANCE_LIST_MAX:
+                return items[:APPLIANCE_LIST_MAX]
             total = None
             if "/" in body_range:
                 try:
@@ -415,7 +449,7 @@ class AppGateClient:
                 except ValueError:
                     total = None
             if total is not None:
-                if len(items) >= total or not chunk:
+                if len(items) >= total:
                     break
                 start = len(items)
                 continue
@@ -435,10 +469,17 @@ class AppGateClient:
             timeout=API_TIMEOUT,
         )
         response.raise_for_status()
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError:
+            raise RuntimeError("GET /appliances returned non-JSON")
         if isinstance(payload, list):
             return payload
-        chunk = payload.get("data", [])
+        if not isinstance(payload, dict):
+            return []
+        chunk = payload.get("data")
+        if not isinstance(chunk, list):
+            chunk = []
         body_range = str(payload.get("range") or "")
         if "/" in body_range:
             try:
@@ -651,13 +692,16 @@ class AppGateClient:
             print(json.dumps(_redact_appliance_for_debug(original), indent=2, default=str), file=sys.stderr)
             print(f"      DEBUG {what} PUT body:", file=sys.stderr)
             print(json.dumps(_redact_appliance_for_debug(body), indent=2, default=str), file=sys.stderr)
-        raise RuntimeError(
+        raise AppliancePutError(
             f"Refusing {what} PUT; unexpected field changes {unexpected}. "
             "Set DEBUG=True to dump GET/PUT bodies."
         )
 
     def _put_appliance_body(self, body: Dict[str, Any], *, what: str) -> None:
-        url = f"{self.base_url}/appliances/{body.get('id')}"
+        aid = body.get("id")
+        if not aid:
+            raise AppliancePutError(f"Refusing {what} PUT; appliance id missing")
+        url = f"{self.base_url}/appliances/{aid}"
         put_response = requests.put(
             url, headers=self.headers, json=body, verify=_tls_verify, timeout=API_TIMEOUT
         )
@@ -665,11 +709,16 @@ class AppGateClient:
             if DEBUG:
                 print(f"      DEBUG {what} PUT HTTP {put_response.status_code}", file=sys.stderr)
                 print(json.dumps(_redact_appliance_for_debug(body), indent=2, default=str), file=sys.stderr)
-                print((put_response.text or "")[:4000], file=sys.stderr)
+                print((put_response.text or "")[:API_ERROR_BODY_PREVIEW], file=sys.stderr)
             body_preview = (put_response.text or "")[:API_ERROR_BODY_PREVIEW]
             hint = ""
             text_l = (put_response.text or "").lower()
-            if put_response.status_code == 422 and "site" in text_l:
+            if put_response.status_code == 422 and "portal.profiles" in text_l:
+                hint = (
+                    " Hint: Admin Role needs View on Client Profile "
+                    "(portal.profiles[] are client profile names)."
+                )
+            elif put_response.status_code == 422 and "site" in text_l:
                 hint = (
                     " Hint: this API user can View the appliance but may lack "
                     "Appliance Edit and/or Site access. In Admin UI check "
@@ -677,10 +726,11 @@ class AppGateClient:
                 )
             elif put_response.status_code in (401, 403):
                 hint = (
-                    " Hint: check Admin Role privileges (Appliance View + Edit) "
+                    " Hint: check Admin Role privileges (Appliance View + Edit, "
+                    "Site View, Client Profile View on portals) "
                     "for this Controller login."
                 )
-            raise RuntimeError(
+            raise AppliancePutError(
                 f"Failed to update {what} (HTTP {put_response.status_code}): "
                 f"{body_preview}{hint}"
             )
@@ -711,6 +761,10 @@ class AppGateClient:
             except (TypeError, ValueError):
                 out["keyNo"] = key_no
         if key:
+            if not key_type and not LAB_MODE:
+                raise ValueError(
+                    f"NTP key set but keyType empty for {host}; DISA requires SHA256"
+                )
             compact = (out.get("keyType") or key_type).replace("-", "").upper()
             prefix = NTP_KEY_HEX_PREFIX
             if compact == "SHA256" and not key.upper().startswith(prefix.upper()):
@@ -736,6 +790,10 @@ class AppGateClient:
             return raw["servers"]
         if isinstance(raw, list):
             return raw
+        for key in ("ntpServers", "ntpServer"):
+            legacy = appliance.get(key)
+            if isinstance(legacy, list):
+                return legacy
         return []
 
     def peek_ntp(self, appliance_id: str) -> List[str]:

@@ -88,9 +88,10 @@ class SNMPHashGenerator:
                 f"SNMP passphrase must be at least {SNMP_MIN_PASSPHRASE_LEN_LAB} characters (RFC 3414)"
             )
         digest = getattr(hashlib, hash_algo)
-        # Repeat passphrase to exactly 1 MiB, then hash → Ku.
-        expanded = (passphrase * ((RFC3414_KDF_LEN // len(passphrase)) + 1))[:RFC3414_KDF_LEN]
-        ku = digest(expanded.encode("utf-8")).digest()
+        # Username is not an input to Kul (RFC 3414). Repeat passphrase octets to 1 MiB → Ku.
+        pw = passphrase.encode("utf-8")
+        expanded = (pw * ((RFC3414_KDF_LEN // len(pw)) + 1))[:RFC3414_KDF_LEN]
+        ku = digest(expanded).digest()
         engine = _engine_id_bytes(engine_id)
         # Localized key Kul = H(Ku || engineID || Ku).
         return digest(ku + engine + ku).hexdigest()

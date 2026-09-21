@@ -45,7 +45,7 @@ Configures **authPriv** SNMPv3 USM on selected appliances so a scanner (e.g. ESX
 5. **Localize** auth/priv in-process (RFC 3414 SHA-256) per engine ID. Uses that collective’s `snmp_*` if set. Prints ESXi `user/Kul/Kul/priv` when `PRINT_ESXI_KEYS` (follows `LAB_MODE`).
 6. **Push** via Controller: same guarded PUT as step 3 with `deleteUser`, `createUser` (localized `-l 0x…`), optional `rouser`, `engineIDType 3`. No `exactEngineID` (cz-configd truncates it). SNMPv1/v2c community lines are stripped.
 7. **SSH purge:** stop snmpd, delete leftover persistent `usmUser`, start snmpd so `createUser` recreates the user.
-8. **Walk** in parallel (`WALK_CONCURRENCY`): FQDN then IP, `WALK_*_ATTEMPTS` each. First success wins.
+8. **Walk** in parallel (`WALK_CONCURRENCY`): the SSH-working address only (`ssh_ok_host`). `WALK_*_ATTEMPTS` on that one host. `SKIP_CREDENTIAL_WALK` skips this step on dry-run and live (menu 3 unchanged). Engine ID hex is console/report only when `DEBUG=True`.
 
 After a dry-run preview: **Push config to these appliances now?** re-runs 3–8 live. Report: `reports/run-*.json` or `dryrun-*.json`.
 
@@ -70,10 +70,10 @@ Report: `reports/acas-unharden-*.json` / `acas-harden-*.json`.
 
 Validate-only: **no SSH to appliances and no config push.** Confirms authPriv with current `snmp_*`.
 
-- **1) Single IP / FQDN** — walk that host (then *Walk another?*). SNMP secrets only; **no SSH**. If `snmp_*` / `agip` exist on every collective and not at top-level, they are used without a global prompt.
-- **2) Pull from Controller(s)** — `[1/3]` login, `[2/3]` inventory / exclude, `[3/3]` parallel walks (`WALK_CONCURRENCY`). API secrets for inventory; **no SSH**. Health from `GET /admin/appliances/status` (often `n/a`).
+- **1) Single IP / FQDN** — always prompted (never defaults to Controller `agip`). SNMP secrets only; **no SSH**. Then *Walk another?*. No `walk-*.json` for this path.
+- **2) Pull from Controller(s)** — `[1/3]` login, `[2/3]` inventory / exclude, `[3/3]` parallel walks (`WALK_CONCURRENCY`). API secrets for inventory; **no SSH**. Health from `GET /admin/appliances/status` (often `n/a`). Report: `reports/walk-*.json`.
 
-Each host: FQDN then IP, `WALK_FQDN_ATTEMPTS` / `WALK_IP_ATTEMPTS`. pysnmp if Net-SNMP is not on PATH. Report: `reports/walk-*.json`.
+Each inventory host: FQDN then IP, `WALK_FQDN_ATTEMPTS` / `WALK_IP_ATTEMPTS`. pysnmp if Net-SNMP is not on PATH.
 
 ## 4) Update cz SSH password
 
@@ -98,11 +98,11 @@ Pushes NTP the Admin UI way (`ntp.servers` on the appliance object) so it surviv
 
 `[3/4]` GET appliance, set `ntp.servers`, PUT the same document. Only `ntp` / legacy `ntpServer(s)` plus `site` UUID reshape may differ; otherwise abort. SHA256 keys without `HEX:` get that prefix. GET does not return the secret; put `key` in `credentials.json`.
 
-`[4/4]` SSH `systemctl restart cz-customization.service` (needed so NTP actually applies), wait `NTP_VERIFY_DELAY`, then `chronyc ntpdata` → PASS if the configured hostname or Leap status appears. Report: `reports/ntp-*.json` (hostnames only, no keys).
+`[3/4]` dry-run prompt, then GET/PUT. `[4/4]` SSH `systemctl restart cz-customization.service` (needed so NTP actually applies), wait `NTP_VERIFY_DELAY`, then `chronyc ntpdata` → PASS only if a configured hostname appears. Report: `reports/ntp-*.json` (hostnames only, no keys).
 
 ## C) Configure
 
-Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, SSH/walk timeouts, concurrency, retries. Enter keeps the current value; **S** writes the file; **Q** cancels. `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` follow `LAB_MODE`. If a tool already ran this session, restart the launcher so every import sees the new values.
+Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, `SKIP_CREDENTIAL_WALK`, SSH/walk timeouts, concurrency, retries. Enter keeps the current value; **S** writes the file atomically; **Q** cancels. Flipping `LAB_MODE` off→on requires confirm (STIG deviation). `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` follow `LAB_MODE`. If a tool already ran this session, restart the launcher so every import sees the new values.
 
 ## D / U) Dependencies
 
@@ -173,13 +173,13 @@ A one-controller file (no `collectives[]`, just top-level `fqdn`/`agip`) still w
 ```json
 {
   "ssh_username": "cz",
-  "ssh_password": "sshpass",
+  "ssh_password": "sshpass-example-15",
   "ssh_password_new": "",
   "api_username": "api-shared",
   "api_password": "...",
   "snmp_user": "myuser",
-  "snmp_auth": "authpass",
-  "snmp_priv": "privpass",
+  "snmp_auth": "authpass-example15",
+  "snmp_priv": "privpass-example15",
   "rouser": "readonlyuser",
   "mibs": ["SNMPv2-MIB"],
   "ntp_servers": [
@@ -215,7 +215,7 @@ Applies mainly to **menu 1** (SNMP) and **menu 4** (cz password).
 **Known deviations (`app/config.py`):**
 
 - `LAB_MODE=False`: TLS on, SSH TOFU, no ESXi Kul dump, SNMP passphrase ≥15, STIG cz password on. Set `LAB_MODE=True` only in lab.
-- `DEBUG` is **False** (do not dump engine IDs / inventory to the console in production).
+- `DEBUG` is **False** (engine IDs stay off the console and out of reports in production).
 - AppGate `createUser` stores a vendor priv OID that is still AES-256 CFB.
 
 ## Tunables (`app/config.py`)
@@ -227,6 +227,7 @@ Three switches people actually flip:
 | `LAB_MODE` | `False` | **Security posture (keep off in production).** `True`: skip TLS verify, WarningPolicy SSH keys, print ESXi Kul, SNMP passphrase min 8, skip STIG cz-password check. `False`: verify TLS (prompt after cert fail), prompt/save SSH host keys, hide Kul, SNMP min 15, STIG cz password on. |
 | `DEBUG` | `False` | **Console noise (keep off in production).** `True`: step traces, full JSON dump, pysnmp CFB warning, MAC/oldEngineID lines. Does **not** change TLS, SSH keys, or STIG. Unrelated to `LAB_MODE`. |
 | `DRY_RUN` | `False` | **Force preview.** `True`: skip the “Dry-run only?” prompt and never pin/push/purge/walk/restart snmpd. You can still dry-run when this is `False` by answering `y` at the prompt. Unrelated to `LAB_MODE`. |
+| `SKIP_CREDENTIAL_WALK` | `False` | **Skip step 8 walk** on menu 1 dry-run and live push. Menu 3 is unchanged. |
 
 Other knobs:
 
@@ -241,13 +242,13 @@ Other knobs:
 | `ACAS_*` | Banner, sudoers drop-in, SSHBRUTE, cz-configd unit, `ACAS_SCAP_HOME` (`/home/svc-acas`) |
 | `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per address (default 2) |
 | `WRITE_RUN_REPORT` / `REPORTS_DIRNAME` | Write `reports/*.json` |
-| `MENU_CHOICE_ALIASES` | CLI tokens → `1` / `2` / `3` / `4` / `d` / `u` |
+| `MENU_CHOICE_ALIASES` | CLI tokens → `1` / `2` / `3` / `4` / `5` / `c` / `d` / `u` |
 | `SNMP_RELOAD_DELAY` | Wait after API pin/push so cz-configd can settle |
 
 ## Security notes
 
 - Tokens and passphrases are not printed. New cz password is not on the remote argv.
-- Reports store hash *lengths*, not hex. `PRINT_ESXI_KEYS` follows `LAB_MODE`.
+- Reports store hash *lengths*, not hex. Engine ID hex only if `DEBUG=True`. `PRINT_ESXI_KEYS` follows `LAB_MODE`.
 - `credentials.json` is gitignored. Reports are `0600` where the OS honors it.
 - ACAS unharden leaves `NOPASSWD` and an open `SSHBRUTE` until harden.
 - Identical `snmp_auth` / `snmp_priv` prints a DISA warning.
@@ -265,20 +266,24 @@ Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue
 | **E05** | All collectives excluded | Enter to keep all Controllers |
 | **E06** | TLS cert not trusted | Answer **y** on Proceed anyway, `LAB_MODE=True`, or trust the CA |
 | **E07** | SSH host key rejected | Answer **y** to Trust and save, or pin `~/.ssh/known_hosts` |
-| **E09** | SNMP engine-ID / box failed | Try a new SSH password after FQDN+IP; sudo; `engineIDType 3`; eth0 MAC |
+| **E08** | Appliance PUT refused / HTTP 422 | Unexpected field diff, missing `site`, or **View** on **Client Profile** (`portal.profiles[]`). Not SSH. |
+| **E09** | SNMP engine-ID / SSH box failed | Try a new SSH password after FQDN+IP; sudo; `engineIDType 3`; `ETH_IFACE` MAC |
 | **E10** | SNMP walk failed | UDP/161, user/auth/priv, leftover `usmUser`; others still walk |
-| **E11** | NTP PUT/verify failed | PUT must be `ntp.servers` objects; then `cz-customization` + `chronyc ntpdata` |
+| **E11** | NTP PUT failed | PUT must be `ntp.servers` objects (`hostname`, `keyType`, `keyNo`, `key`) |
 | **E12** | No NTP servers in creds | `ntp_servers[].hostname` in credentials.json or at the prompt |
 | **E13** | cz password login verify failed | Hash may still be set; SSH with `ssh_password_new` or retry menu 4 |
 | **E14** | ACAS SSH overlay failed | Confirm selected hostname. `getaddrinfo` = FQDN DNS fail — SSH uses IP next, not a new password |
 | **E15** | pip / vendor wheels | Menu **D** on matching OS/Python; copy `app/vendor/` |
+| **E16** | No snmpwalk/pysnmp | Install Net-SNMP or `pip install pysnmp` (menu D). Workers cannot install. |
+| **E17** | NTP chronyc / cz-customization failed | Wait `NTP_VERIFY_DELAY`; `chronyc ntpdata` must show the configured hostname |
 
 ## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
 | 401 login failed | API user, MFA exemption, `APPGATE_PROVIDER` |
-| 403 Forbidden | Admin role can edit/view appliances |
+| 403 Forbidden | Admin role: Appliance View (+ Edit for menus 1/5), Site View, Client Profile View on portals |
+| HTTP 422 `portal.profiles[0]` | **View** on **Client Profile** (not a Portal Profile type) |
 | TLS verify failed | Self-signed: answer Proceed anyway, or `LAB_MODE=True` |
 | Health always `n/a` | `/appliances/status` empty or 403 |
 | Gateway missing from list | Need Appliance **View** on those tags |

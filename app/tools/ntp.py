@@ -18,11 +18,12 @@ if _APP_DIR not in sys.path:
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from api.appgate import AppGateClient
+from api.appgate import AppGateClient, AppliancePutError
 from config import (
     DEBUG,
     DRY_RUN,
     NTP_CUSTOMIZATION_UNIT,
+    SSH_LOG_PREVIEW,
     NTP_VERIFY_DELAY,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
@@ -43,15 +44,15 @@ from ssh.ntp import NtpSsh
 ClientMap = Dict[int, AppGateClient]
 
 
-def _fail(target: Target, message: str) -> None:
+def _fail(target: Target, message: str, code: str = "E11") -> None:
     target.status = "failed"
     target.error = message
     print_error(
-        "E11",
+        code,
         f"{target.label()}: {message}",
         "This box is skipped; others continue.",
-        "422 invalid JSON: toolkit must PUT ntp.servers objects (hostname, keyType, keyNo, key).",
-        "SSH verify fail: wait NTP_VERIFY_DELAY, check chronyc ntpdata on the box.",
+        "E11 422: PUT ntp.servers objects (hostname, keyType, keyNo, key).",
+        "E17: wait NTP_VERIFY_DELAY, then chronyc ntpdata must show the hostname.",
     )
 
 
@@ -132,8 +133,11 @@ def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
     print("  1) Add (update key if hostname matches, else append)")
     print("  2) Overwrite (replace the whole NTP list with credentials.json)")
     choice = ""
-    while choice not in ("1", "2"):
-        choice = input("Select 1 or 2: ").strip()
+    while choice not in ("1", "2", "q"):
+        choice = input("Select 1, 2, or Q: ").strip().lower()
+    if choice == "q":
+        print("      Cancelled.")
+        raise SystemExit(0)
     return choice == "2"
 
 
@@ -142,13 +146,13 @@ def _host_list(servers: list) -> str:
 
 
 def _ntpdata_ok(output: str, servers: list) -> bool:
+    """PASS only if chronyc shows a configured hostname (not generic leap text)."""
     text = (output or "").lower()
     if not text.strip() or "cannot talk" in text or "not authorised" in text:
         return False
     names = [(s.get("hostname") or "").lower() for s in servers if s.get("hostname")]
-    if any(n and n in text for n in names):
-        return True
-    return "leap status" in text or "remote address" in text
+    # print(f"DEBUG ntpdata: names={names!r} hit={[n for n in names if n and n in text]}")
+    return any(n and n in text for n in names)
 
 
 def _apply(
@@ -183,8 +187,10 @@ def _apply(
                 f"      {target.label()}: NTP {mode} "
                 f"({len(merged)} server(s))"
             )
+        except AppliancePutError as exc:
+            _fail(target, str(exc), code="E11")
         except Exception as exc:
-            _fail(target, str(exc))
+            _fail(target, str(exc), code="E11")
 
     print(f"\n[4/4] Restart {NTP_CUSTOMIZATION_UNIT} + chronyc ntpdata...")
     live = [t for t in selected if t.status == "ok"]
@@ -207,7 +213,7 @@ def _apply(
             )
             print(f"      {target.label()}: {NTP_CUSTOMIZATION_UNIT} restarted")
         except Exception as exc:
-            _fail(target, f"customization restart: {exc}")
+            _fail(target, f"customization restart: {exc}", code="E17")
     time.sleep(NTP_VERIFY_DELAY)
     for target in selected:
         if target.status != "ok":
@@ -219,13 +225,16 @@ def _apply(
                 target
             )
             if DEBUG:
-                print(f"      DEBUG ntpdata {target.label()}: {out[:300]!r}", file=sys.stderr)
+                print(
+                    f"      DEBUG ntpdata {target.label()}: {out[:SSH_LOG_PREVIEW]!r}",
+                    file=sys.stderr,
+                )
             if _ntpdata_ok(out, servers):
                 print(f"      {target.label()}: chronyc ntpdata PASS")
             else:
-                _fail(target, "chronyc ntpdata did not show configured server")
+                _fail(target, "chronyc ntpdata did not show configured server", code="E17")
         except Exception as exc:
-            _fail(target, f"chronyc ntpdata: {exc}")
+            _fail(target, f"chronyc ntpdata: {exc}", code="E17")
 
 
 def _emit_report(

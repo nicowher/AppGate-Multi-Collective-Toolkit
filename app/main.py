@@ -17,7 +17,7 @@ from core.utils import HaltError
 
 
 def _normalize_menu_choice(raw: str) -> str:
-    """Map user/argv token to 1|2|3|4|d|u|q (empty if unknown)."""
+    """Map user/argv token to 1|2|3|4|5|c|d|u|q (empty if unknown)."""
     return MENU_CHOICE_ALIASES.get((raw or "").strip().lower(), "")
 
 
@@ -39,6 +39,7 @@ def _prompt_menu_choice() -> str:
         choice = _normalize_menu_choice(input("Select 1, 2, 3, 4, 5, C, D, U, or Q: "))
         if choice:
             return choice
+        # print(f"DEBUG menu: invalid choice raw={raw!r}")
         print("Invalid choice.")
 
 
@@ -104,9 +105,12 @@ def cli(argv: Optional[List[str]] = None) -> None:
     """Entry for OS launchers.
 
     No args  → interactive menu (return to menu after each tool).
-    First arg 1|2|3|d|u|walk|acas|deps → run that tool once; remaining args go to Python.
+    First arg 1|2|3|4|5|c|d|u|walk|acas|ntp|deps → run that tool once; remaining args go to Python.
     """
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and not _normalize_menu_choice(args[0]):
+        print("Invalid choice. Use 1, 2, 3, 4, 5, C, D, U, or Q.", file=sys.stderr)
+        sys.exit(2)
     noninteractive = bool(args) and bool(_normalize_menu_choice(args[0]))
     try:
         while True:

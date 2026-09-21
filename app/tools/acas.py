@@ -79,8 +79,11 @@ def _prompt_mode() -> str:
     print("  1) Unharden  (iptables SSHBRUTE, sudo NOPASSWD, banner TTY skip)")
     print(f"  2) Harden    (remove overlay, restart {ACAS_CZCONFIGD_UNIT})")
     choice = ""
-    while choice not in ("1", "2"):
-        choice = input("Select 1 or 2: ").strip()
+    while choice not in ("1", "2", "q"):
+        choice = input("Select 1, 2, or Q: ").strip().lower()
+    if choice == "q":
+        print("      Cancelled.")
+        raise SystemExit(0)
     return "unharden" if choice == "1" else "harden"
 
 
@@ -274,6 +277,12 @@ def main() -> None:
         answer = input("\n      Dry-run only (preview, no SSH changes)? [y/N]: ").strip().lower()
         dry_run = answer in YES_ANSWERS
 
+    if not dry_run and mode in ("unharden", "deharden"):
+        print(
+            "WARNING: unharden is STIG-hostile (NOPASSWD + open SSHBRUTE). "
+            "Re-harden as soon as the scan finishes.",
+            file=sys.stderr,
+        )
     started_at = datetime.now(timezone.utc).isoformat()
     _apply(selected, collectives, mode, dry_run)
     _emit_report(mode, collectives, selected, dry_run=dry_run, started_at=started_at)
@@ -281,6 +290,12 @@ def main() -> None:
     if dry_run and any(t.status == "preview" for t in selected):
         apply = input("\n      Apply to these appliances now? [y/N]: ").strip().lower()
         if apply in YES_ANSWERS:
+            if mode in ("unharden", "deharden"):
+                print(
+                    "WARNING: unharden is STIG-hostile (NOPASSWD + open SSHBRUTE). "
+                    "Re-harden as soon as the scan finishes.",
+                    file=sys.stderr,
+                )
             for target in selected:
                 if target.status == "preview":
                     target.status = "pending"

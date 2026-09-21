@@ -43,6 +43,7 @@ def main() -> None:
 
 
 def upgrade_main() -> None:
+    # print(f"DEBUG deps: pip install --upgrade {VENDOR_PACKAGES}")
     if DEBUG:
         print(f"      DEBUG deps: pip install --upgrade {VENDOR_PACKAGES}", file=sys.stderr)
     try:

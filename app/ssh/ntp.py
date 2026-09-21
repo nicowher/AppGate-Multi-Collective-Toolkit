@@ -25,6 +25,7 @@ class NtpSsh(SSHSession):
         )
 
     def ntpdata(self, host: Union[str, Sequence[str]]) -> str:
+        # print(f"DEBUG ntp: chronyc ntpdata")
         def _run(client) -> str:
             return self._run(client, "chronyc ntpdata", check=False)
 

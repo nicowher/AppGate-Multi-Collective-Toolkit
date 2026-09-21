@@ -7,8 +7,9 @@ Lives in ``core/``. Called from ``tools/snmp_credentials.py`` (step 8) and
 Why walk at all: pin/push can succeed while snmpd still has stale usmUser
 keys; a walk with the *passphrases* is the real acceptance test.
 
-Why FQDN before IP: same as API/SSH (admin hostname first). IP is fallback.
+Menu 1 step 8 walks ssh_ok_host only. Menu 3 (no SSH) still tries FQDN then IP.
 Attempts per address are tunable (WALK_IP_ATTEMPTS / WALK_FQDN_ATTEMPTS).
+Install/prompt must stay on the main thread — workers cannot call input().
 
 Backends: Net-SNMP snmpwalk → SnmpSoft → pysnmp (auto-install vendor/pip).
 """
@@ -18,10 +19,11 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import List, Optional, Sequence, Tuple, Union
 
-from core.utils import install_from_vendor, is_yes
+from core.utils import install_from_vendor, is_yes, print_error
 from config import (
     DEBUG,
     DEFAULT_SNMP_PORT,
@@ -120,10 +122,10 @@ class SNMPValidator:
         if tool_type is None:
             print("      SNMP walk tool not found. Installing...", file=sys.stderr)
             if not self._install_snmpwalk():
-                print(
-                    "      Could not auto-install an SNMP walk tool. "
-                    "Install Net-SNMP or run: pip install pysnmp",
-                    file=sys.stderr,
+                print_error(
+                    "E16",
+                    "No snmpwalk/pysnmp available",
+                    "Install Net-SNMP or run: pip install pysnmp (menu D on air-gap).",
                 )
                 return False
             self._tool = None
@@ -244,6 +246,13 @@ class SNMPValidator:
 
     def _install_snmpwalk(self) -> bool:
         """Ask to install Net-SNMP on Linux/macOS; Windows always uses pysnmp."""
+        if threading.current_thread() is not threading.main_thread():
+            print_error(
+                "E16",
+                "Walk worker cannot install tools",
+                "Install pysnmp or Net-SNMP on the main thread first (menu D / pip).",
+            )
+            return False
         system = platform.system()
         native_ok = False
         try:

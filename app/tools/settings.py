@@ -22,6 +22,7 @@ EDITABLE = (
     ("DEBUG", bool, "step traces and JSON dump on console"),
     ("LAB_MODE", bool, "lab TLS/SSH/STIG posture (TLS_VERIFY follows this)"),
     ("DRY_RUN", bool, "force preview; skip pin/push/purge/walk"),
+    ("SKIP_CREDENTIAL_WALK", bool, "skip walk after SNMP credential push"),
     ("WRITE_RUN_REPORT", bool, "write reports/*.json"),
     ("SSH_TIMEOUT", int, "SSH command timeout (seconds)"),
     ("SSH_PRIME_TIMEOUT", int, "host-key prime timeout (skip dead IPs)"),
@@ -71,13 +72,17 @@ def _parse_bool(raw: str, current: bool) -> bool:
     raise ValueError("Enter y/n, true/false, or 1/0")
 
 
-def _parse_int(raw: str, current: int) -> int:
+def _parse_int(raw: str, current: int, name: str = "") -> int:
     s = raw.strip()
     if not s:
         return current
     n = int(s, 10)
     if n < 0:
         raise ValueError("Must be >= 0")
+    if "CONCURRENCY" in name and n < 1:
+        raise ValueError("Concurrency must be >= 1")
+    if "TIMEOUT" in name and n < 1:
+        raise ValueError("Timeout must be >= 1")
     return n
 
 
@@ -110,11 +115,22 @@ def main() -> None:
             print("      No changes written.")
             return
         if raw in ("s", "save"):
-            text = open(CONFIG_PATH, encoding="utf-8").read()
+            if values.get("LAB_MODE") and not config.LAB_MODE:
+                confirm = input(
+                    "      LAB_MODE=True disables TLS/SSH verify and STIG floors. Continue? [y/N]: "
+                ).strip().lower()
+                if confirm not in YES_ANSWERS:
+                    print("      Save cancelled.")
+                    continue
+            with open(CONFIG_PATH, encoding="utf-8") as fh:
+                text = fh.read()
             for name, _t, _h in EDITABLE:
                 text = _write_assignment(text, name, values[name])
-            with open(CONFIG_PATH, "w", encoding="utf-8", newline="\n") as fh:
+            tmp_path = CONFIG_PATH + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(text)
+            os.replace(tmp_path, CONFIG_PATH)
+            # print(f"DEBUG settings: wrote {CONFIG_PATH}")
             for name, _t, _h in EDITABLE:
                 _apply_runtime(name, values[name])
             print(f"      Saved {CONFIG_PATH}")
@@ -138,6 +154,6 @@ def main() -> None:
             if typ is bool:
                 values[name] = _parse_bool(entered, current)
             else:
-                values[name] = _parse_int(entered, current)
+                values[name] = _parse_int(entered, current, name)
         except ValueError as exc:
             print(f"      {exc}")
