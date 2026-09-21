@@ -122,10 +122,10 @@ class SNMPValidator:
         if tool_type is None:
             print("      SNMP walk tool not found. Installing...", file=sys.stderr)
             if not self._install_snmpwalk():
-            # print(f"DEBUG walk: E16 no tool thread={threading.current_thread().name!r}")
-            print_error(
-                "E16",
-                "No snmpwalk/pysnmp available",
+                # print(f"DEBUG walk: E16 no tool thread={threading.current_thread().name!r}")
+                print_error(
+                    "E16",
+                    "No snmpwalk/pysnmp available",
                     "Install Net-SNMP or run: pip install pysnmp (menu D on air-gap).",
                 )
                 return False
