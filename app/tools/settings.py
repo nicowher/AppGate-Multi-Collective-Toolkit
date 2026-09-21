@@ -99,7 +99,7 @@ def _apply_runtime(name: str, value) -> None:
         )
 
 
-def main() -> None:
+def main() -> bool:
     # print(f"DEBUG settings: path={CONFIG_PATH} DEBUG={config.DEBUG} LAB_MODE={config.LAB_MODE}")
     print("Configure config.py (Enter keeps the current value).")
     print("TLS_VERIFY / SSH_STRICT_HOST_KEY follow LAB_MODE.")
@@ -113,7 +113,7 @@ def main() -> None:
         raw = input("Select number, S, or Q: ").strip().lower()
         if raw in ("q", "quit"):
             print("      No changes written.")
-            return
+            return False
         if raw in ("s", "save"):
             if values.get("LAB_MODE") and not config.LAB_MODE:
                 confirm = input(
@@ -134,11 +134,8 @@ def main() -> None:
             for name, _t, _h in EDITABLE:
                 _apply_runtime(name, values[name])
             print(f"      Saved {CONFIG_PATH}")
-            print(
-                "      If a tool already ran in this session, restart the launcher "
-                "so every import sees the new values."
-            )
-            return
+            print("      Relaunch the launcher so the new values take effect.")
+            return True
         try:
             idx = int(raw, 10)
         except ValueError:

@@ -77,8 +77,7 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
             return 0
         if choice == "c":
             from tools.settings import main as settings_main
-            settings_main()
-            return 0
+            return 0 if settings_main() else -1
         if choice == "d":
             from tools.download_deps import main as deps_main
             deps_main()
@@ -132,6 +131,12 @@ def cli(argv: Optional[List[str]] = None) -> None:
                     sys.exit(2)
                 continue
             code = _run_selected_tool(choice, rest)
+            if choice == "c":
+                if noninteractive:
+                    sys.exit(0 if code < 0 else code)
+                if code == 0:
+                    return
+                continue
             if noninteractive:
                 sys.exit(code)
             print()

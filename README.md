@@ -102,7 +102,7 @@ Pushes NTP the Admin UI way (`ntp.servers` on the appliance object) so it surviv
 
 ## C) Configure
 
-Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, `SKIP_CREDENTIAL_WALK`, SSH/walk timeouts, concurrency, retries. Enter keeps the current value; **S** writes the file atomically; **Q** cancels. Flipping `LAB_MODE` off→on requires confirm (STIG deviation). `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` follow `LAB_MODE`. If a tool already ran this session, restart the launcher so every import sees the new values.
+Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, `SKIP_CREDENTIAL_WALK`, SSH/walk timeouts, concurrency, retries. Enter keeps the current value; **S** writes the file atomically and **exits the toolkit** (relaunch so imports see the new values); **Q** cancels and returns to the menu. Flipping `LAB_MODE` off→on requires confirm (STIG deviation). `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` follow `LAB_MODE`.
 
 ## D / U) Dependencies
 
