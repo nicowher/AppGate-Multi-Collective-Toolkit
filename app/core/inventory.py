@@ -50,6 +50,7 @@ class Target:
     walk_ok: Optional[bool] = None
     ssh_password_override: Optional[str] = None
     ssh_ok_host: str = ""
+    self_ips: List[str] = field(default_factory=list)
 
     def label(self) -> str:
         """Human handle: 1.ctrl-a (collective index + hostname)."""
@@ -294,6 +295,28 @@ def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, List[str]]:
 
 def is_selectable(health: str, skip_status: tuple) -> bool:
     return health.strip().lower() not in skip_status
+
+
+def status_self_ips(status: Any) -> List[str]:
+    """IPs from GET /appliances/status details.network.details.<nic>.ips."""
+    found: List[str] = []
+    if not isinstance(status, dict):
+        return found
+    details = status.get("details")
+    net = details.get("network") if isinstance(details, dict) else None
+    if not isinstance(net, dict):
+        net = status.get("network") if isinstance(status.get("network"), dict) else {}
+    extra = net.get("details") if isinstance(net, dict) else None
+    if not isinstance(extra, dict):
+        return found
+    for info in extra.values():
+        if not isinstance(info, dict):
+            continue
+        for ip in info.get("ips") or []:
+            text = str(ip or "").strip()
+            if text and text not in found:
+                found.append(text)
+    return found
 
 
 def prompt_exclusions(targets: List[Target]) -> List[Target]:

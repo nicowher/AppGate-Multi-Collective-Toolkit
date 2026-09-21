@@ -69,8 +69,9 @@ from core.inventory import (
     appliance_health,
     appliance_hosts,
     is_selectable,
+    status_self_ips,
 )
-from core.utils import print_error
+from core.utils import print_error, write_replaced_snapshot
 
 
 class AppliancePutError(RuntimeError):
@@ -91,6 +92,27 @@ def _disable_tls_verify() -> None:
 
 SNMP_PUT_ALLOWED = ("snmpServer.snmpd.conf", "snmpServer.enabled")
 NTP_PUT_ALLOWED = ("ntp", "ntpServers", "ntpServer")
+ALLOW_SOURCES_PARENTS = (
+    "clientInterface",
+    "adminInterface",
+    "sshServer",
+    "snmpServer",
+    "healthcheckServer",
+    "ping",
+    "prometheusExporter",
+)
+ALLOW_SOURCES_PUT_ALLOWED = tuple(f"{p}.allowSources" for p in ALLOW_SOURCES_PARENTS)
+
+
+def _merge_self_ips(nic_ips: List[str], status: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    for ip in list(nic_ips) + status_self_ips(status):
+        text = str(ip or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
 # Top-level keys we already know. Unknown GET keys are still PUT unchanged;
 # DEBUG lists them so a new 6.x field is visible without aborting the run.
 APPLIANCE_GET_KNOWN_TOP = frozenset(
@@ -374,6 +396,20 @@ class AppGateClient:
         return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
 
     @staticmethod
+    def _snmpd_lines_without_all_users(appliance: Dict[str, Any]) -> list:
+        """Replace mode: drop every createUser/rouser/deleteUser, keep the rest."""
+        existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
+        lines = existing_conf.splitlines() if existing_conf else []
+        drop = (
+            r"^createUser\s+",
+            r"^rouser\s+",
+            r"^deleteUser\s+",
+            *AppGateClient._engine_pin_patterns(),
+            *AppGateClient._community_patterns(),
+        )
+        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
+
+    @staticmethod
     def _engine_pin_patterns() -> tuple:
         return (
             r"(?i)^exactEngineID\s+",
@@ -564,6 +600,7 @@ class AppGateClient:
                     collective_ip=fallback_ip or self.fallback_ip,
                     functions=appliance_functions(appliance),
                     health=health,
+                    self_ips=_merge_self_ips(ssh_ips, status_by_id.get(aid, {})),
                 )
             )
         return targets
@@ -591,11 +628,12 @@ class AppGateClient:
         rouser_line: str = "",
         enabled: bool = True,
         appliance_id: Optional[str] = None,
+        replace: bool = False,
     ) -> bool:
         """Step 6: PUT createUser + optional rouser + engineIDType 3 (live run only).
 
-        Call after delete_snmp_user so the final blob has no deleteUser line.
-        Auth/priv algorithms must match core/snmp_hashgen.py / config.py.
+        Add: keep other USM users, replace this username.
+        Replace: drop all createUser/rouser lines, write only this user.
         """
         create_user_line = (
             f"createUser {user} {SNMP_AUTH_PROTOCOL} -l 0x{auth_hash} "
@@ -603,7 +641,15 @@ class AppGateClient:
         )
 
         appliance = self._get_appliance(appliance_id)
-        lines = self._snmpd_lines_without_user(appliance, user)
+        if replace:
+            write_replaced_snapshot(
+                "snmp",
+                str(appliance.get("name") or appliance_id or user),
+                appliance,
+            )
+            lines = self._snmpd_lines_without_all_users(appliance)
+        else:
+            lines = self._snmpd_lines_without_user(appliance, user)
         if rouser_line:
             lines.append(rouser_line)
         lines.append(create_user_line)
@@ -821,6 +867,9 @@ class AppGateClient:
         existing_list = self._ntp_list_from_appliance(appliance)
         desired = [self._ntp_key_for_api(s) for s in servers if self._ntp_hostname(s)]
         if overwrite:
+            write_replaced_snapshot(
+                "ntp", str(original.get("name") or appliance_id), original
+            )
             merged = desired
         else:
             by_host: Dict[str, Any] = {}
@@ -864,4 +913,110 @@ class AppGateClient:
             what="NTP servers",
         )
         self._put_appliance_body(body, what="NTP servers")
+        return merged
+
+    @staticmethod
+    def _allow_source_key(entry: Any) -> tuple:
+        if not isinstance(entry, dict):
+            return ("", -1, "")
+        try:
+            mask = int(entry.get("netmask"))
+        except (TypeError, ValueError):
+            mask = -1
+        return (
+            str(entry.get("address") or "").strip(),
+            mask,
+            str(entry.get("nic") or "").strip(),
+        )
+
+    def peek_allow_sources(self, appliance_id: str) -> List[Dict[str, Any]]:
+        appliance = self._get_appliance(appliance_id)
+        return self._collect_allow_sources(appliance)
+
+    @staticmethod
+    def _collect_allow_sources(appliance: Dict[str, Any]) -> List[Dict[str, Any]]:
+        found: List[Dict[str, Any]] = []
+        seen = set()
+        for parent in ALLOW_SOURCES_PARENTS:
+            block = appliance.get(parent)
+            if not isinstance(block, dict):
+                continue
+            rows = block.get("allowSources")
+            if not isinstance(rows, list):
+                continue
+            for item in rows:
+                key = AppGateClient._allow_source_key(item)
+                if key[0] and key not in seen:
+                    seen.add(key)
+                    found.append(
+                        {
+                            "address": key[0],
+                            "netmask": key[1],
+                            "nic": key[2],
+                        }
+                    )
+        return found
+
+    def update_allow_sources(
+        self,
+        appliance_id: str,
+        desired: List[Dict[str, Any]],
+        *,
+        overwrite: bool,
+        snapshot_label: str = "",
+    ) -> List[Dict[str, Any]]:
+        """PUT existing allowSources arrays only. Does not create new parent objects."""
+        appliance = self._get_appliance(appliance_id)
+        original = copy.deepcopy(appliance)
+        if overwrite:
+            if not desired:
+                raise AppliancePutError(
+                    "Refusing replace with an empty allowSources list (admin lockout)"
+                )
+            write_replaced_snapshot(
+                "allow-sources",
+                snapshot_label or str(appliance.get("name") or appliance_id),
+                original,
+            )
+        # print(f"DEBUG allowSources: overwrite={overwrite} desired={desired!r}")
+        wrote = False
+        for parent in ALLOW_SOURCES_PARENTS:
+            block = appliance.get(parent)
+            if not isinstance(block, dict) or "allowSources" not in block:
+                continue
+            rows = block.get("allowSources")
+            if not isinstance(rows, list):
+                rows = []
+            if overwrite:
+                new_rows = [dict(x) for x in desired]
+            else:
+                seen = {self._allow_source_key(x) for x in rows}
+                new_rows = [dict(x) for x in rows if isinstance(x, dict)]
+                for item in desired:
+                    key = self._allow_source_key(item)
+                    if key[0] and key not in seen:
+                        seen.add(key)
+                        new_rows.append(
+                            {
+                                "address": key[0],
+                                "netmask": key[1],
+                                "nic": key[2],
+                            }
+                        )
+            block["allowSources"] = new_rows
+            appliance[parent] = block
+            wrote = True
+        if not wrote:
+            raise AppliancePutError(
+                "No existing allowSources arrays on this appliance GET"
+            )
+        merged = desired if overwrite else self._collect_allow_sources(appliance)
+        body = self._sanitize_appliance_for_put(appliance)
+        self._assert_put_safe(
+            original,
+            body,
+            allowed=ALLOW_SOURCES_PUT_ALLOWED,
+            what="allowSources",
+        )
+        self._put_appliance_body(body, what="allowSources")
         return merged

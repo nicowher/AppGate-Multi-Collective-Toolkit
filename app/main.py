@@ -56,11 +56,11 @@ def _sigint_confirm_cancel(signum, frame) -> None:
 
 
 def _menu_select_hint() -> str:
-    return "1, 2, 3, 4, 5, C, or Q" if IS_RELEASE else "1, 2, 3, 4, 5, C, D, U, or Q"
+    return "1, 2, 3, 4, 5, 6, C, or Q" if IS_RELEASE else "1, 2, 3, 4, 5, 6, C, D, U, or Q"
 
 
 def _normalize_menu_choice(raw: str) -> str:
-    """Map user/argv token to 1|2|3|4|5|c|d|u|q (empty if unknown)."""
+    """Map user/argv token to 1|2|3|4|5|6|c|d|u|q (empty if unknown)."""
     choice = MENU_CHOICE_ALIASES.get((raw or "").strip().lower(), "")
     if IS_RELEASE and choice in ("d", "u"):
         return ""
@@ -76,6 +76,7 @@ def _prompt_menu_choice() -> str:
     print("  3) SNMP Walk             (validate only)")
     print("  4) Update cz SSH password")
     print("  5) NTP servers            (Controller API / cz-configd)")
+    print("  6) Allowed sources        (allowSources by function)")
     print("  C) Configure             (DEBUG, LAB_MODE, timeouts)")
     if not IS_RELEASE:
         print("  D) Download deps         (prefetch vendor wheels)")
@@ -124,6 +125,10 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
         if choice == "5":
             from tools.ntp import main as ntp_main
             ntp_main()
+            return 0
+        if choice == "6":
+            from tools.allowed_sources import main as allow_main
+            allow_main()
             return 0
         if choice == "c":
             from tools.settings import main as settings_main

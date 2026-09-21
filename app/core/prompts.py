@@ -147,6 +147,14 @@ def _parse_ntp_servers(value: Any) -> List[Dict[str, str]]:
     return out
 
 
+def resolve_allowed_sources(col: dict, creds: dict) -> Dict[str, list]:
+    local = col.get("allowed_sources")
+    if isinstance(local, dict) and local:
+        return local
+    top = creds.get("allowed_sources")
+    return top if isinstance(top, dict) else {}
+
+
 def resolve_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
     local = col.get("ntp_servers")
     if isinstance(local, list) and local:

@@ -15,6 +15,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 | **3** | SNMP Walk — validate authPriv only (no SSH / no config push) |
 | **4** | Update cz SSH password — `openssl passwd -6` + `cz-config` + login verify |
 | **5** | NTP servers — PUT `ntp.servers`, then restart cz-customization + chronyc verify |
+| **6** | Allowed sources — merge by function, exclude-self /32|/128, PUT existing `allowSources` |
 | **C** | Configure — edit `DEBUG`, `LAB_MODE`, SSH/walk timeouts in `config.py` |
 | **D** | Download deps — `pip download` into `app/vendor/wheels` (source tree only; hidden in the GitHub zip) |
 | **U** | Update deps — `pip install --upgrade` (source tree only; hidden in the GitHub zip) |
@@ -45,7 +46,7 @@ Configures **authPriv** SNMPv3 USM on selected appliances so a scanner (e.g. ESX
 3. **Pin** `engineIDType 3` via appliance PUT (dry-run prints only). PUT is the full GET document: only `snmpd.conf` / `enabled` may change; `site` object becomes the same UUID (never stripped); `tcpPort` is never added. Any other field diff aborts (`DEBUG` dumps redacted GET/PUT).
 4. **SSH** (host keys primed on the main thread, then up to `SSH_CONCURRENCY` in parallel). Read `oldEngineID` from persistent snmpd.conf and check it against `eth0` MAC (RFC 3411 type 3). **Live** restarts snmpd so type 3 applies; **dry-run does not**.
 5. **Localize** auth/priv in-process (RFC 3414 SHA-256) per engine ID. Uses that collective’s `snmp_*` if set. Prints ESXi `user/Kul/Kul/priv` when `PRINT_ESXI_KEYS` (follows `LAB_MODE`).
-6. **Push** via Controller: same guarded PUT as step 3 with `deleteUser`, `createUser` (localized `-l 0x…`), optional `rouser`, `engineIDType 3`. No `exactEngineID` (cz-configd truncates it). SNMPv1/v2c community lines are stripped.
+6. **Push** via Controller: **1) Add** keeps other USM users and add/updates this username; **2) Replace** drops other `createUser`/`rouser` lines (backup under `reports/replaced/`). Then `createUser` (localized `-l 0x…`), optional `rouser`, `engineIDType 3`. No `exactEngineID`. SNMPv1/v2c community lines are stripped.
 7. **SSH purge:** stop snmpd, delete leftover persistent `usmUser`, start snmpd so `createUser` recreates the user.
 8. **Walk** in parallel (`WALK_CONCURRENCY`): the SSH-working address only (`ssh_ok_host`). `WALK_*_ATTEMPTS` on that one host. `SKIP_CREDENTIAL_WALK` skips this step on dry-run and live (menu 3 unchanged). Engine ID hex is console/report only when `DEBUG=True`.
 
@@ -100,7 +101,15 @@ Pushes NTP the Admin UI way (`ntp.servers` on the appliance object) so it surviv
 
 `[3/4]` GET appliance, set `ntp.servers`, PUT the same document. Only `ntp` / legacy `ntpServer(s)` plus `site` UUID reshape may differ; otherwise abort. SHA256 keys without `HEX:` get that prefix. GET does not return the secret; put `key` in `credentials.json`.
 
-`[3/4]` dry-run prompt, then GET/PUT. `[4/4]` SSH `systemctl restart cz-customization.service` (needed so NTP actually applies), wait `NTP_VERIFY_DELAY`, then `chronyc ntpdata` → PASS only if a configured hostname appears. Report: `reports/ntp-*.json` (hostnames only, no keys).
+`[3/4]` dry-run prompt, then GET/PUT. Overwrite writes a redacted GET to `reports/replaced/<UTC>/`. `[4/4]` SSH `systemctl restart cz-customization.service` (needed so NTP actually applies), wait `NTP_VERIFY_DELAY`, then `chronyc ntpdata` → PASS only if a configured hostname appears. Report: `reports/ntp-*.json` (hostnames only, no keys).
+
+## 6) Allowed sources
+
+Updates 6.7.4 `allowSources` (`address`, `netmask`, `nic`) on existing appliance interfaces (`clientInterface`, `adminInterface`, `sshServer`, `snmpServer`, `healthcheckServer`, `ping`, `prometheusExporter`). **No SSH.**
+
+`credentials.json` `allowed_sources.<function>[]`. Multi-function boxes inherit both lists (deduped). **/32 and /128** matching **this** appliance’s IPs (inventory NICs + `GET /appliances/status` `network.details.*.ips`) are dropped.
+
+**1) Add** appends onto **each existing** `allowSources` array (no cross-interface union). **2) Replace** writes the same desired list onto every array that already exists (refuses empty; does not create new interface objects; backup in `reports/replaced/<UTC>/`). Invalid address/netmask rows are skipped. Guarded full-document PUT (E08). Client Profile View still required on portals.
 
 ## C) Configure
 
@@ -252,6 +261,7 @@ Other knobs:
 
 - Tokens and passphrases are not printed. New cz password is not on the remote argv.
 - Reports store hash *lengths*, not hex. Engine ID hex only if `DEBUG=True`. `PRINT_ESXI_KEYS` follows `LAB_MODE`.
+- Replace/overwrite (SNMP, NTP, allowed-sources) writes a redacted GET to `reports/replaced/<UTC>/` before PUT.
 - `credentials.json` is gitignored. Reports are `0600` where the OS honors it.
 - ACAS unharden leaves `NOPASSWD` and an open `SSHBRUTE` until harden.
 - Identical `snmp_auth` / `snmp_priv` prints a DISA warning.
@@ -279,6 +289,7 @@ Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue
 | **E15** | pip / vendor wheels | Menu **D** on matching OS/Python; copy `app/vendor/` |
 | **E16** | No snmpwalk/pysnmp | Install Net-SNMP or `pip install pysnmp` (menu D). Workers cannot install. |
 | **E17** | NTP chronyc / cz-customization failed | Wait `NTP_VERIFY_DELAY`; `chronyc ntpdata` must show the configured hostname |
+| **E19** | No `allowed_sources` in creds | Add `allowed_sources.<function>[]` with `address`, `netmask`, `nic` |
 
 ## Troubleshooting
 

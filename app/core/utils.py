@@ -389,6 +389,58 @@ def write_json_report(prefix: str, payload: Dict[str, Any]) -> None:
         print(f"      Could not write report file: {exc}", file=sys.stderr)
 
 
+_REDACT_KEY_SUBSTR = ("password", "token", "secret", "p12")
+_REDACT_KEYS = frozenset(
+    {"snmpd.conf", "key", "httpsP12", "awsSecret", "p12", "password", "token"}
+)
+_replaced_run_dir = ""
+
+
+def redact_for_backup(obj: Any) -> Any:
+    """Drop secrets from an appliance GET before writing reports/replaced/."""
+    if isinstance(obj, dict):
+        out: Dict[str, Any] = {}
+        for key, value in obj.items():
+            kl = str(key).lower()
+            if key in _REDACT_KEYS or any(s in kl for s in _REDACT_KEY_SUBSTR):
+                out[key] = "<redacted>"
+            else:
+                out[key] = redact_for_backup(value)
+        return out
+    if isinstance(obj, list):
+        return [redact_for_backup(x) for x in obj]
+    return obj
+
+
+def begin_replaced_run() -> str:
+    """One folder per live replace/overwrite run: reports/replaced/<UTC>/."""
+    global _replaced_run_dir
+    from datetime import datetime, timezone
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    _replaced_run_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME, "replaced", stamp)
+    os.makedirs(_replaced_run_dir, exist_ok=True)
+    return _replaced_run_dir
+
+
+def write_replaced_snapshot(kind: str, label: str, body: Dict[str, Any]) -> None:
+    """Save pre-PUT GET (redacted) so a replace can be rolled back."""
+    folder = _replaced_run_dir or begin_replaced_run()
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", label)[:80] or "appliance"
+    path = os.path.join(folder, f"{kind}-{safe}.json")
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(redact_for_backup(body), fh, indent=2)
+            fh.write("\n")
+        try:
+            os.chmod(path, REPORT_FILE_MODE)
+        except OSError:
+            pass
+        print(f"      Backup: {path}", file=sys.stderr)
+    except OSError as exc:
+        print(f"      Could not write replace backup: {exc}", file=sys.stderr)
+
+
 def run_target_batch(targets: list, worker: Callable, concurrency: int, on_fail: Callable) -> None:
     """Run one worker per target in a pool. One failure does not stop the rest."""
     # print(f"DEBUG batch: n={len(targets)} concurrency={concurrency}")

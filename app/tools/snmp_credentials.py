@@ -65,7 +65,15 @@ from core.prompts import (
 )
 from core.snmp_hashgen import SNMPHashGenerator
 from core.snmp_validate import SNMPValidator
-from core.utils import HaltError, halt, load_credentials, print_error, run_target_batch, write_json_report
+from core.utils import (
+    HaltError,
+    begin_replaced_run,
+    halt,
+    load_credentials,
+    print_error,
+    run_target_batch,
+    write_json_report,
+)
 from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 from ssh.engine import SNMPEngineFetcher
 
@@ -89,6 +97,19 @@ def _fail(target: Target, message: str, code: str = "E09") -> None:
         f"Engine ID: need engineIDType 3, {ETH_IFACE} MAC, sudo on the appliance.",
         "Walk/digest fail: leftover usmUser — re-run live so step 7 can purge.",
     )
+
+
+def _prompt_snmp_mode() -> bool:
+    """True = replace all USM users in snmpd.conf with this one."""
+    print("  1) Add (keep other USM users; add/update this username)")
+    print("  2) Replace (drop other createUser/rouser lines; this user only)")
+    choice = ""
+    while choice not in ("1", "2", "q"):
+        choice = input("Select 1, 2, or Q: ").strip().lower()
+    if choice == "q":
+        print("      Cancelled.")
+        raise SystemExit(0)
+    return choice == "2"
 
 
 def _api_by_collective(
@@ -241,6 +262,7 @@ def main() -> None:
         # print("DEBUG step2:", [t.label() for t in selected])
         if DEBUG:
             print(f"      DEBUG step2: selected={[t.label() for t in selected]}", file=sys.stderr)
+        replace = _prompt_snmp_mode()
 
         _run_phases_3_to_8(
             selected=selected,
@@ -252,6 +274,7 @@ def main() -> None:
             snmp_priv=inputs["snmp_priv"],
             rouser_line=rouser_line,
             dry_run=dry_run,
+            replace=replace,
         )
 
         _print_summary(selected, user=user, rouser_line=rouser_line, dry_run=dry_run)
@@ -287,6 +310,7 @@ def main() -> None:
                     snmp_priv=inputs["snmp_priv"],
                     rouser_line=rouser_line,
                     dry_run=False,
+                    replace=replace,
                 )
                 _print_summary(selected, user=user, rouser_line=rouser_line, dry_run=False)
                 live_report = _build_run_report(
@@ -324,6 +348,7 @@ def _run_phases_3_to_8(
     snmp_priv: str,
     rouser_line: str,
     dry_run: bool,
+    replace: bool = False,
 ) -> None:
     """Steps 3–8 (shared by dry-run preview and live apply).
 
@@ -385,25 +410,28 @@ def _run_phases_3_to_8(
             _fail(target, f"hash: {exc}")
 
     print("\n[6/8] Pushing SNMPv3 config via each Controller...")
+    mode = "replace" if replace else "add"
     if dry_run:
         for target in _ok(selected):
             print(
-                f"      {target.label()}: would deleteUser {user} then createUser "
+                f"      {target.label()}: would {mode} createUser {user} "
                 f"(engine {target.engine_id or '?'})"
             )
             target.status = "preview"
     else:
+        if replace:
+            begin_replaced_run()
+
         def _push(target: Target, client: AppGateClient) -> None:
             col = collective_for_target(target, collectives)
             snmp_user = col.get("snmp_user") or user
-            client.delete_snmp_user(snmp_user, appliance_id=target.appliance_id)
-            time.sleep(SNMP_RELOAD_DELAY)
             client.update_snmp_config(
                 snmp_user,
                 target.auth_hash,
                 target.priv_hash,
                 rouser_line,
                 appliance_id=target.appliance_id,
+                replace=replace,
             )
             target.status = "ok"
             print(f"      {target.label()}: config pushed")

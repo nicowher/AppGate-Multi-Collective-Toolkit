@@ -166,7 +166,7 @@ ENGINE_ID_MAX_OCTETS = 32
 # Accepted answers for yes/no prompts (Add another Controller, Walk another IP).
 YES_ANSWERS = ("y", "yes")
 NO_ANSWERS = ("n", "no")
-# CLI menu first-arg aliases → 1 SNMP | 2 acas | 3 walk | 4 cz-password | 5 ntp | c settings | d deps | u pip-upgrade | q quit
+# CLI menu first-arg aliases → 1 SNMP | 2 acas | 3 walk | 4 cz-password | 5 ntp | 6 allow-sources | c settings | d deps | u pip-upgrade | q quit
 MENU_CHOICE_ALIASES = {
     "1": "1",
     "configure": "1",
@@ -192,6 +192,11 @@ MENU_CHOICE_ALIASES = {
     "ssh-password": "4",
     "5": "5",
     "ntp": "5",
+    "6": "6",
+    "allow": "6",
+    "allowed": "6",
+    "allowed-sources": "6",
+    "allow-sources": "6",
     "c": "c",
     "config": "c",
     "configure-settings": "c",

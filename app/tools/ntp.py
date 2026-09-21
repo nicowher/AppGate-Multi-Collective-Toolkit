@@ -37,7 +37,14 @@ from core.prompts import (
     ensure_ntp_servers,
     prepare_collectives,
 )
-from core.utils import HaltError, halt, load_credentials, print_error, write_json_report
+from core.utils import (
+    HaltError,
+    begin_replaced_run,
+    halt,
+    load_credentials,
+    print_error,
+    write_json_report,
+)
 from ssh.client import prime_target_host_keys, ssh_password_for
 from ssh.ntp import NtpSsh
 
@@ -165,6 +172,8 @@ def _apply(
 ) -> None:
     mode = "overwrite" if overwrite else "add/update"
     print(f"\n[3/4] Push NTP via API ({mode})...")
+    if overwrite and not dry_run:
+        begin_replaced_run()
     for target in selected:
         col = collective_for_target(target, collectives)
         servers = col.get("ntp_servers") or []
