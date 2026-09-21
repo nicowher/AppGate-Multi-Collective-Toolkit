@@ -14,7 +14,7 @@ For each passphrase (auth, then priv):
   3. Ku  = H(expanded)
   4. Kul = H(Ku || engineID || Ku)  ← hex stored in createUser
 
-H defaults to SHA-256 (CNSA 2.0). MD5/SHA-1 rejected. Walks still use the
+H defaults to SHA-256 (DISA SNMP STIG / CNSA 1.0). MD5/SHA-1 rejected. Walks still use the
 original passphrases; only the agent stores Kul.
 """
 import hashlib

@@ -9,11 +9,42 @@ instead of reprinting the traceback.
 
 ``app/`` is menu + config plus folders: ``tools/``, ``api/``, ``ssh/``, ``core/``.
 """
+import signal
 import sys
 from typing import List, Optional
 
-from config import ACAS_MODES, DEBUG, MENU_CHOICE_ALIASES, NO_ANSWERS
+from config import ACAS_MODES, DEBUG, MENU_CHOICE_ALIASES, NO_ANSWERS, YES_ANSWERS
 from core.utils import HaltError
+
+_sigint_asking = False
+
+
+def _ask_cancel_job() -> bool:
+    """Confirm Ctrl+C. Second Ctrl+C during the prompt also cancels."""
+    try:
+        ans = input("\nCancel this job and return to menu? [y/N]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return True
+    return ans in YES_ANSWERS
+
+
+def _sigint_confirm_cancel(signum, frame) -> None:
+    """Ask before cancelling. Do not nest input() inside another input/getpass."""
+    global _sigint_asking
+    # print(f"DEBUG sigint: asking={_sigint_asking}")
+    if _sigint_asking:
+        raise KeyboardInterrupt
+    name = frame.f_code.co_name if frame is not None else ""
+    if name in ("input", "raw_input", "readline", "read", "getpass"):
+        raise KeyboardInterrupt
+    _sigint_asking = True
+    try:
+        if _ask_cancel_job():
+            raise KeyboardInterrupt
+        print("      Continuing job...", file=sys.stderr)
+    finally:
+        _sigint_asking = False
 
 
 def _normalize_menu_choice(raw: str) -> str:
@@ -36,7 +67,8 @@ def _prompt_menu_choice() -> str:
     print("  Q) Quit")
     print()
     while True:
-        choice = _normalize_menu_choice(input("Select 1, 2, 3, 4, 5, C, D, U, or Q: "))
+        raw = input("Select 1, 2, 3, 4, 5, C, D, U, or Q: ")
+        choice = _normalize_menu_choice(raw)
         if choice:
             return choice
         # print(f"DEBUG menu: invalid choice raw={raw!r}")
@@ -50,7 +82,9 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
     to a return code so the interactive menu can continue.
     """
     old_argv = sys.argv[:]
+    prev_sigint = signal.getsignal(signal.SIGINT)
     try:
+        signal.signal(signal.SIGINT, _sigint_confirm_cancel)
         sys.argv = [old_argv[0]] + rest
         # print(f"DEBUG cli: choice={choice} argv={sys.argv!r}")
         if DEBUG:
@@ -87,6 +121,9 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
             upgrade_main()
             return 0
         return 1
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user", file=sys.stderr)
+        return 130
     except HaltError:
         return 1
     except SystemExit as exc:
@@ -97,6 +134,7 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
             return code
         return 1
     finally:
+        signal.signal(signal.SIGINT, prev_sigint)
         sys.argv = old_argv
 
 
@@ -111,8 +149,8 @@ def cli(argv: Optional[List[str]] = None) -> None:
         print("Invalid choice. Use 1, 2, 3, 4, 5, C, D, U, or Q.", file=sys.stderr)
         sys.exit(2)
     noninteractive = bool(args) and bool(_normalize_menu_choice(args[0]))
-    try:
-        while True:
+    while True:
+        try:
             if noninteractive:
                 raw0 = args[0].strip().lower()
                 choice = _normalize_menu_choice(args[0])
@@ -131,23 +169,34 @@ def cli(argv: Optional[List[str]] = None) -> None:
                     sys.exit(2)
                 continue
             code = _run_selected_tool(choice, rest)
-            if choice == "c":
-                if noninteractive:
-                    sys.exit(0 if code < 0 else code)
-                if code == 0:
-                    return
-                continue
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user", file=sys.stderr)
+            code = 130
             if noninteractive:
-                sys.exit(code)
+                sys.exit(1)
             print()
-            again = input("Return to menu? [Y/n]: ").strip().lower()
-            if again in NO_ANSWERS:
-                if code:
-                    sys.exit(code)
+            continue
+        if choice == "c":
+            if noninteractive:
+                sys.exit(0 if code < 0 else code)
+            if code == 0:
                 return
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user", file=sys.stderr)
-        sys.exit(1)
+            continue
+        if noninteractive:
+            sys.exit(code if code >= 0 else 1)
+        if code == 130:
+            print()
+            continue
+        print()
+        try:
+            again = input("Return to menu? [Y/n]: ").strip().lower()
+        except KeyboardInterrupt:
+            print()
+            continue
+        if again in NO_ANSWERS:
+            if code:
+                sys.exit(code)
+            return
 
 
 if __name__ == "__main__":

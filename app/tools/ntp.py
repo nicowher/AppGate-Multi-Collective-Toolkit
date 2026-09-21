@@ -188,6 +188,7 @@ def _apply(
                 f"({len(merged)} server(s))"
             )
         except AppliancePutError as exc:
+            # print(f"DEBUG ntp: E11 put {target.label()!r} {exc!r}")
             _fail(target, str(exc), code="E11")
         except Exception as exc:
             _fail(target, str(exc), code="E11")

@@ -50,6 +50,8 @@ ClientMap = Dict[int, AppGateClient]
 def _fail(target: Target, message: str) -> None:
     target.status = "failed"
     target.error = message
+    host = target.ssh_fqdn or target.ssh_ip
+    print(f"      [{'FAILED':<7}] {target.label():<32} {host:<22}")
     print_error(
         "E14",
         f"{target.label()}: {message}",
@@ -245,10 +247,13 @@ def _apply(
         else:
             out = session.harden(target)
         target.status = "ok"
-        print(f"      {target.label()}: {_summarize_output(out)}")
-        for ln in out.splitlines():
-            if ln.startswith("STEP_"):
-                print(f"        {ln}")
+        host = target.ssh_fqdn or target.ssh_ip
+        print(f"      [{'PASSED':<7}] {target.label():<32} {host:<22} {mode}")
+        if DEBUG:
+            print(f"      {target.label()}: {_summarize_output(out)}")
+            for ln in out.splitlines():
+                if ln.startswith("STEP_"):
+                    print(f"        {ln}")
 
     run_ssh_batch(selected, _one, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 

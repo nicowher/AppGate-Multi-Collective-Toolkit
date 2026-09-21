@@ -16,6 +16,7 @@ except ImportError:
     ensure_package("paramiko", "paramiko")
     import paramiko
 
+import base64
 import hashlib
 import ipaddress
 import logging
@@ -175,7 +176,7 @@ class SSHSession:
                 self._pin(target, host)
                 return True
             self._log(f"{self._tag(host)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
-            if self._ssh_fail_kind in ("auth", "keyonly"):
+            if self._ssh_fail_kind in ("auth", "keyonly", "hostkey"):
                 self._pin(target, host)
                 return False
         return False
@@ -222,13 +223,21 @@ class SSHSession:
             self._ssh_fail_kind = "auth"
             self._last_reason = "auth failed"
             return None
+        except paramiko.BadHostKeyException:
+            self._ssh_fail_kind = "hostkey"
+            self._last_reason = "host key mismatch"
+            return None
         except (socket.gaierror, OSError, socket.timeout, TimeoutError) as exc:
             self._ssh_fail_kind = "network"
             self._last_reason = self._net_reason(exc)
             self._log(f"{self._tag(ip)} {type(exc).__name__}: {exc}", noise=True)
         except paramiko.SSHException as exc:
-            self._ssh_fail_kind = "network"
-            self._last_reason = type(exc).__name__
+            if "host key" in str(exc).lower():
+                self._ssh_fail_kind = "hostkey"
+                self._last_reason = "host key mismatch"
+            elif self._ssh_fail_kind != "hostkey":
+                self._ssh_fail_kind = "network"
+                self._last_reason = type(exc).__name__
             self._log(
                 f"{self._tag(ip)} {type(exc).__name__}: {str(exc)[:SSH_LOG_PREVIEW]}",
                 noise=True,
@@ -242,19 +251,14 @@ class SSHSession:
 
     def _verify_transport_host_key(self, client, ip: str, remote_key) -> None:
         """Transport.connect skips SSHClient host-key checks — apply the same policy."""
-        path = _known_hosts_path()
-        known = paramiko.HostKeys()
-        if os.path.isfile(path):
-            try:
-                known.load(path)
-            except OSError:
-                pass
+        known = client.get_host_keys()
         name = remote_key.get_name()
         entry = known.lookup(ip)
         stored = entry.get(name) if entry is not None else None
+        # print(f"DEBUG ssh: kbd-int hostkey ip={ip!r} name={name!r} known={stored is not None}")
         if stored is not None:
             if stored != remote_key:
-                self._ssh_fail_kind = "network"
+                self._ssh_fail_kind = "hostkey"
                 raise paramiko.SSHException(f"Host key mismatch for {ip}")
             return
         client._policy.missing_host_key(client, ip, remote_key)
@@ -356,7 +360,7 @@ class SSHSession:
                 self._pin(target, addr)
                 return result
             self._log(f"{self._tag(addr)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
-            if self._ssh_fail_kind in ("auth", "keyonly"):
+            if self._ssh_fail_kind in ("auth", "keyonly", "hostkey"):
                 auth_hit = addr
                 self._pin(target, addr)
                 break
@@ -481,7 +485,7 @@ class _PromptAddHostKeyPolicy(paramiko.MissingHostKeyPolicy):
     """TOFU: prompt on the main thread only (worker input() deadlocks)."""
 
     def missing_host_key(self, client, hostname, key) -> None:
-        digest = hashlib.sha256(key.asbytes()).hexdigest()
+        digest = base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
         print(
             f"      SSH host key for {hostname} is not in known_hosts.",
             file=sys.stderr,

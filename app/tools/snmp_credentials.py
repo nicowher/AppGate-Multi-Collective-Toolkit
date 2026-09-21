@@ -305,7 +305,7 @@ def main() -> None:
 
     except KeyboardInterrupt:
         print("\nOperation cancelled by user", file=sys.stderr)
-        sys.exit(1)
+        raise
     except HaltError:
         sys.exit(1)
     except Exception as exc:
@@ -451,7 +451,9 @@ def _run_phases_3_to_8(
                 label=target.label(),
             )
             target.walk_ok = ok
-            print(f"      {target.label()}: walk {'PASSED' if ok else 'FAILED'}")
+            host = target.ssh_fqdn or target.ssh_ip
+            state = "PASSED" if ok else "FAILED"
+            print(f"      [{state:<7}] {target.label():<32} {host:<22} walk")
             if not ok:
                 raise RuntimeError("SNMP walk failed")
 
@@ -459,7 +461,7 @@ def _run_phases_3_to_8(
             _ok(selected),
             _walk_one,
             WALK_CONCURRENCY,
-            lambda t, e: _fail(t, "SNMP walk failed"),
+            lambda t, e: _fail(t, "SNMP walk failed", code="E10"),
         )
 
 

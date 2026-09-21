@@ -215,9 +215,10 @@ echo STEP_HARDEN_DONE
         )
         rc, text = result
         # print(f"DEBUG acas: rc={rc} steps={[ln for ln in text.splitlines() if ln.startswith('STEP_')]}")
-        if "STEP_HARDEN_DONE" in text or "STEP_UNHARDEN_DONE" in text:
+        done = "STEP_HARDEN_DONE" in text or "STEP_UNHARDEN_DONE" in text
+        if done and rc == 0:
             return text
-        if rc != 0 or "STEP_SUDOERS_FAIL" in text:
+        if rc != 0 or "STEP_SUDOERS_FAIL" in text or not done:
             steps = " ".join(ln for ln in text.splitlines() if ln.startswith("STEP_"))
             raise ValueError(
                 f"ACAS script failed (exit {rc}): {(steps or text.strip())[:SSH_LOG_PREVIEW]}"
