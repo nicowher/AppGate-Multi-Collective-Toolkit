@@ -16,8 +16,8 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 | **4** | Update cz SSH password — `openssl passwd -6` + `cz-config` + login verify |
 | **5** | NTP servers — PUT `ntp.servers`, then restart cz-customization + chronyc verify |
 | **C** | Configure — edit `DEBUG`, `LAB_MODE`, SSH/walk timeouts in `config.py` |
-| **D** | Download deps — `pip download` into `app/vendor/wheels` (air-gap; does not install) |
-| **U** | Update deps — `pip install --upgrade` (needs network; does not refresh wheels) |
+| **D** | Download deps — `pip download` into `app/vendor/wheels` (source tree only; hidden in the GitHub zip) |
+| **U** | Update deps — `pip install --upgrade` (source tree only; hidden in the GitHub zip) |
 | **Q** | Quit |
 
 ## Shared behavior (all mutating / inventory tools)
@@ -109,7 +109,8 @@ Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, `S
 ## D / U) Dependencies
 
 - **D:** `pip download` into `app/vendor/wheels` on a **networked machine with the same OS and Python**, then unpack into `app/vendor/site`. Copy `app/vendor/` to the air-gap host.  
-- **U:** `pip install --upgrade` into this interpreter (needs network). The 1.0 zip does not need U.
+- **U:** `pip install --upgrade` into this interpreter (needs network).  
+- GitHub **1.0 zip** includes `app/vendor/RELEASE` (gitignored) so **D** and **U** are omitted. Source clones have no that file, so D/U stay on the menu.
 
 ## Launchers
 

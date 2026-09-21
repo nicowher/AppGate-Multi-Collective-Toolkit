@@ -14,9 +14,12 @@ import signal
 import sys
 from typing import List, Optional
 
-_VENDOR_SITE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", "site")
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_VENDOR_SITE = os.path.join(_APP_DIR, "vendor", "site")
 if os.path.isdir(_VENDOR_SITE):
     sys.path.insert(0, _VENDOR_SITE)
+# Pack script drops this file into the GitHub zip only (gitignored). Hides D/U.
+IS_RELEASE = os.path.isfile(os.path.join(_APP_DIR, "vendor", "RELEASE"))
 
 from config import ACAS_MODES, DEBUG, MENU_CHOICE_ALIASES, NO_ANSWERS, YES_ANSWERS
 from core.utils import HaltError
@@ -52,9 +55,16 @@ def _sigint_confirm_cancel(signum, frame) -> None:
         _sigint_asking = False
 
 
+def _menu_select_hint() -> str:
+    return "1, 2, 3, 4, 5, C, or Q" if IS_RELEASE else "1, 2, 3, 4, 5, C, D, U, or Q"
+
+
 def _normalize_menu_choice(raw: str) -> str:
     """Map user/argv token to 1|2|3|4|5|c|d|u|q (empty if unknown)."""
-    return MENU_CHOICE_ALIASES.get((raw or "").strip().lower(), "")
+    choice = MENU_CHOICE_ALIASES.get((raw or "").strip().lower(), "")
+    if IS_RELEASE and choice in ("d", "u"):
+        return ""
+    return choice
 
 
 def _prompt_menu_choice() -> str:
@@ -67,12 +77,13 @@ def _prompt_menu_choice() -> str:
     print("  4) Update cz SSH password")
     print("  5) NTP servers            (Controller API / cz-configd)")
     print("  C) Configure             (DEBUG, LAB_MODE, timeouts)")
-    print("  D) Download deps         (prefetch vendor wheels)")
-    print("  U) Update deps           (pip install --upgrade)")
+    if not IS_RELEASE:
+        print("  D) Download deps         (prefetch vendor wheels)")
+        print("  U) Update deps           (pip install --upgrade)")
     print("  Q) Quit")
     print()
     while True:
-        raw = input("Select 1, 2, 3, 4, 5, C, D, U, or Q: ")
+        raw = input(f"Select {_menu_select_hint()}: ")
         choice = _normalize_menu_choice(raw)
         if choice:
             return choice
@@ -118,10 +129,14 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
             from tools.settings import main as settings_main
             return 0 if settings_main() else -1
         if choice == "d":
+            if IS_RELEASE:
+                return 1
             from tools.download_deps import main as deps_main
             deps_main()
             return 0
         if choice == "u":
+            if IS_RELEASE:
+                return 1
             from tools.download_deps import upgrade_main
             upgrade_main()
             return 0
@@ -151,7 +166,7 @@ def cli(argv: Optional[List[str]] = None) -> None:
     """
     args = list(sys.argv[1:] if argv is None else argv)
     if args and not _normalize_menu_choice(args[0]):
-        print("Invalid choice. Use 1, 2, 3, 4, 5, C, D, U, or Q.", file=sys.stderr)
+        print(f"Invalid choice. Use {_menu_select_hint()}.", file=sys.stderr)
         sys.exit(2)
     noninteractive = bool(args) and bool(_normalize_menu_choice(args[0]))
     while True:
@@ -169,7 +184,7 @@ def cli(argv: Optional[List[str]] = None) -> None:
             if choice == "q":
                 return
             if not choice:
-                print("Invalid choice. Use 1, 2, 3, 4, 5, C, D, U, or Q.", file=sys.stderr)
+                print(f"Invalid choice. Use {_menu_select_hint()}.", file=sys.stderr)
                 if noninteractive:
                     sys.exit(2)
                 continue

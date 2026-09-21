@@ -3,5 +3,6 @@ __pycache__/
 *.pyc
 app/vendor/wheels/
 app/vendor/site/
+app/vendor/RELEASE
 app/vendor/*.zip
 reports/*.json
