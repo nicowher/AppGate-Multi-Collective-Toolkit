@@ -12,11 +12,10 @@ the parent of this package (``app/``), not ``app/core/``.
       Missing or invalid files become {} so prompts still work.
       collectives[] is kept as a list of objects (not stringified).
 
-  vendor_has_wheels / install_from_vendor / ensure_package / download_vendor_wheels
-  / upgrade_vendor_packages
-      Used when requests/paramiko/pysnmp are missing. Vendor wheels first
-      (air-gapped); online pip only if the operator allows it. Menu U upgrades
-      the same packages in the current interpreter.
+  vendor site / wheels / ensure_package
+      Unpacked wheels in app/vendor/site go on sys.path (no pip). Empty site
+      is filled by extracting vendor/wheels/*.whl. Online pip only if there is
+      no vendor/site (git clone). Menu U still upgrades via pip.
 """
 import importlib.util
 import ipaddress
@@ -25,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from getpass import getpass
 from typing import Any, Callable, Dict, Optional
@@ -119,6 +119,24 @@ APP_DIR = os.path.dirname(CORE_DIR)
 REPO_ROOT = os.path.dirname(APP_DIR)
 VENDOR_DIR = os.path.join(APP_DIR, "vendor")
 VENDOR_WHEELS = os.path.join(VENDOR_DIR, "wheels")
+VENDOR_SITE = os.path.join(VENDOR_DIR, "site")
+
+
+def ensure_vendor_site() -> None:
+    """Put unpacked wheels on sys.path. Extract *.whl into site if it is empty. No pip."""
+    if os.path.isdir(VENDOR_WHEELS) and (
+        not os.path.isdir(VENDOR_SITE) or not any(os.scandir(VENDOR_SITE))
+    ):
+        os.makedirs(VENDOR_SITE, exist_ok=True)
+        for name in os.listdir(VENDOR_WHEELS):
+            if name.endswith(".whl"):
+                with zipfile.ZipFile(os.path.join(VENDOR_WHEELS, name)) as zf:
+                    zf.extractall(VENDOR_SITE)
+    if os.path.isdir(VENDOR_SITE) and VENDOR_SITE not in sys.path:
+        sys.path.insert(0, VENDOR_SITE)
+
+
+ensure_vendor_site()
 
 
 def vendor_has_wheels() -> bool:
@@ -155,7 +173,7 @@ def install_from_vendor(package: str) -> bool:
 
 
 def download_vendor_wheels() -> None:
-    """Fetch wheels for VENDOR_PACKAGES into vendor/wheels (needs network)."""
+    """Fetch wheels for VENDOR_PACKAGES into vendor/wheels (needs network), then unpack to site."""
     os.makedirs(VENDOR_WHEELS, exist_ok=True)
     print(f"Downloading {', '.join(VENDOR_PACKAGES)} into {VENDOR_WHEELS} ...", file=sys.stderr)
     subprocess.run(
@@ -171,6 +189,13 @@ def download_vendor_wheels() -> None:
         check=True,
         timeout=VENDOR_DOWNLOAD_TIMEOUT,
     )
+    os.makedirs(VENDOR_SITE, exist_ok=True)
+    for name in os.listdir(VENDOR_WHEELS):
+        if name.endswith(".whl"):
+            with zipfile.ZipFile(os.path.join(VENDOR_WHEELS, name)) as zf:
+                zf.extractall(VENDOR_SITE)
+    ensure_vendor_site()
+    print(f"Unpacked wheels into {VENDOR_SITE}", file=sys.stderr)
 
 
 def upgrade_vendor_packages() -> None:
@@ -194,10 +219,19 @@ def upgrade_vendor_packages() -> None:
 
 
 def ensure_package(package: str, import_name: str) -> None:
-    """Install a missing dependency from vendor/ first, then pip if allowed."""
+    """Load a missing dependency from vendor/site (no pip). Git clones may pip."""
+    ensure_vendor_site()
     if importlib.util.find_spec(import_name) is not None:
         return
     print(f"Missing required package: {package}", file=sys.stderr)
+    site_ok = os.path.isdir(VENDOR_SITE) and any(os.scandir(VENDOR_SITE))
+    if site_ok:
+        print_error(
+            "E15",
+            f"Package {package} is not importable from vendor/site",
+            "vendor/site must match this OS and Python. Run menu D on this machine.",
+        )
+        sys.exit(1)
     if install_from_vendor(package) and importlib.util.find_spec(import_name) is not None:
         return
     answer = input(f"Install {package} now via pip (needs network)? [Y/n]: ").strip().lower()
@@ -211,8 +245,7 @@ def ensure_package(package: str, import_name: str) -> None:
     print_error(
         "E15",
         f"Package {package} is not installed",
-        "Run menu D (pip download) on a matching OS/Python, copy app/vendor/, rerun.",
-        "Or answer y to install via pip if this host has network.",
+        "Use a 1.0 release zip (vendor/site) or run menu D, copy app/vendor/, rerun.",
     )
     sys.exit(1)
 

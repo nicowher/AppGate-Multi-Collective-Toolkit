@@ -32,7 +32,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
 - **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime connects until the first working address (`SSH_PRIME_TIMEOUT`). Auth failure stops the IP walk (SSHBRUTE). Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. With `DEBUG=False`, each try is one line (`label address timeout|ok|auth failed`).
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
-- Missing packages install from `app/vendor/wheels` first, then optional online pip.
+- **Dependencies:** unpacked wheels in `app/vendor/site` are on `sys.path` (no pip). The 1.0 release zip includes a Windows/Python-matched `vendor/site`. Empty site is filled by extracting `vendor/wheels`. Git clones without vendor may still pip.
 
 ## 1) SNMP Credential Tool
 
@@ -108,8 +108,8 @@ Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, `S
 
 ## D / U) Dependencies
 
-- **D:** `pip download` into `app/vendor/wheels` on a **networked machine with the same OS and Python**. Copy the project to the air-gap host.  
-- **U:** `pip install --upgrade` into this interpreter (needs network).
+- **D:** `pip download` into `app/vendor/wheels` on a **networked machine with the same OS and Python**, then unpack into `app/vendor/site`. Copy `app/vendor/` to the air-gap host.  
+- **U:** `pip install --upgrade` into this interpreter (needs network). The 1.0 zip does not need U.
 
 ## Launchers
 

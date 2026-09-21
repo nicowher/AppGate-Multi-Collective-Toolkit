@@ -2,5 +2,6 @@ credentials.json
 __pycache__/
 *.pyc
 app/vendor/wheels/
+app/vendor/site/
 app/vendor/*.zip
 reports/*.json

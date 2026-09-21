@@ -9,9 +9,14 @@ instead of reprinting the traceback.
 
 ``app/`` is menu + config plus folders: ``tools/``, ``api/``, ``ssh/``, ``core/``.
 """
+import os
 import signal
 import sys
 from typing import List, Optional
+
+_VENDOR_SITE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", "site")
+if os.path.isdir(_VENDOR_SITE):
+    sys.path.insert(0, _VENDOR_SITE)
 
 from config import ACAS_MODES, DEBUG, MENU_CHOICE_ALIASES, NO_ANSWERS, YES_ANSWERS
 from core.utils import HaltError
