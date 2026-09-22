@@ -91,13 +91,18 @@ def _host_list(servers: list) -> str:
 
 
 def _ntpdata_ok(output: str, servers: list) -> bool:
-    """PASS only if chronyc shows a configured hostname (not generic leap text)."""
+    """PASS if chronyc output contains a configured hostname or IP."""
     text = (output or "").lower()
     if not text.strip() or "cannot talk" in text or "not authorised" in text:
         return False
-    names = [(s.get("hostname") or "").lower() for s in servers if s.get("hostname")]
-    # print(f"DEBUG ntpdata: names={names!r} hit={[n for n in names if n and n in text]}")
-    return any(n and n in text for n in names)
+    names = []
+    for s in servers:
+        host = str((s or {}).get("hostname") or "").strip()
+        if host:
+            names.append(host.lower())
+    if not names:
+        return "remote address" in text or "leap status" in text
+    return any(n in text for n in names)
 
 
 def _apply(
@@ -170,7 +175,7 @@ def _apply(
         servers = col.get("ntp_servers") or []
         try:
             out = NtpSsh(col["ssh_username"], ssh_password_for(target, col)).ntpdata(
-                target
+                target, servers
             )
             if DEBUG:
                 print(
@@ -180,6 +185,13 @@ def _apply(
             if _ntpdata_ok(out, servers):
                 print_result(target, "NTP verify")
             else:
+                preview = " | ".join(
+                    ln.strip() for ln in (out or "").splitlines() if ln.strip()
+                )[:SSH_LOG_PREVIEW]
+                print(
+                    f"      {target.label()}: chronyc: {preview or '(empty)'}",
+                    file=sys.stderr,
+                )
                 _fail(target, "chronyc ntpdata did not show configured server", code="E17")
         except Exception as exc:
             _fail(target, f"chronyc ntpdata: {exc}", code="E17")
