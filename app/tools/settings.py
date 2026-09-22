@@ -23,6 +23,8 @@ EDITABLE = (
     ("LAB_MODE", bool, "lab TLS/SSH/STIG posture (TLS_VERIFY follows this)"),
     ("DRY_RUN", bool, "force preview; skip pin/push/purge/walk"),
     ("SKIP_CREDENTIAL_WALK", bool, "skip walk after SNMP credential push"),
+    ("ALLOW_SOURCES_LOCKOUT_SSH", bool, "abort replace if this host fails new SSH rules"),
+    ("ALLOW_SOURCES_LOCKOUT_HTTPS", bool, "abort replace if this host fails Admin/SPA HTTPS rules"),
     ("WRITE_RUN_REPORT", bool, "write reports/*.json"),
     ("SSH_TIMEOUT", int, "SSH command timeout (seconds)"),
     ("SSH_PRIME_TIMEOUT", int, "host-key prime timeout (skip dead IPs)"),

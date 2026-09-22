@@ -142,6 +142,10 @@ REPORT_FILE_MODE = 0o600
 DRY_RUN = False
 # When True: menu 1 live push skips step 8 walk. Menu 3 is unchanged.
 SKIP_CREDENTIAL_WALK = False
+# Menu 6 replace: abort (E20) if this workstation would not match new SSH allowSources.
+ALLOW_SOURCES_LOCKOUT_SSH = True
+# Menu 6 replace: abort (E20) if this workstation would not match new Admin/API or SPA/HTTPS rules.
+ALLOW_SOURCES_LOCKOUT_HTTPS = True
 # Directory for run-*.json / dryrun-*.json / walk-*.json (under repo root).
 REPORTS_DIRNAME = "reports"
 SNMPD_STOP_RETRIES = 5

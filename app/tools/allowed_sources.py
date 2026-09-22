@@ -8,9 +8,12 @@
 JSON is per appliance type, then slot (ssh, spa, admin, https, ping, snmp).
 Each slot is address/netmask/nic. Multi-function boxes merge per slot.
 Host routes /32 and /128 matching this box's own IPs are dropped.
+Replace: E20 if this workstation would miss new SSH/Admin/SPA HTTPS CIDRs
+(any prefix length); then two-step confirm (y, then YES) — confirm is not optional.
 """
 import ipaddress
 import os
+import socket
 import sys
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,10 +25,13 @@ from typing import Any, Dict, List, Tuple
 
 from api.appgate import AppliancePutError
 from config import (
+    ALLOW_SOURCES_LOCKOUT_HTTPS,
+    ALLOW_SOURCES_LOCKOUT_SSH,
     ALLOW_SOURCES_PARENT_LABEL,
     ALLOW_SOURCES_SLOT_PARENT,
     DEBUG,
     DRY_RUN,
+    SSH_PRIME_TIMEOUT,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
@@ -189,6 +195,46 @@ def _parent_label(parent: str) -> str:
     return ALLOW_SOURCES_PARENT_LABEL.get(parent, parent)
 
 
+def _outbound_ip(peer: str) -> str:
+    """Local address this host would use to reach peer (UDP connect, no packets)."""
+    peer = (peer or "").split("%")[0].strip()
+    if not peer:
+        return ""
+    family = socket.AF_INET6 if ":" in peer else socket.AF_INET
+    for port in (22, 443, 8443):
+        try:
+            sock = socket.socket(family, socket.SOCK_DGRAM)
+            sock.settimeout(SSH_PRIME_TIMEOUT)
+            sock.connect((peer, port))
+            ip = sock.getsockname()[0]
+            sock.close()
+            return ip
+        except OSError:
+            continue
+    return ""
+
+
+def _rule_allows(local_ip: str, rows: List[Dict[str, Any]]) -> bool:
+    if not local_ip or not rows:
+        return False
+    try:
+        addr = ipaddress.ip_address(local_ip.split("%")[0])
+    except ValueError:
+        return False
+    for row in rows:
+        try:
+            net = ipaddress.ip_network(
+                f"{row.get('address')}/{int(row.get('netmask'))}",
+                strict=False,
+            )
+        except (TypeError, ValueError):
+            continue
+        if addr in net:
+            # print(f"DEBUG lockout: {local_ip} in {net}")
+            return True
+    return False
+
+
 def _print_plan(label: str, mode: str, desired: Dict[str, List[Dict[str, Any]]]) -> None:
     """Dry-run: GUI slot names. DEBUG dumps the raw parent dict separately."""
     print(f"      {label}: would {mode}")
@@ -218,6 +264,89 @@ def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
     )
 
 
+def _plan_one(
+    target: Target, collectives: list
+) -> Dict[str, List[Dict[str, Any]]]:
+    col = collective_for_target(target, collectives)
+    by_slot = _desired_slots(target, col)
+    dropped_all: List[Dict[str, Any]] = []
+    for slot, rows in list(by_slot.items()):
+        kept, dropped = _drop_self(rows, target.self_ips)
+        by_slot[slot] = kept
+        dropped_all.extend(dropped)
+    if dropped_all:
+        print(
+            f"      {target.label()}: excluded self /32|/128 {_fmt(dropped_all)}",
+            file=sys.stderr,
+        )
+    return _slots_to_parents(by_slot)
+
+
+def _ssh_peer(target: Target) -> str:
+    return target.ssh_ip or target.ssh_fqdn or (target.self_ips[0] if target.self_ips else "")
+
+
+def _check_lockout(
+    selected: List[Target],
+    plans: Dict[str, Dict[str, List[Dict[str, Any]]]],
+) -> None:
+    """Halt E20 if replace SSH/Admin/SPA HTTPS rules would not match this host."""
+    checks = []
+    if ALLOW_SOURCES_LOCKOUT_SSH:
+        checks.append(("sshServer", "SSH"))
+    if ALLOW_SOURCES_LOCKOUT_HTTPS:
+        checks.append(("adminInterface", "Admin/API"))
+        checks.append(("clientInterface", "SPA/HTTPS"))
+    if not checks:
+        return
+    blocked = []
+    for target in selected:
+        if target.status == "failed":
+            continue
+        desired = plans.get(target.label()) or {}
+        peer = _ssh_peer(target)
+        local_ip = _outbound_ip(peer)
+        if DEBUG:
+            print(
+                f"      DEBUG lockout: {target.label()} local={local_ip!r} peer={peer!r}",
+                file=sys.stderr,
+            )
+        for parent, label in checks:
+            rows = desired.get(parent) or []
+            if not rows:
+                continue
+            if not local_ip:
+                blocked.append(
+                    f"{target.label()} {label} (could not detect local IP toward {peer or '?'})"
+                )
+                continue
+            if not _rule_allows(local_ip, rows):
+                blocked.append(
+                    f"{target.label()} {label} (this host {local_ip} vs {_fmt(rows)})"
+                )
+    if blocked:
+        halt(
+            "E20",
+            "Replace would lock this workstation out of SSH or HTTPS",
+            *blocked,
+            "Add this machine's IP/prefix to the matching slot, use Add, or disable lockout in Configure.",
+        )
+
+
+def _confirm_replace(plans: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> None:
+    print("\n      Replace plan (all changes):")
+    for label, desired in plans.items():
+        _print_plan(label, "replace", desired)
+    first = input("\n      Proceed with replace? [y/N]: ").strip().lower()
+    if first not in YES_ANSWERS:
+        print("      Cancelled.")
+        raise SystemExit(0)
+    second = input("      Type YES to confirm replace: ").strip()
+    if second != "YES":
+        print("      Cancelled.")
+        raise SystemExit(0)
+
+
 def _apply(
     selected: List[Target],
     clients: ClientMap,
@@ -227,30 +356,18 @@ def _apply(
     dry_run: bool,
 ) -> None:
     print("\n[4/4] Updating allowSources via Controller API...")
-    if overwrite and not dry_run:
-        begin_replaced_run()
+    plans: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     for target in selected:
         if target.status == "failed":
             continue
-        col = collective_for_target(target, collectives)
-        by_slot = _desired_slots(target, col)
-        dropped_all: List[Dict[str, Any]] = []
-        for slot, rows in list(by_slot.items()):
-            kept, dropped = _drop_self(rows, target.self_ips)
-            by_slot[slot] = kept
-            dropped_all.extend(dropped)
-        if dropped_all:
-            print(
-                f"      {target.label()}: excluded self /32|/128 {_fmt(dropped_all)}",
-                file=sys.stderr,
-            )
-        desired = _slots_to_parents(by_slot)
         if not target.functions:
             _fail(target, "no appliance functions; nothing to inherit")
             continue
+        desired = _plan_one(target, collectives)
         if not desired:
             _fail(target, "no allowed_sources left after slot merge / exclude-self")
             continue
+        plans[target.label()] = desired
         if dry_run:
             mode = "replace" if overwrite else "add"
             _print_plan(target.label(), mode, desired)
@@ -260,6 +377,17 @@ def _apply(
                     file=sys.stderr,
                 )
             target.status = "preview"
+    if dry_run:
+        return
+    if overwrite and plans:
+        _check_lockout(selected, plans)
+        _confirm_replace(plans)
+        begin_replaced_run()
+    for target in selected:
+        if target.status == "failed":
+            continue
+        desired = plans.get(target.label())
+        if not desired:
             continue
         client = clients.get(int(target.collective))
         if client is None:

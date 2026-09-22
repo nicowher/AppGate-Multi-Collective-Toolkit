@@ -119,11 +119,11 @@ Updates 6.7.4 `allowSources` (`address`, `netmask`, `nic`). **No SSH.** JSON is 
 
 Every type has `ssh`, `spa`, `ping`, `snmp`. **`admin` only on `controller` and `logServer`.** **`https` only on `portal`.** `spa` and `https` share `clientInterface` (union if both apply).
 
-PUT only that field, and only if `allowSources` already exists on the parent. Does not create `sshServer` / etc. **/32 and /128** matching **this** box’s IPs are dropped. **1) Add** per slot. **2) Replace** per slot (empty replace refused; backup `reports/replaced/`). E08 on unexpected PUT diffs. Client Profile View still required on portals.
+PUT only that field, and only if `allowSources` already exists on the parent. Does not create `sshServer` / etc. **/32 and /128** matching **this** box’s IPs are dropped. **1) Add** per slot. **2) Replace** per slot (empty replace refused; backup `reports/replaced/`). Replace always shows the full plan, then **y** then type **YES** (cannot be disabled). Before PUT, **E20** if this workstation’s outbound IP would not match new **SSH** (`ALLOW_SOURCES_LOCKOUT_SSH`) or **Admin/API / SPA/HTTPS** (`ALLOW_SOURCES_LOCKOUT_HTTPS`) rules — both default on; turn off in Configure. E08 on unexpected PUT diffs. Client Profile View still required on portals.
 
 ## C) Configure
 
-Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, `SKIP_CREDENTIAL_WALK`, SSH/walk timeouts, concurrency, retries. Enter keeps the current value; **S** writes the file atomically and **exits the toolkit** (relaunch so imports see the new values); **Q** cancels and returns to the menu. Flipping `LAB_MODE` off→on requires confirm (STIG deviation). `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` follow `LAB_MODE`.
+Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, `SKIP_CREDENTIAL_WALK`, `ALLOW_SOURCES_LOCKOUT_SSH`, `ALLOW_SOURCES_LOCKOUT_HTTPS`, SSH/walk timeouts, concurrency, retries. Enter keeps the current value; **S** writes the file atomically and **exits the toolkit** (relaunch so imports see the new values); **Q** cancels and returns to the menu. Flipping `LAB_MODE` off→on requires confirm (STIG deviation). `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` follow `LAB_MODE`.
 
 ## D / U) Dependencies
 
@@ -250,6 +250,8 @@ Three switches people actually flip:
 | `DEBUG` | `False` | **Console noise (keep off in production).** `True`: step traces, full JSON dump, pysnmp CFB warning, MAC/oldEngineID lines. Does **not** change TLS, SSH keys, or STIG. Unrelated to `LAB_MODE`. |
 | `DRY_RUN` | `False` | **Force preview.** `True`: skip the “Dry-run only?” prompt and never pin/push/purge/walk/restart snmpd. You can still dry-run when this is `False` by answering `y` at the prompt. Unrelated to `LAB_MODE`. |
 | `SKIP_CREDENTIAL_WALK` | `False` | **Skip step 8 walk** on menu 1 dry-run and live push. Menu 3 is unchanged. |
+| `ALLOW_SOURCES_LOCKOUT_SSH` | `True` | Menu 6 replace: **E20** if this host would miss new SSH rules. |
+| `ALLOW_SOURCES_LOCKOUT_HTTPS` | `True` | Menu 6 replace: **E20** if this host would miss new Admin/API or SPA/HTTPS rules. |
 
 Other knobs:
 
@@ -300,6 +302,7 @@ Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue
 | **E16** | No snmpwalk/pysnmp | Install Net-SNMP or `pip install pysnmp` (menu D). Workers cannot install. |
 | **E17** | NTP chronyc / cz-customization failed | Wait `NTP_VERIFY_DELAY`; `chronyc ntpdata` must show the configured hostname |
 | **E19** | No `allowed_sources` in creds | Add `allowed_sources.<type>.<slot>[]` with `address`, `netmask`, `nic` |
+| **E20** | Replace would lock this workstation out | Add this host’s IP to `ssh` / `admin` / `spa`/`https`, use Add, or turn off lockout in Configure |
 
 ## Troubleshooting
 
