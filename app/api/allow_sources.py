@@ -5,7 +5,7 @@ import copy
 from typing import Any, Dict, List
 
 from config import ALLOW_SOURCES_PUT_ALLOWED, ALLOW_SOURCES_SLOT_PARENT
-from core.utils import write_replaced_snapshot
+from core.utils import debug_log, write_replaced_snapshot
 
 from .errors import AppliancePutError
 
@@ -77,7 +77,7 @@ class AllowSourcesMixin:
                 snapshot_label or str(appliance.get("name") or appliance_id),
                 original,
             )
-        # print(f"DEBUG allowSources: overwrite={overwrite} parents={list(nonempty)}")
+        debug_log(f"allowSources: overwrite={overwrite} parents={list(nonempty)}")
         wrote = False
         counts: Dict[str, int] = {}
         for parent, desired in nonempty.items():

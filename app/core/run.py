@@ -9,7 +9,7 @@ from typing import Dict, List
 
 from api.appgate import AppGateClient
 from core.inventory import Target, prompt_exclusions
-from core.utils import halt, print_error
+from core.utils import debug_log, halt, print_error
 
 ClientMap = Dict[int, AppGateClient]
 
@@ -23,7 +23,7 @@ def login_collectives(collectives: list, *, step: str = "[1/N]") -> ClientMap:
         user = col.get("api_username") or col.get("admin_username") or ""
         password = col.get("api_password") or col.get("admin_password") or ""
         host = col.get("fqdn") or col.get("agip") or ""
-        # print(f"DEBUG login: idx={idx} host={host!r} user={user!r}")
+        debug_log(f"login: idx={idx} host={host!r} user={user!r}")
         if not user or not password:
             print_error(
                 "E02",
@@ -75,7 +75,7 @@ def select_appliances(clients: ClientMap, *, step: str = "[2/N]") -> List[Target
             "Activated boxes with hostname/IP; Appliance View.",
         )
     print(f"      Found {len(inventory)} selectable appliance(s)")
-    # print(f"DEBUG inventory: n={len(inventory)} collectives={list(clients)}")
+    debug_log(f"inventory: n={len(inventory)} collectives={list(clients)}")
     selected = prompt_exclusions(inventory)
     if not selected:
         halt("E04", "Nothing left after exclusions", "Press Enter to keep all.")

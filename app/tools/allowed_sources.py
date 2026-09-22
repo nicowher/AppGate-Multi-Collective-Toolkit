@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Tuple
 
 from api.appgate import AppliancePutError
 from config import (
+    ALLOW_SOURCES_PARENT_LABEL,
     ALLOW_SOURCES_SLOT_PARENT,
     DEBUG,
     DRY_RUN,
@@ -175,11 +176,29 @@ def _slots_to_parents(
 def _fmt(entries: List[Dict[str, Any]]) -> str:
     if not entries:
         return "(none)"
-    return ", ".join(
-        f"{e.get('address')}/{e.get('netmask')}"
-        + (f"@{e.get('nic')}" if e.get("nic") else "")
-        for e in entries
-    )
+    parts = []
+    for e in entries:
+        item = f"{e.get('address')}/{e.get('netmask')}"
+        if e.get("nic"):
+            item += f" on {e['nic']}"
+        parts.append(item)
+    return ", ".join(parts)
+
+
+def _parent_label(parent: str) -> str:
+    return ALLOW_SOURCES_PARENT_LABEL.get(parent, parent)
+
+
+def _print_plan(label: str, mode: str, desired: Dict[str, List[Dict[str, Any]]]) -> None:
+    """Dry-run: GUI slot names. DEBUG dumps the raw parent dict separately."""
+    print(f"      {label}: would {mode}")
+    width = max(len(_parent_label(p)) for p in desired) if desired else 3
+    for parent, rows in desired.items():
+        print(f"            {_parent_label(parent):<{width}}  {_fmt(rows)}")
+
+
+def _counts_line(counts: Dict[str, int]) -> str:
+    return ", ".join(f"{_parent_label(p)} {n}" for p, n in counts.items())
 
 
 def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
@@ -232,11 +251,14 @@ def _apply(
         if not desired:
             _fail(target, "no allowed_sources left after slot merge / exclude-self")
             continue
-        summary = "; ".join(f"{p}={_fmt(r)}" for p, r in desired.items())
         if dry_run:
             mode = "replace" if overwrite else "add"
-            # print(f"DEBUG allow: {target.label()} {mode} {desired!r}")
-            print(f"      {target.label()}: would {mode} {summary}")
+            _print_plan(target.label(), mode, desired)
+            if DEBUG:
+                print(
+                    f"      DEBUG allow: {target.label()} {mode} {desired!r}",
+                    file=sys.stderr,
+                )
             target.status = "preview"
             continue
         client = clients.get(int(target.collective))
@@ -251,7 +273,12 @@ def _apply(
                 snapshot_label=target.label(),
             )
             target.status = "ok"
-            print_result(target, str(counts))
+            print_result(target, _counts_line(counts))
+            if DEBUG:
+                print(
+                    f"      DEBUG allow: {target.label()} counts={counts!r} desired={desired!r}",
+                    file=sys.stderr,
+                )
         except AppliancePutError as exc:
             _fail(target, str(exc))
         except Exception as exc:

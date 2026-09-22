@@ -45,7 +45,13 @@ from core.utils import (
     print_error,
     write_json_report,
 )
-from core.run import ClientMap, login_collectives, prompt_add_or_replace, select_appliances
+from core.run import (
+    ClientMap,
+    login_collectives,
+    print_result,
+    prompt_add_or_replace,
+    select_appliances,
+)
 from ssh.client import prime_target_host_keys, ssh_password_for
 from ssh.ntp import NtpSsh
 
@@ -124,10 +130,9 @@ def _apply(
                 target.appliance_id, servers, overwrite=overwrite
             )
             target.status = "ok"
-            print(
-                f"      {target.label()}: NTP {mode} "
-                f"({len(merged)} server(s))"
-            )
+            print_result(target, f"NTP {mode} ({len(merged)} server(s))")
+            if DEBUG:
+                print(f"      DEBUG ntp hosts={[s.get('hostname') for s in merged if isinstance(s, dict)]}", file=sys.stderr)
         except AppliancePutError as exc:
             # print(f"DEBUG ntp: E11 put {target.label()!r} {exc!r}")
             _fail(target, str(exc), code="E11")
@@ -139,10 +144,9 @@ def _apply(
     if dry_run:
         for target in selected:
             if target.status == "preview":
-                print(
-                    f"      {target.label()}: would restart "
-                    f"{NTP_CUSTOMIZATION_UNIT} then chronyc ntpdata"
-                )
+                print(f"      {target.label()}: would restart NTP apply service then verify")
+                if DEBUG:
+                    print(f"      DEBUG would restart {NTP_CUSTOMIZATION_UNIT}", file=sys.stderr)
         return
     if not live:
         return
@@ -153,7 +157,9 @@ def _apply(
             NtpSsh(col["ssh_username"], ssh_password_for(target, col)).restart_customization(
                 target
             )
-            print(f"      {target.label()}: {NTP_CUSTOMIZATION_UNIT} restarted")
+            print(f"      {target.label()}: NTP apply service restarted")
+            if DEBUG:
+                print(f"      DEBUG restarted {NTP_CUSTOMIZATION_UNIT}", file=sys.stderr)
         except Exception as exc:
             _fail(target, f"customization restart: {exc}", code="E17")
     time.sleep(NTP_VERIFY_DELAY)
@@ -172,7 +178,7 @@ def _apply(
                     file=sys.stderr,
                 )
             if _ntpdata_ok(out, servers):
-                print(f"      {target.label()}: chronyc ntpdata PASS")
+                print_result(target, "NTP verify")
             else:
                 _fail(target, "chronyc ntpdata did not show configured server", code="E17")
         except Exception as exc:

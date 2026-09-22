@@ -33,7 +33,13 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from api.appgate import AppGateClient, AppliancePutError
-from core.run import ClientMap, login_collectives, prompt_add_or_replace, select_appliances
+from core.run import (
+    ClientMap,
+    login_collectives,
+    print_result,
+    prompt_add_or_replace,
+    select_appliances,
+)
 from config import (
     APPGATE_API_VERSION,
     DEBUG,
@@ -327,7 +333,10 @@ def _run_phases_3_to_8(
         if engine_id.lower().startswith("0x"):
             engine_id = engine_id[2:]
         target.engine_id = engine_id
-        print(f"      {target.label()}: engine {engine_id}")
+        if DEBUG:
+            print(f"      {target.label()}: engine {engine_id}")
+        else:
+            print(f"      {target.label()}: engine ID read")
 
     run_ssh_batch(_ok(selected), _ssh_engine, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
     if not _ok(selected):
@@ -358,10 +367,12 @@ def _run_phases_3_to_8(
     mode = "replace" if replace else "add"
     if dry_run:
         for target in _ok(selected):
-            print(
-                f"      {target.label()}: would {mode} createUser {user} "
-                f"(engine {target.engine_id or '?'})"
-            )
+            print(f"      {target.label()}: would {mode} SNMPv3 user {user}")
+            if DEBUG:
+                print(
+                    f"      DEBUG {target.label()}: engine={target.engine_id or '?'}",
+                    file=sys.stderr,
+                )
             target.status = "preview"
     else:
         if replace:
@@ -379,7 +390,7 @@ def _run_phases_3_to_8(
                 replace=replace,
             )
             target.status = "ok"
-            print(f"      {target.label()}: config pushed")
+            print_result(target, f"SNMP {mode}")
 
         _api_by_collective(_ok(selected), clients, _push)
 
@@ -408,7 +419,13 @@ def _run_phases_3_to_8(
             if SKIP_CREDENTIAL_WALK:
                 print(f"      {target.label()}: skipped (SKIP_CREDENTIAL_WALK)")
             else:
-                print(f"      {target.label()}: would walk {target.walk_endpoints()}")
+                host = (target.walk_endpoints() or ["?"])[0]
+                print(f"      {target.label()}: would walk {host}")
+                if DEBUG:
+                    print(
+                        f"      DEBUG walk endpoints={target.walk_endpoints()!r}",
+                        file=sys.stderr,
+                    )
             target.walk_ok = None
     else:
         time.sleep(SNMP_RELOAD_DELAY)
@@ -424,9 +441,7 @@ def _run_phases_3_to_8(
                 label=target.label(),
             )
             target.walk_ok = ok
-            host = target.ssh_fqdn or target.ssh_ip
-            state = "PASSED" if ok else "FAILED"
-            print(f"      [{state:<7}] {target.label():<32} {host:<22} walk")
+            print_result(target, "walk", ok=ok)
             if not ok:
                 raise RuntimeError("SNMP walk failed")
 
@@ -459,7 +474,8 @@ def _print_summary(
         if DEBUG:
             extra = target.engine_id or target.error
         host = target.ssh_fqdn or target.ssh_ip
-        print(f"  [{state:<7}] {target.label():<32} {host:<22} {extra}")
+        tail = f" {extra}" if extra else ""
+        print(f"  [{state:<7}] {target.label():<32} {host:<22}{tail}")
         if PRINT_ESXI_KEYS and target.auth_hash and target.status in ("ok", "preview"):
             print(f"           ESXi: {user}/{target.auth_hash}/{target.priv_hash}/priv")
     print("=" * SUMMARY_WIDTH)

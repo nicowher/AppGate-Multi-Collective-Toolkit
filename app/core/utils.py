@@ -48,6 +48,12 @@ _FQDN_RE = re.compile(
 )
 
 
+def debug_log(msg: str) -> None:
+    """Full diagnostic line when DEBUG=True. No-op when DEBUG is off."""
+    if DEBUG:
+        print(f"      DEBUG {msg}", file=sys.stderr)
+
+
 def print_error(code: str, message: str, *hints: str) -> None:
     """Always-on (DEBUG off too). code like E02. hints are next steps."""
     print(f"ERROR {code}: {message}", file=sys.stderr)
@@ -62,7 +68,7 @@ class HaltError(ValueError):
 
 def halt(code: str, message: str, *hints: str) -> None:
     """Print ERROR code and stop this tool."""
-    # print(f"DEBUG halt: {code} {message}")
+    debug_log(f"halt: {code} {message}")
     print_error(code, message, *hints)
     raise HaltError(f"{code}: {message}")
 

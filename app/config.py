@@ -266,6 +266,14 @@ ALLOW_SOURCES_SLOT_PARENT = {
 ALLOW_SOURCES_PUT_ALLOWED = tuple(
     f"{p}.allowSources" for p in sorted(set(ALLOW_SOURCES_SLOT_PARENT.values()))
 )
+# Console labels when DEBUG is off (API parent names stay in DEBUG dumps).
+ALLOW_SOURCES_PARENT_LABEL = {
+    "sshServer": "SSH",
+    "clientInterface": "SPA/HTTPS",
+    "adminInterface": "Admin/API",
+    "ping": "Ping",
+    "snmpServer": "SNMP",
+}
 SNMP_WALK_OID = "1.3.6.1.2.1.1"
 SNMPWALK_PROBE_TIMEOUT = 4
 SNMPWALK_RETRIES = 1

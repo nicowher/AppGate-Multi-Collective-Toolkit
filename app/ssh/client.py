@@ -420,7 +420,12 @@ class SSHSession:
         # if DEBUG:
         #     print(f"DEBUG sudo_script rc={exit_status} out={(output or '')[:80]!r}", file=sys.stderr)
         if DEBUG:
-            print(f"      DEBUG sudo_script rc={exit_status} out_len={len(output)}", file=sys.stderr)
+            print(
+                f"      DEBUG sudo_script rc={exit_status} "
+                f"out={(output or '')[:SSH_LOG_PREVIEW]!r} "
+                f"err={(err_output or '')[:SSH_LOG_PREVIEW]!r}",
+                file=sys.stderr,
+            )
         return exit_status, (output + "\n" + err_output).strip()
 
     def _run(

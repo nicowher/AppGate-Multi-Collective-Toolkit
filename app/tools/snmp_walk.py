@@ -109,6 +109,8 @@ def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
         ok = validator.validate_snmp_walk(hosts, user, auth, priv, label=ip)
         state = "PASSED" if ok else "FAILED"
         print(f"      [{state:<7}] {ip}")
+        if DEBUG:
+            print(f"      DEBUG walk-single: ok={ok} hosts={hosts!r}", file=sys.stderr)
         if not ok:
             any_fail = True
         again = input("      Walk another IP? [y/N]: ").strip().lower()
@@ -148,6 +150,11 @@ def _walk_inventory(creds: dict) -> int:
         )
         target.walk_ok = ok
         print_result(target, "walk", ok=ok)
+        if DEBUG:
+            print(
+                f"      DEBUG walk: {target.label()} endpoints={target.walk_endpoints()!r}",
+                file=sys.stderr,
+            )
         if not ok:
             raise RuntimeError("SNMP walk failed")
 

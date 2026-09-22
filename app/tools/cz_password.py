@@ -19,7 +19,7 @@ if _APP_DIR not in sys.path:
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from core.run import ClientMap, login_collectives, select_appliances
+from core.run import ClientMap, login_collectives, print_result, select_appliances
 from config import (
     CZ_PASSWORD_VERIFY_DELAY,
     DEBUG,
@@ -43,7 +43,7 @@ from ssh.password import CzPassword
 def _fail(target: Target, message: str) -> None:
     target.status = "failed"
     target.error = message
-    print(f"      FAIL {target.label()}: {message}", file=sys.stderr)
+    print_result(target, message, ok=False)
 
 
 def _apply(
@@ -85,7 +85,7 @@ def _apply(
             )
             raise RuntimeError("login verify FAILED")
         target.status = "ok"
-        print(f"      {target.label()}: password updated, login PASS")
+        print_result(target, "password updated")
 
     run_ssh_batch(selected, _one, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 
