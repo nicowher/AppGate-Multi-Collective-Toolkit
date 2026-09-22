@@ -37,18 +37,43 @@ def _ask_cancel_job() -> bool:
     return ans in YES_ANSWERS
 
 
+_STDIN_WAIT_NAMES = frozenset(
+    {
+        "input",
+        "raw_input",
+        "readline",
+        "read",
+        "getpass",
+        "prompt_until_valid",
+        "_require",
+        "_ask_cancel_job",
+        "confirm_skip_tls_verify",
+    }
+)
+
+
+def _in_stdin_wait(frame) -> bool:
+    """True if Ctrl+C hit an input() prompt (Windows frame is often prompt_until_valid)."""
+    cur = frame
+    while cur is not None:
+        if cur.f_code.co_name in _STDIN_WAIT_NAMES:
+            return True
+        cur = cur.f_back
+    return False
+
+
 def _sigint_confirm_cancel(signum, frame) -> None:
-    """Ask before cancelling. Do not nest input() inside another input/getpass."""
+    """Ask before cancelling. Never nest input() — readline cannot re-enter."""
     global _sigint_asking
     # print(f"DEBUG sigint: asking={_sigint_asking}")
-    if _sigint_asking:
-        raise KeyboardInterrupt
-    name = frame.f_code.co_name if frame is not None else ""
-    if name in ("input", "raw_input", "readline", "read", "getpass"):
+    if _sigint_asking or _in_stdin_wait(frame):
         raise KeyboardInterrupt
     _sigint_asking = True
     try:
-        if _ask_cancel_job():
+        try:
+            if _ask_cancel_job():
+                raise KeyboardInterrupt
+        except RuntimeError:
             raise KeyboardInterrupt
         print("      Continuing job...", file=sys.stderr)
     finally:
@@ -147,8 +172,11 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
             return 0
         return 1
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user", file=sys.stderr)
-        return 130
+        if _ask_cancel_job():
+            print("\nOperation cancelled by user", file=sys.stderr)
+            return 130
+        print("      Restarting this tool...", file=sys.stderr)
+        return -2
     except HaltError:
         return 1
     except SystemExit as exc:
@@ -186,21 +214,31 @@ def cli(argv: Optional[List[str]] = None) -> None:
             else:
                 choice = _prompt_menu_choice()
                 rest = []
-            if choice == "q":
-                return
-            if not choice:
-                print(f"Invalid choice. Use {_menu_select_hint()}.", file=sys.stderr)
-                if noninteractive:
-                    sys.exit(2)
-                continue
-            code = _run_selected_tool(choice, rest)
         except KeyboardInterrupt:
-            print("\nOperation cancelled by user", file=sys.stderr)
-            code = 130
-            if noninteractive:
-                sys.exit(1)
             print()
             continue
+        if choice == "q":
+            return
+        if not choice:
+            print(f"Invalid choice. Use {_menu_select_hint()}.", file=sys.stderr)
+            if noninteractive:
+                sys.exit(2)
+            continue
+        try:
+            code = _run_selected_tool(choice, rest)
+            while code == -2:
+                code = _run_selected_tool(choice, rest)
+        except KeyboardInterrupt:
+            if _ask_cancel_job():
+                print("\nOperation cancelled by user", file=sys.stderr)
+                if noninteractive:
+                    sys.exit(1)
+                print()
+                continue
+            print("      Restarting this tool...", file=sys.stderr)
+            code = -2
+            while code == -2:
+                code = _run_selected_tool(choice, rest)
         if choice == "c":
             if noninteractive:
                 sys.exit(0 if code < 0 else code)

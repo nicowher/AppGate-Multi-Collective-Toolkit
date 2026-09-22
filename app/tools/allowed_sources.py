@@ -63,17 +63,14 @@ def _login(collectives: list) -> ClientMap:
     clients: ClientMap = {}
     for col in collectives:
         idx = int(col["index"])
-        client = AppGateClient(
-            fqdn=col.get("fqdn") or "",
-            agip=col.get("agip") or "",
-            username=col["api_username"],
-            password=col["api_password"],
-        )
+        user = col.get("api_username") or col.get("admin_username") or ""
+        password = col.get("api_password") or col.get("admin_password") or ""
+        print(f"      [{idx}] {col.get('fqdn') or col.get('agip')} as {user}...")
+        client = AppGateClient(col.get("fqdn") or "", fallback_ip=col.get("agip") or "")
         try:
-            print(f"      [{idx}] {col.get('fqdn') or col.get('agip')} as {col['api_username']}...")
-            client.login()
-            print(f"      [{idx}] Authenticated")
+            client.login(user, password)
             clients[idx] = client
+            print(f"      [{idx}] Authenticated")
         except Exception as exc:
             print_error(
                 "E02",
