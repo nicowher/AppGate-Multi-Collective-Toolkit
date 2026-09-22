@@ -18,7 +18,7 @@ if _APP_DIR not in sys.path:
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from api.appgate import AppGateClient, AppliancePutError
+from api.appgate import AppliancePutError
 from config import (
     DEBUG,
     DRY_RUN,
@@ -29,7 +29,7 @@ from config import (
     YES_ANSWERS,
     warn_insecure_transport,
 )
-from core.inventory import Target, prompt_exclusions
+from core.inventory import Target
 from core.prompts import (
     CREDENTIALS_PATH,
     _parse_collectives,
@@ -45,10 +45,9 @@ from core.utils import (
     print_error,
     write_json_report,
 )
+from core.run import ClientMap, login_collectives, prompt_add_or_replace, select_appliances
 from ssh.client import prime_target_host_keys, ssh_password_for
 from ssh.ntp import NtpSsh
-
-ClientMap = Dict[int, AppGateClient]
 
 
 def _fail(target: Target, message: str, code: str = "E11") -> None:
@@ -63,65 +62,6 @@ def _fail(target: Target, message: str, code: str = "E11") -> None:
     )
 
 
-def _login(collectives: list) -> ClientMap:
-    print("\n[1/4] Authenticating to Controller API(s)...")
-    clients: ClientMap = {}
-    for col in collectives:
-        idx = int(col["index"])
-        print(f"      [{idx}] {col['fqdn']} as {col['api_username']}...")
-        client = AppGateClient(col["fqdn"], fallback_ip=col.get("agip") or "")
-        try:
-            client.login(col["api_username"], col["api_password"])
-            clients[idx] = client
-            print(f"      [{idx}] Authenticated")
-        except Exception as exc:
-            print_error(
-                "E02",
-                f"[{idx}] LOGIN FAILED: {exc}",
-                "Check api_username/api_password and MFA exemption.",
-                "Self-signed: answer y on Proceed anyway, or LAB_MODE=True.",
-            )
-    if not clients:
-        halt(
-            "E02",
-            "No Controller accepted login",
-            "Fix API creds, TLS, or agip. https://<fqdn>:8443/admin.",
-        )
-    return clients
-
-
-def _inventory(clients: ClientMap) -> List[Target]:
-    print("\n[2/4] Pulling appliances from every Controller...")
-    inventory: List[Target] = []
-    for idx, client in sorted(clients.items()):
-        try:
-            inventory.extend(
-                client.list_targets(
-                    collective=idx,
-                    fallback_ip=client.fallback_ip,
-                    collective_fqdn=client.fqdn,
-                )
-            )
-        except Exception as exc:
-            print(f"      [{idx}] list failed: {exc}", file=sys.stderr)
-    if not inventory:
-        halt(
-            "E03",
-            "No activated appliances with an SSH address were found",
-            "Need activated appliances with SSH FQDN/IP.",
-        )
-    print(f"      Found {len(inventory)} selectable appliance(s)")
-    selected = prompt_exclusions(inventory)
-    if not selected:
-        halt(
-            "E04",
-            "Nothing left after exclusions",
-            "Press Enter to keep all, or exclude fewer.",
-        )
-    print(f"      Selected {len(selected)} appliance(s)")
-    return selected
-
-
 def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
     """True = replace entire ntp list. False = add/update by hostname."""
     sample = selected[0]
@@ -132,20 +72,12 @@ def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
             current = client.peek_ntp(sample.appliance_id)
         except Exception as exc:
             print(f"      Could not read current NTP: {exc}", file=sys.stderr)
-    print(
-        f"      Current NTP on {sample.label()}: "
-        + (", ".join(current) if current else "(none / not in GET)")
+    return prompt_add_or_replace(
+        f"Current NTP on {sample.label()}: "
+        + (", ".join(current) if current else "(none / not in GET)"),
+        add_line="Add (update key if hostname matches, else append)",
+        replace_line="Overwrite (replace the whole NTP list with credentials.json)",
     )
-    # print(f"DEBUG ntp: peek hosts={current!r} sample={sample.label()}")
-    print("  1) Add (update key if hostname matches, else append)")
-    print("  2) Overwrite (replace the whole NTP list with credentials.json)")
-    choice = ""
-    while choice not in ("1", "2", "q"):
-        choice = input("Select 1, 2, or Q: ").strip().lower()
-    if choice == "q":
-        print("      Cancelled.")
-        raise SystemExit(0)
-    return choice == "2"
 
 
 def _host_list(servers: list) -> str:
@@ -312,8 +244,8 @@ def main() -> None:
     if DEBUG:
         print(f"      DEBUG ntp: collectives={len(collectives)}", file=sys.stderr)
 
-    clients = _login(collectives)
-    selected = _inventory(clients)
+    clients = login_collectives(collectives, step="[1/4]")
+    selected = select_appliances(clients, step="[2/4]")
     overwrite = _prompt_merge_mode(clients, selected)
     dry_run = DRY_RUN
     if not dry_run:

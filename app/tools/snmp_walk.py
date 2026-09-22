@@ -18,7 +18,7 @@ if _APP_DIR not in sys.path:
 
 from datetime import datetime, timezone
 
-from api.appgate import AppGateClient
+from core.run import login_collectives, print_result, select_appliances
 from config import (
     DEBUG,
     SNMP_AUTH_PROTOCOL,
@@ -30,7 +30,7 @@ from config import (
     YES_ANSWERS,
     warn_insecure_transport,
 )
-from core.inventory import prompt_exclusions
+
 from core.prompts import (
     CREDENTIALS_PATH,
     _parse_collectives,
@@ -127,59 +127,8 @@ def _walk_inventory(creds: dict) -> int:
         )
     prepare_collectives(creds, collectives, need_ssh=False, need_snmp=True)
 
-    print("\n[1/3] Authenticating to Controller API(s)...")
-    clients = {}
-    for col in collectives:
-        idx = int(col["index"])
-        print(f"      [{idx}] {col['fqdn']} as {col['api_username']}...")
-        client = AppGateClient(col["fqdn"], fallback_ip=col.get("agip") or "")
-        try:
-            client.login(col["api_username"], col["api_password"])
-            clients[idx] = client
-            print(f"      [{idx}] Authenticated")
-        except Exception as exc:
-            print_error(
-                "E02",
-                f"[{idx}] LOGIN FAILED: {exc}",
-                "Check api_username/api_password and MFA exemption.",
-                "Self-signed: answer y on Proceed anyway, or LAB_MODE=True.",
-            )
-    if not clients:
-        halt(
-            "E02",
-            "No Controller accepted login",
-            "Fix API creds, TLS, or agip.",
-        )
-
-    # list_targets uses GET /appliances plus GET /appliances/status (not /stats/appliances).
-    print("\n[2/3] Pulling appliances from every Controller...")
-    inventory = []
-    for idx, client in sorted(clients.items()):
-        try:
-            inventory.extend(
-                client.list_targets(
-                    collective=idx,
-                    fallback_ip=client.fallback_ip,
-                    collective_fqdn=client.fqdn,
-                )
-            )
-        except Exception as exc:
-            print(f"      [{idx}] list failed: {exc}", file=sys.stderr)
-    if not inventory:
-        halt(
-            "E03",
-            "No activated appliances with an SSH address were found",
-            "Need activated appliances with an SSH FQDN/IP.",
-        )
-    print(f"      Found {len(inventory)} selectable appliance(s)")
-    selected = prompt_exclusions(inventory)
-    if not selected:
-        halt(
-            "E04",
-            "Nothing left to walk after exclusions",
-            "Press Enter to keep all, or exclude fewer.",
-        )
-    print(f"      Selected {len(selected)} appliance(s)")
+    clients = login_collectives(collectives, step="[1/3]")
+    selected = select_appliances(clients, step="[2/3]")
 
     # print("DEBUG walk-inventory:", [t.label() for t in selected])
     if DEBUG:
@@ -198,9 +147,7 @@ def _walk_inventory(creds: dict) -> int:
             label=target.label(),
         )
         target.walk_ok = ok
-        host = target.ssh_fqdn or target.ssh_ip
-        state = "PASSED" if ok else "FAILED"
-        print(f"      [{state:<7}] {target.label():<32} {host:<22} walk")
+        print_result(target, "walk", ok=ok)
         if not ok:
             raise RuntimeError("SNMP walk failed")
 

@@ -15,7 +15,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 | **3** | SNMP Walk — validate authPriv only (no SSH / no config push) |
 | **4** | Update cz SSH password — `openssl passwd -6` + `cz-config` + login verify |
 | **5** | NTP servers — PUT `ntp.servers`, then restart cz-customization + chronyc verify |
-| **6** | Allowed sources — merge by function, exclude-self /32|/128, PUT existing `allowSources` |
+| **6** | Allowed sources — per type/slot (`ssh`/`spa`/`admin`/`https`/`ping`/`snmp`), exclude-self /32|/128 |
 | **C** | Configure — edit `DEBUG`, `LAB_MODE`, SSH/walk timeouts in `config.py` |
 | **D** | Download deps — `pip download` into `app/vendor/wheels` (source tree only; hidden in the GitHub zip) |
 | **U** | Update deps — `pip install --upgrade` (source tree only; hidden in the GitHub zip) |
@@ -30,6 +30,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **Defaults off.** **`DEBUG` and `DRY_RUN` are separate.**
 - **Ctrl+C during a tool:** `Cancel this job and return to menu? [y/N]` (default N continues). Second Ctrl+C cancels. In-flight SSH/walks are not killed instantly. At the menu / Return to menu, Ctrl+C just redisplays the menu.
 - **Live result lines:** `[PASSED ]` / `[FAILED ]` then label, host, tool (`walk` / `harden` / `unharden`).
+- **Shared run path:** `core/run.py` (login, inventory/exclude, add vs replace, result line). Appliance PUT helpers: `api/snmp.py`, `api/ntp.py`, `api/allow_sources.py` mixins on `AppGateClient`.
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
 - **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime connects until the first working address (`SSH_PRIME_TIMEOUT`). Auth failure stops the IP walk (SSHBRUTE). Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. With `DEBUG=False`, each try is one line (`label address timeout|ok|auth failed`).
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
@@ -105,11 +106,20 @@ Pushes NTP the Admin UI way (`ntp.servers` on the appliance object) so it surviv
 
 ## 6) Allowed sources
 
-Updates 6.7.4 `allowSources` (`address`, `netmask`, `nic`) on existing appliance interfaces (`clientInterface`, `adminInterface`, `sshServer`, `snmpServer`, `healthcheckServer`, `ping`, `prometheusExporter`). **No SSH.**
+Updates 6.7.4 `allowSources` (`address`, `netmask`, `nic`). **No SSH.** JSON is **appliance type → slot → entries**. Multi-function boxes merge **per slot**.
 
-`credentials.json` `allowed_sources.<function>[]`. Multi-function boxes inherit both lists (deduped). **/32 and /128** matching **this** appliance’s IPs (inventory NICs + `GET /appliances/status` `network.details.*.ips`) are dropped.
+| Slot | GUI | PUT field |
+| --- | --- | --- |
+| `ssh` | System Settings → SSH Server → Allowed Sources | `sshServer.allowSources` |
+| `spa` | Functions → System TLS Connection (SPA) | `clientInterface.allowSources` |
+| `admin` | Admin/API TLS — Controller or LogServer | `adminInterface.allowSources` |
+| `https` | Functions → HTTPS Settings — Portal | `clientInterface.allowSources` (portal) |
+| `ping` | Miscellaneous → Allow Ping Sources | `ping.allowSources` |
+| `snmp` | Miscellaneous → SNMP Server → Sources | `snmpServer.allowSources` |
 
-**1) Add** appends onto **each existing** `allowSources` array (no cross-interface union). **2) Replace** writes the same desired list onto every array that already exists (refuses empty; does not create new interface objects; backup in `reports/replaced/<UTC>/`). Invalid address/netmask rows are skipped. Guarded full-document PUT (E08). Client Profile View still required on portals.
+Every type has `ssh`, `spa`, `ping`, `snmp`. **`admin` only on `controller` and `logServer`.** **`https` only on `portal`.** `spa` and `https` share `clientInterface` (union if both apply).
+
+PUT only that field, and only if `allowSources` already exists on the parent. Does not create `sshServer` / etc. **/32 and /128** matching **this** box’s IPs are dropped. **1) Add** per slot. **2) Replace** per slot (empty replace refused; backup `reports/replaced/`). E08 on unexpected PUT diffs. Client Profile View still required on portals.
 
 ## C) Configure
 
@@ -289,7 +299,7 @@ Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue
 | **E15** | pip / vendor wheels | Menu **D** on matching OS/Python; copy `app/vendor/` |
 | **E16** | No snmpwalk/pysnmp | Install Net-SNMP or `pip install pysnmp` (menu D). Workers cannot install. |
 | **E17** | NTP chronyc / cz-customization failed | Wait `NTP_VERIFY_DELAY`; `chronyc ntpdata` must show the configured hostname |
-| **E19** | No `allowed_sources` in creds | Add `allowed_sources.<function>[]` with `address`, `netmask`, `nic` |
+| **E19** | No `allowed_sources` in creds | Add `allowed_sources.<type>.<slot>[]` with `address`, `netmask`, `nic` |
 
 ## Troubleshooting
 

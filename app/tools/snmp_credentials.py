@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from api.appgate import AppGateClient, AppliancePutError
+from core.run import ClientMap, login_collectives, prompt_add_or_replace, select_appliances
 from config import (
     APPGATE_API_VERSION,
     DEBUG,
@@ -54,7 +55,7 @@ from config import (
     YES_ANSWERS,
     warn_insecure_transport,
 )
-from core.inventory import Target, prompt_exclusions
+from core.inventory import Target
 from core.prompts import (
     CREDENTIALS_PATH,
     _parse_collectives,
@@ -77,9 +78,6 @@ from core.utils import (
 from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 from ssh.engine import SNMPEngineFetcher
 
-ClientMap = Dict[int, AppGateClient]
-
-
 def _ok(targets: List[Target]) -> List[Target]:
     """Appliances that have not failed a previous phase (still in the run)."""
     return [t for t in targets if t.status != "failed"]
@@ -101,15 +99,11 @@ def _fail(target: Target, message: str, code: str = "E09") -> None:
 
 def _prompt_snmp_mode() -> bool:
     """True = replace all USM users in snmpd.conf with this one."""
-    print("  1) Add (keep other USM users; add/update this username)")
-    print("  2) Replace (drop other createUser/rouser lines; this user only)")
-    choice = ""
-    while choice not in ("1", "2", "q"):
-        choice = input("Select 1, 2, or Q: ").strip().lower()
-    if choice == "q":
-        print("      Cancelled.")
-        raise SystemExit(0)
-    return choice == "2"
+    return prompt_add_or_replace(
+        "",
+        add_line="Add (keep other USM users; add/update this username)",
+        replace_line="Replace (drop other createUser/rouser lines; this user only)",
+    )
 
 
 def _api_by_collective(
@@ -185,53 +179,10 @@ def main() -> None:
         rouser_line = f"rouser {inputs['rouser']} priv" if inputs.get("rouser") else ""
         started_at = datetime.now(timezone.utc).isoformat()
 
-        print("\n[1/8] Authenticating to Controller API(s)...")
-        clients: ClientMap = {}
-        for col in collectives:
-            idx = int(col["index"])
-            print(f"      [{idx}] {col['fqdn']} as {col['api_username']}...")
-            client = AppGateClient(col["fqdn"], fallback_ip=col.get("agip") or "")
-            try:
-                client.login(col["api_username"], col["api_password"])
-                clients[idx] = client
-                print(f"      [{idx}] Authenticated")
-            except Exception as exc:
-                print_error(
-                    "E02",
-                    f"[{idx}] LOGIN FAILED: {exc}",
-                    "Check api_username/api_password and MFA exemption.",
-                    "Self-signed: answer y on Proceed anyway, or LAB_MODE=True.",
-                )
-        if not clients:
-            halt(
-                "E02",
-                "No Controller accepted login",
-                "Fix API creds, TLS, or agip.",
-            )
+        clients = login_collectives(collectives, step="[1/8]")
         # print("DEBUG step1: logged in", list(clients))
         if DEBUG:
             print(f"      DEBUG step1: logged in collectives={list(clients)}", file=sys.stderr)
-
-        print("\n[2/8] Pulling appliances from every Controller...")
-        inventory: List[Target] = []
-        for idx, client in sorted(clients.items()):
-            try:
-                inventory.extend(
-                    client.list_targets(
-                        collective=idx,
-                        fallback_ip=client.fallback_ip,
-                        collective_fqdn=client.fqdn,
-                    )
-                )
-            except Exception as exc:
-                print(f"      [{idx}] list failed: {exc}", file=sys.stderr)
-        if not inventory:
-            halt(
-                "E03",
-                "No activated appliances with an SSH address were found",
-                "Need activated appliances with SSH FQDN/IP and Appliance View.",
-            )
-        print(f"      Found {len(inventory)} selectable appliance(s)")
 
         if dry_run:
             print(
@@ -251,14 +202,8 @@ def main() -> None:
                 file=sys.stderr,
             )
 
-        selected = prompt_exclusions(inventory)
-        if not selected:
-            halt(
-                "E04",
-                "Nothing left to configure after exclusions",
-                "Press Enter to keep all, or exclude fewer.",
-            )
-        print(f"      Selected {len(selected)} appliance(s)")
+        selected = select_appliances(clients, step="[2/8]")
+        inventory = selected
         # print("DEBUG step2:", [t.label() for t in selected])
         if DEBUG:
             print(f"      DEBUG step2: selected={[t.label() for t in selected]}", file=sys.stderr)

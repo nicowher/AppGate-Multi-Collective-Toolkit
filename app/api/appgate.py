@@ -48,6 +48,8 @@ from config import (
     ENGINE_ID_TYPE,
     LAB_MODE,
     NTP_KEY_HEX_PREFIX,
+    ALLOW_SOURCES_PUT_ALLOWED,
+    ALLOW_SOURCES_SLOT_PARENT,
     NTP_KEY_TYPE_MAP,
     NTP_WEAK_KEY_TYPES,
     SNMP_AUTH_PROTOCOL,
@@ -74,8 +76,10 @@ from core.inventory import (
 from core.utils import print_error, write_replaced_snapshot
 
 
-class AppliancePutError(RuntimeError):
-    """GET/PUT guard or Controller rejected the appliance document (E08)."""
+from .allow_sources import AllowSourcesMixin
+from .errors import AppliancePutError
+from .ntp import NtpMixin
+from .snmp import SnmpMixin
 
 _tls_verify = TLS_VERIFY
 if not _tls_verify:
@@ -92,16 +96,7 @@ def _disable_tls_verify() -> None:
 
 SNMP_PUT_ALLOWED = ("snmpServer.snmpd.conf", "snmpServer.enabled")
 NTP_PUT_ALLOWED = ("ntp", "ntpServers", "ntpServer")
-ALLOW_SOURCES_PARENTS = (
-    "clientInterface",
-    "adminInterface",
-    "sshServer",
-    "snmpServer",
-    "healthcheckServer",
-    "ping",
-    "prometheusExporter",
-)
-ALLOW_SOURCES_PUT_ALLOWED = tuple(f"{p}.allowSources" for p in ALLOW_SOURCES_PARENTS)
+ALLOW_SOURCES_PARENTS = tuple(sorted(set(ALLOW_SOURCES_SLOT_PARENT.values())))
 
 
 def _merge_self_ips(nic_ips: List[str], status: Dict[str, Any]) -> List[str]:
@@ -222,7 +217,7 @@ def _path_allowed(item: str, allowed: tuple) -> bool:
     return False
 
 
-class AppGateClient:
+class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
     def __init__(
         self,
         fqdn: str,
@@ -380,65 +375,6 @@ class AppGateClient:
             print(f"ERROR: Login failed (HTTP {response.status_code}): {msg}", file=sys.stderr)
 
         raise RuntimeError(f"Login failed (HTTP {response.status_code})")
-
-    @staticmethod
-    def _snmpd_lines_without_user(appliance: Dict[str, Any], user: str) -> list:
-        """Return snmpd.conf lines with this user's entries and engine-ID pins removed."""
-        existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
-        lines = existing_conf.splitlines() if existing_conf else []
-        drop = (
-            rf"^createUser\s+{re.escape(user)}\b",
-            rf"^rouser\s+{re.escape(user)}\b",
-            rf"^deleteUser\s+{re.escape(user)}\b",
-            *AppGateClient._engine_pin_patterns(),
-            *AppGateClient._community_patterns(),
-        )
-        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
-
-    @staticmethod
-    def _snmpd_lines_without_all_users(appliance: Dict[str, Any]) -> list:
-        """Replace mode: drop every createUser/rouser/deleteUser, keep the rest."""
-        existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
-        lines = existing_conf.splitlines() if existing_conf else []
-        drop = (
-            r"^createUser\s+",
-            r"^rouser\s+",
-            r"^deleteUser\s+",
-            *AppGateClient._engine_pin_patterns(),
-            *AppGateClient._community_patterns(),
-        )
-        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
-
-    @staticmethod
-    def _engine_pin_patterns() -> tuple:
-        return (
-            r"(?i)^exactEngineID\s+",
-            r"(?i)^engineIDType\s+",
-            r"(?i)^engineID\s+",
-        )
-
-    @staticmethod
-    def _community_patterns() -> tuple:
-        if not STRIP_V1V2_COMMUNITIES:
-            return ()
-        return (
-            r"(?i)^rocommunity6?\b",
-            r"(?i)^rwcommunity6?\b",
-        )
-
-    @staticmethod
-    def _snmpd_lines_without_engine_pins(appliance: Dict[str, Any]) -> list:
-        existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
-        lines = existing_conf.splitlines() if existing_conf else []
-        drop = AppGateClient._engine_pin_patterns() + AppGateClient._community_patterns()
-        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
-
-    def ensure_engine_id_type3(self, appliance_id: Optional[str] = None) -> None:
-        """Pin engineIDType via API before SSH reads oldEngineID."""
-        appliance = self._get_appliance(appliance_id)
-        lines = self._snmpd_lines_without_engine_pins(appliance)
-        lines.append(f"engineIDType {ENGINE_ID_TYPE}")
-        self._put_snmpd_conf(appliance, "\n".join(lines), enabled=True)
 
     def _paged_get(self, path: str) -> list:
         """GET a 6.7 collection. range is a query param; total is in JSON 'range' (0-49/123)."""
@@ -605,58 +541,6 @@ class AppGateClient:
             )
         return targets
 
-    def delete_snmp_user(self, user: str, appliance_id: Optional[str] = None) -> bool:
-        """Push deleteUser + engineIDType. createUser is a later PUT.
-
-        Persistent usmUser rows are purged over SSH *after* createUser
-        so snmpd re-reads the new keys on restart.
-        """
-        appliance = self._get_appliance(appliance_id)
-        lines = self._snmpd_lines_without_user(appliance, user)
-        lines.append(f"deleteUser {user}")
-        # Do not pin exactEngineID — AppGate/cz-configd truncates it (16 hex)
-        # and that breaks RFC 3411 type-3 (11-byte) IDs. Type 3 + oldEngineID is enough.
-        lines.append(f"engineIDType {ENGINE_ID_TYPE}")
-        self._put_snmpd_conf(appliance, "\n".join(lines), enabled=True)
-        return True
-
-    def update_snmp_config(
-        self,
-        user: str,
-        auth_hash: str,
-        priv_hash: str,
-        rouser_line: str = "",
-        enabled: bool = True,
-        appliance_id: Optional[str] = None,
-        replace: bool = False,
-    ) -> bool:
-        """Step 6: PUT createUser + optional rouser + engineIDType 3 (live run only).
-
-        Add: keep other USM users, replace this username.
-        Replace: drop all createUser/rouser lines, write only this user.
-        """
-        create_user_line = (
-            f"createUser {user} {SNMP_AUTH_PROTOCOL} -l 0x{auth_hash} "
-            f"{SNMP_PRIV_PROTOCOL} -l 0x{priv_hash}"
-        )
-
-        appliance = self._get_appliance(appliance_id)
-        if replace:
-            write_replaced_snapshot(
-                "snmp",
-                str(appliance.get("name") or appliance_id or user),
-                appliance,
-            )
-            lines = self._snmpd_lines_without_all_users(appliance)
-        else:
-            lines = self._snmpd_lines_without_user(appliance, user)
-        if rouser_line:
-            lines.append(rouser_line)
-        lines.append(create_user_line)
-        lines.append(f"engineIDType {ENGINE_ID_TYPE}")
-        self._put_snmpd_conf(appliance, "\n".join(lines), enabled=enabled)
-        return True
-
     def _get_appliance(self, appliance_id: Optional[str] = None) -> Dict[str, Any]:
         aid = appliance_id
         if not aid:
@@ -687,25 +571,6 @@ class AppGateClient:
                 )
             body["site"] = str(site_id)
         return body
-
-    def _put_snmpd_conf(self, appliance: Dict[str, Any], new_conf: str, enabled: bool) -> None:
-        """GET body + snmpd.conf only. Keep site/NICs/tcpPort exactly as retrieved."""
-        original = copy.deepcopy(appliance)
-        existing = appliance.get("snmpServer")
-        if not isinstance(existing, dict):
-            existing = {}
-        snmp = dict(existing)
-        snmp["enabled"] = enabled
-        snmp["snmpd.conf"] = new_conf
-        appliance["snmpServer"] = snmp
-        body = self._sanitize_appliance_for_put(appliance)
-        self._assert_put_safe(
-            original,
-            body,
-            allowed=SNMP_PUT_ALLOWED,
-            what="SNMP config",
-        )
-        self._put_appliance_body(body, what="SNMP config")
 
     def _assert_put_safe(
         self,
@@ -781,242 +646,3 @@ class AppGateClient:
                 f"{body_preview}{hint}"
             )
 
-    @staticmethod
-    def _ntp_key_for_api(entry: Dict[str, Any]) -> Dict[str, Any]:
-        """6.7 GET shape: ntp.servers[].hostname, optional keyType/keyNo/key (SHA256 → HEX:)."""
-        host = str(entry.get("hostname") or "").strip()
-        out: Dict[str, Any] = {"hostname": host}
-        key_type = str(entry.get("keyType") or "").strip()
-        key_no = entry.get("keyNo")
-        key = str(entry.get("key") or "").strip()
-        if key_type:
-            compact = key_type.replace("-", "").upper()
-            mapped = NTP_KEY_TYPE_MAP.get(compact, key_type)
-            if str(mapped).upper() in NTP_WEAK_KEY_TYPES:
-                msg = (
-                    f"NTP keyType {mapped} is not CNSA 2.0 / DISA (use SHA256). "
-                    f"hostname={host}"
-                )
-                if not LAB_MODE:
-                    raise ValueError(msg)
-                print(f"      WARNING: {msg}", file=sys.stderr)
-            out["keyType"] = mapped
-        if key_no not in ("", None):
-            try:
-                out["keyNo"] = int(key_no)
-            except (TypeError, ValueError):
-                out["keyNo"] = key_no
-        if key:
-            if not key_type and not LAB_MODE:
-                raise ValueError(
-                    f"NTP key set but keyType empty for {host}; DISA requires SHA256"
-                )
-            compact = (out.get("keyType") or key_type).replace("-", "").upper()
-            prefix = NTP_KEY_HEX_PREFIX
-            if compact == "SHA256" and not key.upper().startswith(prefix.upper()):
-                key = prefix + key
-            out["key"] = key
-        return out
-
-    @staticmethod
-    def _ntp_hostname(entry: Any) -> str:
-        if isinstance(entry, str):
-            return entry.strip()
-        if isinstance(entry, dict):
-            return str(
-                entry.get("hostname") or entry.get("src") or entry.get("server") or ""
-            ).strip()
-        return ""
-
-    @staticmethod
-    def _ntp_list_from_appliance(appliance: Dict[str, Any]) -> List[Any]:
-        """6.7: appliance.ntp.servers is the list (ntp is an object)."""
-        raw = appliance.get("ntp")
-        if isinstance(raw, dict) and isinstance(raw.get("servers"), list):
-            return raw["servers"]
-        if isinstance(raw, list):
-            return raw
-        for key in ("ntpServers", "ntpServer"):
-            legacy = appliance.get(key)
-            if isinstance(legacy, list):
-                return legacy
-        return []
-
-    def peek_ntp(self, appliance_id: str) -> List[str]:
-        """Hostnames currently on the appliance (no keys)."""
-        appliance = self._get_appliance(appliance_id)
-        raw = appliance.get("ntp")
-        servers = self._ntp_list_from_appliance(appliance)
-        if DEBUG:
-            print(
-                f"      DEBUG ntp GET: type={type(raw).__name__} n={len(servers)}",
-                file=sys.stderr,
-            )
-        return [h for h in (self._ntp_hostname(x) for x in servers) if h]
-
-    def update_ntp_servers(
-        self,
-        appliance_id: str,
-        servers: List[Dict[str, Any]],
-        *,
-        overwrite: bool,
-    ) -> List[Dict[str, Any]]:
-        """PUT appliance.ntp so cz-configd applies (survives reboot)."""
-        appliance = self._get_appliance(appliance_id)
-        original = copy.deepcopy(appliance)
-        existing_list = self._ntp_list_from_appliance(appliance)
-        desired = [self._ntp_key_for_api(s) for s in servers if self._ntp_hostname(s)]
-        if overwrite:
-            write_replaced_snapshot(
-                "ntp", str(original.get("name") or appliance_id), original
-            )
-            merged = desired
-        else:
-            by_host: Dict[str, Any] = {}
-            for item in existing_list:
-                host = self._ntp_hostname(item)
-                if host:
-                    by_host[host.lower()] = item if isinstance(item, dict) else {"hostname": host}
-            for item in desired:
-                host = item["hostname"].lower()
-                if host in by_host and isinstance(by_host[host], dict):
-                    by_host[host].update(item)
-                else:
-                    by_host[host] = item
-            merged = list(by_host.values())
-        appliance.pop("ntpServers", None)
-        appliance.pop("ntpServer", None)
-        ntp_obj = appliance.get("ntp")
-        if not isinstance(ntp_obj, dict):
-            ntp_obj = {}
-        ntp_obj["servers"] = merged
-        appliance["ntp"] = ntp_obj
-        if DEBUG:
-            safe = [
-                {
-                    "hostname": self._ntp_hostname(x),
-                    "keyType": x.get("keyType") if isinstance(x, dict) else "",
-                    "keyNo": x.get("keyNo") if isinstance(x, dict) else "",
-                    "has_key": bool(isinstance(x, dict) and x.get("key")),
-                }
-                for x in merged
-            ]
-            print(
-                f"      DEBUG ntp PUT ntp.servers={safe!r}",
-                file=sys.stderr,
-            )
-        body = self._sanitize_appliance_for_put(appliance)
-        self._assert_put_safe(
-            original,
-            body,
-            allowed=NTP_PUT_ALLOWED,
-            what="NTP servers",
-        )
-        self._put_appliance_body(body, what="NTP servers")
-        return merged
-
-    @staticmethod
-    def _allow_source_key(entry: Any) -> tuple:
-        if not isinstance(entry, dict):
-            return ("", -1, "")
-        try:
-            mask = int(entry.get("netmask"))
-        except (TypeError, ValueError):
-            mask = -1
-        return (
-            str(entry.get("address") or "").strip(),
-            mask,
-            str(entry.get("nic") or "").strip(),
-        )
-
-    def peek_allow_sources(self, appliance_id: str) -> List[Dict[str, Any]]:
-        appliance = self._get_appliance(appliance_id)
-        return self._collect_allow_sources(appliance)
-
-    @staticmethod
-    def _collect_allow_sources(appliance: Dict[str, Any]) -> List[Dict[str, Any]]:
-        found: List[Dict[str, Any]] = []
-        seen = set()
-        for parent in ALLOW_SOURCES_PARENTS:
-            block = appliance.get(parent)
-            if not isinstance(block, dict):
-                continue
-            rows = block.get("allowSources")
-            if not isinstance(rows, list):
-                continue
-            for item in rows:
-                key = AppGateClient._allow_source_key(item)
-                if key[0] and key not in seen:
-                    seen.add(key)
-                    found.append(
-                        {
-                            "address": key[0],
-                            "netmask": key[1],
-                            "nic": key[2],
-                        }
-                    )
-        return found
-
-    def update_allow_sources(
-        self,
-        appliance_id: str,
-        desired: List[Dict[str, Any]],
-        *,
-        overwrite: bool,
-        snapshot_label: str = "",
-    ) -> List[Dict[str, Any]]:
-        """PUT existing allowSources arrays only. Does not create new parent objects."""
-        appliance = self._get_appliance(appliance_id)
-        original = copy.deepcopy(appliance)
-        if overwrite:
-            if not desired:
-                raise AppliancePutError(
-                    "Refusing replace with an empty allowSources list (admin lockout)"
-                )
-            write_replaced_snapshot(
-                "allow-sources",
-                snapshot_label or str(appliance.get("name") or appliance_id),
-                original,
-            )
-        # print(f"DEBUG allowSources: overwrite={overwrite} desired={desired!r}")
-        wrote = False
-        for parent in ALLOW_SOURCES_PARENTS:
-            block = appliance.get(parent)
-            if not isinstance(block, dict) or "allowSources" not in block:
-                continue
-            rows = block.get("allowSources")
-            if not isinstance(rows, list):
-                rows = []
-            if overwrite:
-                new_rows = [dict(x) for x in desired]
-            else:
-                seen = {self._allow_source_key(x) for x in rows}
-                new_rows = [dict(x) for x in rows if isinstance(x, dict)]
-                for item in desired:
-                    key = self._allow_source_key(item)
-                    if key[0] and key not in seen:
-                        seen.add(key)
-                        new_rows.append(
-                            {
-                                "address": key[0],
-                                "netmask": key[1],
-                                "nic": key[2],
-                            }
-                        )
-            block["allowSources"] = new_rows
-            appliance[parent] = block
-            wrote = True
-        if not wrote:
-            raise AppliancePutError(
-                "No existing allowSources arrays on this appliance GET"
-            )
-        merged = desired if overwrite else self._collect_allow_sources(appliance)
-        body = self._sanitize_appliance_for_put(appliance)
-        self._assert_put_safe(
-            original,
-            body,
-            allowed=ALLOW_SOURCES_PUT_ALLOWED,
-            what="allowSources",
-        )
-        self._put_appliance_body(body, what="allowSources")
-        return merged

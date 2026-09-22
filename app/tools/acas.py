@@ -23,7 +23,7 @@ if _APP_DIR not in sys.path:
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from api.appgate import AppGateClient
+from core.run import login_collectives, print_result, select_appliances
 from config import (
     ACAS_CZCONFIGD_UNIT,
     DEBUG,
@@ -33,7 +33,7 @@ from config import (
     YES_ANSWERS,
     warn_insecure_transport,
 )
-from core.inventory import Target, prompt_exclusions
+from core.inventory import Target
 from core.prompts import (
     CREDENTIALS_PATH,
     _parse_collectives,
@@ -44,7 +44,7 @@ from core.utils import HaltError, halt, load_credentials, print_error, write_jso
 from ssh.acas import AcasPrep
 from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 
-ClientMap = Dict[int, AppGateClient]
+
 
 
 def _fail(target: Target, message: str) -> None:
@@ -87,67 +87,6 @@ def _prompt_mode() -> str:
         print("      Cancelled.")
         raise SystemExit(0)
     return "unharden" if choice == "1" else "harden"
-
-
-def _login(collectives: list) -> ClientMap:
-    print("\n[1/3] Authenticating to Controller API(s)...")
-    clients: ClientMap = {}
-    for col in collectives:
-        idx = int(col["index"])
-        print(f"      [{idx}] {col['fqdn']} as {col['api_username']}...")
-        client = AppGateClient(col["fqdn"], fallback_ip=col.get("agip") or "")
-        try:
-            client.login(col["api_username"], col["api_password"])
-            clients[idx] = client
-            print(f"      [{idx}] Authenticated")
-        except Exception as exc:
-            print_error(
-                "E02",
-                f"[{idx}] LOGIN FAILED: {exc}",
-                "Check api_username/api_password and MFA exemption.",
-                "Self-signed cert: answer y on Proceed anyway, or set LAB_MODE=True.",
-                "URL must be https://<fqdn>:8443/admin (not 443).",
-            )
-    if not clients:
-        halt(
-            "E02",
-            "No Controller accepted login",
-            "Fix API creds, TLS prompt, or agip fallback. Other collectives can still be added.",
-        )
-    return clients
-
-
-def _inventory(clients: ClientMap) -> List[Target]:
-    print("\n[2/3] Pulling appliances from every Controller...")
-    inventory: List[Target] = []
-    for idx, client in sorted(clients.items()):
-        try:
-            inventory.extend(
-                client.list_targets(
-                    collective=idx,
-                    fallback_ip=client.fallback_ip,
-                    collective_fqdn=client.fqdn,
-                )
-            )
-        except Exception as exc:
-            print(f"      [{idx}] list failed: {exc}", file=sys.stderr)
-    if not inventory:
-        halt(
-            "E03",
-            "No activated appliances with an SSH address were found",
-            "Appliances must be activated and have hostname/SSH IP.",
-            "Admin role needs Appliance View (and tags) on those boxes.",
-        )
-    print(f"      Found {len(inventory)} selectable appliance(s)")
-    selected = prompt_exclusions(inventory)
-    if not selected:
-        halt(
-            "E04",
-            "Nothing left after exclusions",
-            "Press Enter at the exclude prompt to keep all, or exclude fewer numbers.",
-        )
-    print(f"      Selected {len(selected)} appliance(s)")
-    return selected
 
 
 def _summarize_output(text: str) -> str:
@@ -247,8 +186,7 @@ def _apply(
         else:
             out = session.harden(target)
         target.status = "ok"
-        host = target.ssh_fqdn or target.ssh_ip
-        print(f"      [{'PASSED':<7}] {target.label():<32} {host:<22} {mode}")
+        print_result(target, mode)
         if DEBUG:
             print(f"      {target.label()}: {_summarize_output(out)}")
             for ln in out.splitlines():
@@ -275,8 +213,8 @@ def main() -> None:
     if DEBUG:
         print(f"      DEBUG acas: mode={mode} collectives={len(collectives)}", file=sys.stderr)
 
-    clients = _login(collectives)
-    selected = _inventory(clients)
+    clients = login_collectives(collectives, step="[1/3]")
+    selected = select_appliances(clients, step="[2/3]")
     dry_run = DRY_RUN
     if not dry_run:
         answer = input("\n      Dry-run only (preview, no SSH changes)? [y/N]: ").strip().lower()

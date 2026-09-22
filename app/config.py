@@ -254,6 +254,18 @@ APPLIANCE_FUNCTION_NAMES = (
     "metricsAggregator",
     "connectionBroker",
 )
+# GUI Allowed Sources → appliance JSON parent. spa and https both use clientInterface.
+ALLOW_SOURCES_SLOT_PARENT = {
+    "ssh": "sshServer",
+    "spa": "clientInterface",
+    "admin": "adminInterface",
+    "https": "clientInterface",
+    "ping": "ping",
+    "snmp": "snmpServer",
+}
+ALLOW_SOURCES_PUT_ALLOWED = tuple(
+    f"{p}.allowSources" for p in sorted(set(ALLOW_SOURCES_SLOT_PARENT.values()))
+)
 SNMP_WALK_OID = "1.3.6.1.2.1.1"
 SNMPWALK_PROBE_TIMEOUT = 4
 SNMPWALK_RETRIES = 1

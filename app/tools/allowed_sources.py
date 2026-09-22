@@ -5,8 +5,9 @@
   3/4  add vs replace
   4/4  GET/PUT existing allowSources arrays (no SSH)
 
-JSON is per appliance function; multi-function boxes inherit both lists
-(deduped). Host routes /32 and /128 matching this box's own IPs are dropped.
+JSON is per appliance type, then slot (ssh, spa, admin, https, ping, snmp).
+Each slot is address/netmask/nic. Multi-function boxes merge per slot.
+Host routes /32 and /128 matching this box's own IPs are dropped.
 """
 import ipaddress
 import os
@@ -19,21 +20,29 @@ if _APP_DIR not in sys.path:
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
-from api.appgate import AppGateClient, AppliancePutError
+from api.appgate import AppliancePutError
 from config import (
+    ALLOW_SOURCES_SLOT_PARENT,
     DEBUG,
     DRY_RUN,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
 )
-from core.inventory import Target, prompt_exclusions
+from core.inventory import Target
 from core.prompts import (
     CREDENTIALS_PATH,
     _parse_collectives,
     collective_for_target,
     prepare_collectives,
     resolve_allowed_sources,
+)
+from core.run import (
+    ClientMap,
+    login_collectives,
+    print_result,
+    prompt_add_or_replace,
+    select_appliances,
 )
 from core.utils import (
     HaltError,
@@ -43,8 +52,6 @@ from core.utils import (
     print_error,
     write_json_report,
 )
-
-ClientMap = Dict[int, AppGateClient]
 
 
 def _fail(target: Target, message: str) -> None:
@@ -56,45 +63,6 @@ def _fail(target: Target, message: str) -> None:
         "This box is skipped; others continue.",
         "PUT only allowSources on existing interfaces. Check Client Profile View on portals.",
     )
-
-
-def _login(collectives: list) -> ClientMap:
-    print("\n[1/4] Authenticating to Controller API(s)...")
-    clients: ClientMap = {}
-    for col in collectives:
-        idx = int(col["index"])
-        user = col.get("api_username") or col.get("admin_username") or ""
-        password = col.get("api_password") or col.get("admin_password") or ""
-        print(f"      [{idx}] {col.get('fqdn') or col.get('agip')} as {user}...")
-        client = AppGateClient(col.get("fqdn") or "", fallback_ip=col.get("agip") or "")
-        try:
-            client.login(user, password)
-            clients[idx] = client
-            print(f"      [{idx}] Authenticated")
-        except Exception as exc:
-            print_error(
-                "E02",
-                f"[{idx}] LOGIN FAILED: {exc}",
-                "API user/password, MFA exemption, port 8443 /admin.",
-            )
-    if not clients:
-        halt("E02", "No Controller logins succeeded", "Fix API credentials and retry.")
-    return clients
-
-
-def _inventory(clients: ClientMap) -> List[Target]:
-    print("\n[2/4] Pulling appliances from every Controller...")
-    inventory: List[Target] = []
-    for idx, client in sorted(clients.items()):
-        inventory.extend(client.list_targets(collective=idx))
-    if not inventory:
-        halt("E03", "No selectable appliances", "Activated boxes with hostname; Appliance View.")
-    print(f"      Found {len(inventory)} selectable appliance(s)")
-    selected = prompt_exclusions(inventory)
-    if not selected:
-        halt("E04", "Nothing left after exclusions", "Press Enter to keep all.")
-    print(f"      Selected {len(selected)} appliance(s)")
-    return selected
 
 
 def _normalize_source(entry: Any) -> Dict[str, Any]:
@@ -157,27 +125,51 @@ def _drop_self(
     return kept, dropped
 
 
-def _desired_for_target(target: Target, col: dict) -> List[Dict[str, Any]]:
+def _merge_entries(dst: List[Dict[str, Any]], rows: Any) -> None:
+    if not isinstance(rows, list):
+        return
+    seen = {_source_key(x) for x in dst}
+    for raw in rows:
+        item = _normalize_source(raw)
+        if not item:
+            continue
+        key = _source_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        dst.append(item)
+
+
+def _desired_slots(target: Target, col: dict) -> Dict[str, List[Dict[str, Any]]]:
+    """Merge allowed_sources.<function>.<slot>[] for this box's functions."""
     src = col.get("allowed_sources") or {}
     if not isinstance(src, dict):
-        return []
+        return {}
     lower = {str(k).replace(" ", "").lower(): v for k, v in src.items()}
-    seen = set()
-    out: List[Dict[str, Any]] = []
+    by_slot: Dict[str, List[Dict[str, Any]]] = {}
     for fn in target.functions:
-        rows = src.get(fn) or lower.get(fn.lower()) or []
-        if not isinstance(rows, list):
+        block = src.get(fn) or lower.get(fn.lower()) or {}
+        if not isinstance(block, dict):
             continue
-        for raw in rows:
-            item = _normalize_source(raw)
-            if not item:
+        for slot, rows in block.items():
+            name = str(slot).strip().lower()
+            if name not in ALLOW_SOURCES_SLOT_PARENT:
                 continue
-            key = _source_key(item)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(item)
-    return out
+            _merge_entries(by_slot.setdefault(name, []), rows)
+    return by_slot
+
+
+def _slots_to_parents(
+    by_slot: Dict[str, List[Dict[str, Any]]]
+) -> Dict[str, List[Dict[str, Any]]]:
+    """spa + https both map to clientInterface — union those lists."""
+    by_parent: Dict[str, List[Dict[str, Any]]] = {}
+    for slot, rows in by_slot.items():
+        parent = ALLOW_SOURCES_SLOT_PARENT.get(slot)
+        if not parent or not rows:
+            continue
+        _merge_entries(by_parent.setdefault(parent, []), rows)
+    return by_parent
 
 
 def _fmt(entries: List[Dict[str, Any]]) -> str:
@@ -199,17 +191,12 @@ def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
             current = client.peek_allow_sources(sample.appliance_id)
         except Exception as exc:
             print(f"      Could not read current allowSources: {exc}", file=sys.stderr)
-    print(f"      Current allowSources on {sample.label()}: {_fmt(current)}")
-    print("  1) Add (append per interface, skip duplicates)")
-    print("  2) Replace (same list on every existing allowSources array)")
-    print("      Replace does not create new interface objects. Backup goes to reports/replaced/.")
-    choice = ""
-    while choice not in ("1", "2", "q"):
-        choice = input("Select 1, 2, or Q: ").strip().lower()
-    if choice == "q":
-        print("      Cancelled.")
-        raise SystemExit(0)
-    return choice == "2"
+    return prompt_add_or_replace(
+        f"Current allowSources on {sample.label()}: {_fmt(current)}",
+        add_line="Add (append onto each matching slot, skip duplicates)",
+        replace_line="Replace (overwrite each matching slot that already exists)",
+        extra="SSH/SPA/ping/SNMP per type; admin=Controller/LogServer; https=Portal.",
+    )
 
 
 def _apply(
@@ -227,23 +214,29 @@ def _apply(
         if target.status == "failed":
             continue
         col = collective_for_target(target, collectives)
-        desired = _desired_for_target(target, col)
-        desired, dropped = _drop_self(desired, target.self_ips)
-        if dropped:
+        by_slot = _desired_slots(target, col)
+        dropped_all: List[Dict[str, Any]] = []
+        for slot, rows in list(by_slot.items()):
+            kept, dropped = _drop_self(rows, target.self_ips)
+            by_slot[slot] = kept
+            dropped_all.extend(dropped)
+        if dropped_all:
             print(
-                f"      {target.label()}: excluded self /32|/128 {_fmt(dropped)}",
+                f"      {target.label()}: excluded self /32|/128 {_fmt(dropped_all)}",
                 file=sys.stderr,
             )
+        desired = _slots_to_parents(by_slot)
         if not target.functions:
             _fail(target, "no appliance functions; nothing to inherit")
             continue
         if not desired:
-            _fail(target, "no allowed_sources left after function merge / exclude-self")
+            _fail(target, "no allowed_sources left after slot merge / exclude-self")
             continue
+        summary = "; ".join(f"{p}={_fmt(r)}" for p, r in desired.items())
         if dry_run:
             mode = "replace" if overwrite else "add"
-            # print(f"DEBUG allow: {target.label()} {mode} desired={desired!r} dropped={dropped!r}")
-            print(f"      {target.label()}: would {mode} {_fmt(desired)}")
+            # print(f"DEBUG allow: {target.label()} {mode} {desired!r}")
+            print(f"      {target.label()}: would {mode} {summary}")
             target.status = "preview"
             continue
         client = clients.get(int(target.collective))
@@ -251,19 +244,14 @@ def _apply(
             _fail(target, "no API client for this collective")
             continue
         try:
-            merged = client.update_allow_sources(
+            counts = client.update_allow_sources(
                 target.appliance_id,
                 desired,
                 overwrite=overwrite,
                 snapshot_label=target.label(),
             )
             target.status = "ok"
-            host = target.ssh_fqdn or target.ssh_ip
-            print(
-                f"      [{'PASSED':<7}] {target.label():<32} {host:<22} "
-                f"allowSources {len(merged)}"
-            )
-            # print(f"DEBUG allow: {target.label()} merged={merged!r}")
+            print_result(target, str(counts))
         except AppliancePutError as exc:
             _fail(target, str(exc))
         except Exception as exc:
@@ -327,10 +315,10 @@ def main() -> None:
         halt(
             "E19",
             "No allowed_sources in credentials.json",
-            "Add allowed_sources.<function>[] with address, netmask, nic.",
+            "Add allowed_sources.<type>.<slot>[] with address, netmask, nic.",
         )
-    clients = _login(collectives)
-    selected = _inventory(clients)
+    clients = login_collectives(collectives, step="[1/4]")
+    selected = select_appliances(clients, step="[2/4]")
     overwrite = _prompt_merge_mode(clients, selected)
     dry_run = DRY_RUN
     if not dry_run:

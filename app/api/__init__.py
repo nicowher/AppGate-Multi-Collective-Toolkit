@@ -1,8 +1,9 @@
 """Shared AppGate admin API.
 
-HTTP only (login, GET/PUT appliances, NTP). Target/exclude helpers are in
-``core/inventory.py``. One client instance per collective (own bearer token)
-so site A's token is never sent to site B.
+``AppGateClient`` is HTTP login + GET/PUT. SNMP/NTP/allowSources are mixins
+(``api/snmp.py``, ``api/ntp.py``, ``api/allow_sources.py``). Inventory shape is
+``core/inventory.py``. Shared login/exclude is ``core/run.py``. One client per
+collective (own bearer token).
 """
 from .appgate import AppGateClient, AppliancePutError
 
