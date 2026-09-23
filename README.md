@@ -106,7 +106,7 @@ Pushes NTP the Admin UI way (`ntp.servers` on the appliance object) so it surviv
 
 ## 6) Allowed sources
 
-Updates 6.7.4 `allowSources` (`address`, `netmask`, `nic`). **No SSH.** JSON is **appliance type → slot → entries**. Multi-function boxes merge **per slot**.
+Updates 6.7.4 `allowSources` (`address`, `netmask`, `nic`). **No SSH.** JSON is **`all` then appliance type → slot → entries**. `all` applies to every box; type blocks merge on top (deduped). Multi-function boxes also merge **per slot**.
 
 | Slot | GUI | PUT field |
 | --- | --- | --- |

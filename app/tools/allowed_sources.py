@@ -151,14 +151,14 @@ def _merge_entries(dst: List[Dict[str, Any]], rows: Any) -> None:
 
 
 def _desired_slots(target: Target, col: dict) -> Dict[str, List[Dict[str, Any]]]:
-    """Merge allowed_sources.<function>.<slot>[] for this box's functions."""
+    """Merge allowed_sources.all then allowed_sources.<function> per slot (deduped)."""
     src = col.get("allowed_sources") or {}
     if not isinstance(src, dict):
         return {}
     lower = {str(k).replace(" ", "").lower(): v for k, v in src.items()}
     by_slot: Dict[str, List[Dict[str, Any]]] = {}
-    for fn in target.functions:
-        block = src.get(fn) or lower.get(fn.lower()) or {}
+    for fn in ("all", *target.functions):
+        block = src.get(fn) or lower.get(str(fn).lower()) or {}
         if not isinstance(block, dict):
             continue
         for slot, rows in block.items():
@@ -362,9 +362,6 @@ def _apply(
     plans: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     for target in selected:
         if target.status == "failed":
-            continue
-        if not target.functions:
-            _fail(target, "no appliance functions; nothing to inherit")
             continue
         desired = _plan_one(target, collectives)
         if not desired:
