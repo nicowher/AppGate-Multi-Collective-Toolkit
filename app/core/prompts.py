@@ -220,6 +220,9 @@ def _row_from_item(item: dict) -> Dict[str, Any]:
         row["api_username"] = _optional_str(item, "admin_username")
     if not row.get("api_password"):
         row["api_password"] = str(item.get("admin_password") or "")
+    src = item.get("allowed_sources")
+    if isinstance(src, dict) and src:
+        row["allowed_sources"] = src
     return row
 
 
@@ -229,6 +232,7 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
     Prefer collectives[]. Required: fqdn (prompted). agip optional but preferred
     for IP fallback. Extra keys (ssh_*, snmp_*, mibs, ssh_password_new) are
     kept if present; omitted keys inherit top-level via resolve_field.
+    allowed_sources on a collective row is copied (was dropped, which caused E19).
     """
     raw = creds.get("collectives")
     rows: List[Dict[str, Any]] = []
@@ -292,6 +296,8 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
         }
         for key in COLLECTIVE_OPTIONAL_STR:
             entry[key] = _optional_str(row, key)
+        if isinstance(row.get("allowed_sources"), dict) and row["allowed_sources"]:
+            entry["allowed_sources"] = row["allowed_sources"]
         out.append(entry)
 
     from_file = os.path.isfile(CREDENTIALS_PATH) and any(
