@@ -27,6 +27,17 @@ class AllowSourcesMixin:
             str(entry.get("nic") or "").strip(),
         )
 
+    @staticmethod
+    def _allow_source_body(entry: Any) -> Dict[str, Any]:
+        """GUI blank NIC = Any: omit nic. Empty string 422s (must not be empty)."""
+        key = AllowSourcesMixin._allow_source_key(entry)
+        if not key[0]:
+            return {}
+        out: Dict[str, Any] = {"address": key[0], "netmask": key[1]}
+        if key[2]:
+            out["nic"] = key[2]
+        return out
+
     def peek_allow_sources(self, appliance_id: str) -> List[Dict[str, Any]]:
         appliance = self._get_appliance(appliance_id)
         return self._collect_allow_sources(appliance)
@@ -88,21 +99,23 @@ class AllowSourcesMixin:
             if not isinstance(rows, list):
                 rows = []
             if overwrite:
-                new_rows = [dict(x) for x in desired]
+                new_rows = [
+                    b for b in (self._allow_source_body(x) for x in desired) if b
+                ]
             else:
                 seen = {self._allow_source_key(x) for x in rows}
-                new_rows = [dict(x) for x in rows if isinstance(x, dict)]
+                new_rows = [
+                    b
+                    for b in (self._allow_source_body(x) for x in rows if isinstance(x, dict))
+                    if b
+                ]
                 for item in desired:
                     key = self._allow_source_key(item)
                     if key[0] and key not in seen:
                         seen.add(key)
-                        new_rows.append(
-                            {
-                                "address": key[0],
-                                "netmask": key[1],
-                                "nic": key[2],
-                            }
-                        )
+                        body = self._allow_source_body(item)
+                        if body:
+                            new_rows.append(body)
             block["allowSources"] = new_rows
             appliance[parent] = block
             counts[parent] = len(new_rows)

@@ -90,7 +90,10 @@ def _normalize_source(entry: Any) -> Dict[str, Any]:
         return {}
     if netmask < 0 or netmask > vmax:
         return {}
-    return {"address": str(ip), "netmask": netmask, "nic": nic}
+    out: Dict[str, Any] = {"address": str(ip), "netmask": netmask}
+    if nic:
+        out["nic"] = nic
+    return out
 
 
 def _source_key(entry: Dict[str, Any]) -> Tuple[str, int, str]:
