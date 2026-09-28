@@ -29,7 +29,9 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **FQDN first**, then IP (pinned working IP first after a successful SSH). Gateways never use the Controller IP.
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **Defaults off.** **`DEBUG` and `DRY_RUN` are separate.**
 - **Ctrl+C during a tool:** `Cancel this job and return to menu? [y/N]` (default N continues). Second Ctrl+C cancels. In-flight SSH/walks are not killed instantly. At the menu / Return to menu, Ctrl+C just redisplays the menu.
-- **Live result lines:** `[PASSED ]` / `[FAILED ]` then label, host, short status. **DEBUG off:** GUI names (SSH, SPA/HTTPS, Admin/API, Ping, SNMP), no engine-ID hex, no Python dicts/lists. **DEBUG on:** same lines plus raw API fields, endpoints, engine hex, STEP_* (ACAS), SSH script preview.
+- **Preview first**, then Apply. Replace (menu 6) uses **y** then type **YES**. `DRY_RUN=True` skips Apply.
+- **Live result lines:** **OK** / **Failed** (green/red on a color console). Failed rows are plain-language; **DEBUG** adds `Details:`.
+- **DEBUG off:** GUI names (SSH, SPA/HTTPS, Admin/API, Ping, SNMP), no engine-ID hex, no Python dicts. **DEBUG on:** plus raw API fields, endpoints, engine hex, STEP_* (ACAS), SSH script preview.
 - **Shared run path:** `core/run.py` (login, inventory/exclude, add vs replace, result line). Appliance PUT helpers: `api/snmp.py`, `api/ntp.py`, `api/allow_sources.py` mixins on `AppGateClient`.
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
 - **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime connects until the first working address (`SSH_PRIME_TIMEOUT`). Auth failure stops the IP walk (SSHBRUTE). Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. With `DEBUG=False`, each try is one line (`label address timeout|ok|auth failed`).
@@ -301,8 +303,8 @@ Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue
 | **E15** | pip / vendor wheels | Menu **D** on matching OS/Python; copy `app/vendor/` |
 | **E16** | No snmpwalk/pysnmp | Install Net-SNMP or `pip install pysnmp` (menu D). Workers cannot install. |
 | **E17** | NTP chronyc / cz-customization failed | Wait `NTP_VERIFY_DELAY`; `chronyc ntpdata` must show the configured hostname |
-| **E19** | No `allowed_sources` in creds | Add `allowed_sources.<type>.<slot>[]` with `address`, `netmask`, `nic` |
-| **E20** | Replace would lock this workstation out | Add this host’s IP to `ssh` / `admin` / `spa`/`https`, use Add, or turn off lockout in Configure |
+| Allowed sources missing | Add `allowed_sources` (`all` or per Controller) in credentials.json before login |
+| **E20** | This computer (x.x.x.x) would no longer be allowed to SSH/HTTPS to \<host\> | Add this computer’s IP, use Add, or turn off lockout in Configure |
 
 ## Troubleshooting
 

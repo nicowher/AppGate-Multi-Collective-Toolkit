@@ -61,18 +61,39 @@ from core.utils import (
 )
 
 
+def _human_allow_error(exc: Exception) -> str:
+    """Map Controller/PUT errors to one sentence for the operator."""
+    text = str(exc)
+    low = text.lower()
+    if "nic" in low and "empty" in low:
+        return "NIC cannot be blank. Leave NIC out for Any, or set eth0."
+    if "portal.profiles" in low:
+        return "This API user cannot see the portal profile (need Client Profile View)."
+    if "http 422" in low:
+        return "The Controller rejected this change. Check the report or turn on DEBUG."
+    if "http 403" in low or "http 401" in low:
+        return "This API user is not allowed to edit that appliance."
+    if "empty allowSources" in text:
+        return "Replace would wipe all allowed sources; that was blocked."
+    return "Could not update who can reach this appliance. Check the report."
+
+
 def _fail(target: Target, message: str) -> None:
+    """Fail-soft one box. Console is human; DEBUG prints the raw message."""
     target.status = "failed"
-    target.error = message
-    print_error(
-        "E08",
-        f"{target.label()}: {message}",
-        "This box is skipped; others continue.",
-        "PUT only allowSources on existing interfaces. Check Client Profile View on portals.",
-    )
+    low = message.lower()
+    if "http " in low or "422" in message or "allowsources" in low:
+        human = _human_allow_error(Exception(message))
+    else:
+        human = message
+    target.error = human
+    print_result(target, human, ok=False)
+    if DEBUG:
+        print(f"      Details: {message}", file=sys.stderr)
 
 
 def _normalize_source(entry: Any) -> Dict[str, Any]:
+    """Validate address/netmask; omit nic when blank (GUI Any)."""
     if not isinstance(entry, dict):
         return {}
     address = str(entry.get("address") or "").strip()
@@ -97,10 +118,12 @@ def _normalize_source(entry: Any) -> Dict[str, Any]:
 
 
 def _source_key(entry: Dict[str, Any]) -> Tuple[str, int, str]:
+    """Dedupe key: address, prefix length, nic (empty = Any)."""
     return (entry.get("address") or "", int(entry.get("netmask") or -1), entry.get("nic") or "")
 
 
 def _is_host_route(address: str, netmask: int) -> bool:
+    """True for /32 IPv4 or /128 IPv6 (exclude-self only applies to these)."""
     try:
         ip = ipaddress.ip_address(address)
     except ValueError:
@@ -113,6 +136,7 @@ def _is_host_route(address: str, netmask: int) -> bool:
 
 
 def _ip_canon(addr: str) -> str:
+    """Canonical IP string so fe80::1 and FE80:0:0:0:0:0:0:1 compare equal."""
     try:
         return str(ipaddress.ip_address((addr or "").split("%")[0]))
     except ValueError:
@@ -122,6 +146,7 @@ def _ip_canon(addr: str) -> str:
 def _drop_self(
     entries: List[Dict[str, Any]], self_ips: List[str]
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Drop /32|/128 rows that match this appliance's own addresses."""
     own = {_ip_canon(ip) for ip in self_ips}
     kept: List[Dict[str, Any]] = []
     dropped: List[Dict[str, Any]] = []
@@ -136,6 +161,7 @@ def _drop_self(
 
 
 def _merge_entries(dst: List[Dict[str, Any]], rows: Any) -> None:
+    """Append normalized rows onto dst, skipping duplicates."""
     if not isinstance(rows, list):
         return
     seen = {_source_key(x) for x in dst}
@@ -183,6 +209,7 @@ def _slots_to_parents(
 
 
 def _fmt(entries: List[Dict[str, Any]]) -> str:
+    """One-line list: 10.0.0.0/8 on eth0."""
     if not entries:
         return "(none)"
     parts = []
@@ -195,6 +222,7 @@ def _fmt(entries: List[Dict[str, Any]]) -> str:
 
 
 def _parent_label(parent: str) -> str:
+    """API parent name → GUI label (SSH, SPA/HTTPS, …)."""
     return ALLOW_SOURCES_PARENT_LABEL.get(parent, parent)
 
 
@@ -218,6 +246,7 @@ def _outbound_ip(peer: str) -> str:
 
 
 def _rule_allows(local_ip: str, rows: List[Dict[str, Any]]) -> bool:
+    """True if local_ip is inside any row's CIDR (any prefix length)."""
     if not local_ip or not rows:
         return False
     try:
@@ -247,10 +276,12 @@ def _print_plan(label: str, mode: str, desired: Dict[str, List[Dict[str, Any]]])
 
 
 def _counts_line(counts: Dict[str, int]) -> str:
+    """OK-line extra: 'SSH 3, SPA/HTTPS 2'."""
     return ", ".join(f"{_parent_label(p)} {n}" for p, n in counts.items())
 
 
 def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
+    """Ask add vs replace. True = replace. Q cancels."""
     sample = selected[0]
     client = clients.get(int(sample.collective))
     current: List[Dict[str, Any]] = []
@@ -270,6 +301,7 @@ def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
 def _plan_one(
     target: Target, collectives: list
 ) -> Dict[str, List[Dict[str, Any]]]:
+    """Build parent→rows for one box (all + functions, exclude-self)."""
     col = collective_for_target(target, collectives)
     by_slot = _desired_slots(target, col)
     dropped_all: List[Dict[str, Any]] = []
@@ -286,6 +318,7 @@ def _plan_one(
 
 
 def _ssh_peer(target: Target) -> str:
+    """Address used to guess this PC's outbound IP toward the appliance."""
     return target.ssh_ip or target.ssh_fqdn or (target.self_ips[0] if target.self_ips else "")
 
 
@@ -318,25 +351,32 @@ def _check_lockout(
             rows = desired.get(parent) or []
             if not rows:
                 continue
+            host = target.hostname or target.ssh_fqdn or target.label()
+            verb = {
+                "SSH": "SSH to",
+                "Admin/API": "reach Admin/API on",
+                "SPA/HTTPS": "reach SPA/HTTPS on",
+            }.get(label, f"use {label} on")
             if not local_ip:
                 blocked.append(
-                    f"{target.label()} {label} (could not detect local IP toward {peer or '?'})"
+                    f"Could not tell this computer's address toward {host} ({label})."
                 )
                 continue
             if not _rule_allows(local_ip, rows):
                 blocked.append(
-                    f"{target.label()} {label} (this host {local_ip} vs {_fmt(rows)})"
+                    f"This computer ({local_ip}) would no longer be allowed to {verb} {host}."
                 )
     if blocked:
         halt(
             "E20",
-            "Replace would lock this workstation out of SSH or HTTPS",
+            "Replace would lock this computer out",
             *blocked,
-            "Add this machine's IP/prefix to the matching slot, use Add, or disable lockout in Configure.",
+            "Add this computer's IP, use Add instead of Replace, or turn off lockout in Configure.",
         )
 
 
 def _confirm_replace(plans: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> None:
+    """Always-on two-step confirm: y, then type YES. Not configurable."""
     print("\n      Replace plan (all changes):")
     for label, desired in plans.items():
         _print_plan(label, "replace", desired)
@@ -357,7 +397,9 @@ def _apply(
     *,
     overwrite: bool,
     dry_run: bool,
+    skip_guards: bool = False,
 ) -> None:
+    """Preview (dry_run) or PUT. skip_guards=True after main() already confirmed."""
     print("\n[4/4] Updating allowSources via Controller API...")
     plans: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     for target in selected:
@@ -379,9 +421,10 @@ def _apply(
             target.status = "preview"
     if dry_run:
         return
-    if overwrite and plans:
+    if overwrite and plans and not skip_guards:
         _check_lockout(selected, plans)
         _confirm_replace(plans)
+    if overwrite and plans and not dry_run:
         begin_replaced_run()
     for target in selected:
         if target.status == "failed":
@@ -421,6 +464,7 @@ def _emit_report(
     dry_run: bool,
     started_at: str,
 ) -> None:
+    """Write reports/allowed-sources-*.json (no secrets)."""
     if not (WRITE_RUN_REPORT or DEBUG):
         return
     report = {
@@ -451,6 +495,7 @@ def _emit_report(
 
 
 def main() -> None:
+    """Menu 6: preview allowed sources, then apply (replace uses y + YES)."""
     warn_insecure_transport()
     creds = load_credentials(CREDENTIALS_PATH)
     collectives = _parse_collectives(creds)
@@ -461,38 +506,59 @@ def main() -> None:
             "Add collectives[].fqdn to credentials.json or enter when prompted.",
         )
     prepare_collectives(creds, collectives, need_ssh=False)
-    any_src = False
+    missing = []
     for col in collectives:
-        col["allowed_sources"] = resolve_allowed_sources(col, creds)
-        if col.get("allowed_sources"):
-            any_src = True
-    if not any_src:
-        halt(
-            "E19",
-            "No allowed_sources in credentials.json",
-            "Add allowed_sources.<type>.<slot>[] with address, netmask, nic.",
+        src = resolve_allowed_sources(col, creds)
+        col["allowed_sources"] = src
+        if not src:
+            missing.append(col.get("fqdn") or col.get("agip") or str(col.get("index")))
+    if missing:
+        print("Allowed sources for this Controller are missing:", file=sys.stderr)
+        for name in missing:
+            print(f"      {name}", file=sys.stderr)
+        print(
+            "      Add allowed_sources (all or per Controller) in credentials.json.",
+            file=sys.stderr,
         )
+        raise HaltError("allowed sources missing")
     clients = login_collectives(collectives, step="[1/4]")
     selected = select_appliances(clients, step="[2/4]")
     overwrite = _prompt_merge_mode(clients, selected)
-    dry_run = DRY_RUN
-    if not dry_run:
-        answer = input("\n      Dry-run only (preview, no PUT)? [y/N]: ").strip().lower()
-        dry_run = answer in YES_ANSWERS
     started_at = datetime.now(timezone.utc).isoformat()
-    _apply(selected, clients, collectives, overwrite=overwrite, dry_run=dry_run)
+    _apply(selected, clients, collectives, overwrite=overwrite, dry_run=True)
     _emit_report(
-        collectives, selected, overwrite=overwrite, dry_run=dry_run, started_at=started_at
+        collectives, selected, overwrite=overwrite, dry_run=True, started_at=started_at
     )
-    if dry_run and any(t.status == "preview" for t in selected):
-        apply = input("\n      Apply allowSources now? [y/N]: ").strip().lower()
-        if apply in YES_ANSWERS:
+    if DRY_RUN:
+        print("      DRY_RUN is set — preview only.", file=sys.stderr)
+    elif any(t.status == "preview" for t in selected):
+        go = False
+        if overwrite:
+            plans = {
+                t.label(): _plan_one(t, collectives)
+                for t in selected
+                if t.status == "preview"
+            }
+            _check_lockout(selected, plans)
+            _confirm_replace(plans)
+            go = True
+        else:
+            apply = input("\n      Apply these changes now? [y/N]: ").strip().lower()
+            go = apply in YES_ANSWERS
+        if go:
             for target in selected:
                 if target.status == "preview":
                     target.status = "pending"
                     target.error = ""
             live_started = datetime.now(timezone.utc).isoformat()
-            _apply(selected, clients, collectives, overwrite=overwrite, dry_run=False)
+            _apply(
+                selected,
+                clients,
+                collectives,
+                overwrite=overwrite,
+                dry_run=False,
+                skip_guards=True,
+            )
             _emit_report(
                 collectives,
                 selected,

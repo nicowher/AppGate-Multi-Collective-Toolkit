@@ -92,15 +92,21 @@ def _ok(targets: List[Target]) -> List[Target]:
 def _fail(target: Target, message: str, code: str = "E09") -> None:
     """Mark one appliance failed and keep going (fail-soft)."""
     target.status = "failed"
-    target.error = message
-    print_error(
-        code,
-        f"{target.label()}: {message}",
-        "This box is skipped; others continue.",
-        "SSH: after FQDN+IP fail, Try a new password, or check ssh_username/password.",
-        f"Engine ID: need engineIDType 3, {ETH_IFACE} MAC, sudo on the appliance.",
-        "Walk/digest fail: leftover usmUser — re-run live so step 7 can purge.",
-    )
+    low = message.lower()
+    if "auth" in low:
+        human = "SSH login failed. Check username and password."
+    elif "walk" in low:
+        human = "SNMP walk failed. Check UDP 161, the SNMP user, and leftover users on the box."
+    elif "engine" in low:
+        human = "Could not read the SNMP engine ID. Check sudo and the management interface."
+    elif "http " in low:
+        human = "The Controller rejected the SNMP change. Check the report."
+    else:
+        human = message
+    target.error = human
+    print_result(target, human, ok=False)
+    if DEBUG:
+        print(f"      Details: {code} {message}", file=sys.stderr)
 
 
 def _prompt_snmp_mode() -> bool:
@@ -173,11 +179,10 @@ def main() -> None:
                 file=sys.stderr,
             )
 
-        dry_run = DRY_RUN
-        # print(f"DEBUG step0: DRY_RUN={DRY_RUN} WRITE_RUN_REPORT={WRITE_RUN_REPORT} DEBUG={DEBUG}")
+        dry_run = True
         if DEBUG:
             print(
-                f"      DEBUG step0: dry_run={dry_run} collectives={len(collectives)}",
+                f"      DEBUG step0: preview first DRY_RUN={DRY_RUN} collectives={len(collectives)}",
                 file=sys.stderr,
             )
         hashgen = SNMPHashGenerator()
@@ -190,21 +195,14 @@ def main() -> None:
         if DEBUG:
             print(f"      DEBUG step1: logged in collectives={list(clients)}", file=sys.stderr)
 
-        if dry_run:
+        print(
+            "\n*** Preview — no API pin/push, no USM purge, no walk, "
+            "no snmpd restart. Engine-ID read and hash preview still run. ***\n",
+            file=sys.stderr,
+        )
+        if DRY_RUN:
             print(
-                "\n      DRY_RUN is set in config.py — no pin/push/purge/walk will run.",
-                file=sys.stderr,
-            )
-        else:
-            answer = input(
-                "\n      Dry-run only (preview engine IDs/hashes, no changes)? [y/N]: "
-            ).strip().lower()
-            if answer in YES_ANSWERS:
-                dry_run = True
-        if dry_run:
-            print(
-                "\n*** DRY_RUN is ON — no API pin/push, no USM purge, no walk, "
-                "no snmpd restart. Login, inventory, engine-ID read, and hash preview still run. ***\n",
+                "      DRY_RUN is set in config.py — apply will not be offered.",
                 file=sys.stderr,
             )
 
@@ -235,7 +233,7 @@ def main() -> None:
         if WRITE_RUN_REPORT or DEBUG:
             _emit_run_report(report)
 
-        if dry_run and any(t.status == "preview" for t in selected):
+        if (not DRY_RUN) and dry_run and any(t.status == "preview" for t in selected):
             # print(f"DEBUG: preview_count={sum(1 for t in selected if t.status == 'preview')}")
             apply = input(
                 "\n      Push config to these appliances now? [y/N]: "

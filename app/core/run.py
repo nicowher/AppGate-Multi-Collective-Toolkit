@@ -4,6 +4,7 @@ Tools pass step banners ([1/4], [2/8], …). One AppGateClient per collective.
 """
 from __future__ import annotations
 
+import os
 import sys
 from typing import Dict, List
 
@@ -106,8 +107,38 @@ def prompt_add_or_replace(
     return choice == "2"
 
 
+_ANSI_GREEN = "\033[32m"
+_ANSI_RED = "\033[31m"
+_ANSI_RESET = "\033[0m"
+_vt_ready = False
+
+
+def _color_enabled() -> bool:
+    """OK/Failed in color when stdout is a console (Windows VT, Unix TTY)."""
+    global _vt_ready
+    if os.environ.get("NO_COLOR"):
+        return False
+    if not sys.stdout.isatty():
+        return False
+    if os.name == "nt" and not _vt_ready:
+        try:
+            import ctypes
+
+            handle = ctypes.windll.kernel32.GetStdHandle(-11)
+            mode = ctypes.c_uint()
+            if ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                ctypes.windll.kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+            _vt_ready = True
+        except Exception:
+            return False
+    return True
+
+
 def print_result(target: Target, extra: str = "", *, ok: bool = True) -> None:
-    state = "PASSED" if ok else "FAILED"
+    """One result line: OK/Failed (color on TTY), label, host, optional extra."""
+    word = "OK" if ok else "Failed"
+    if _color_enabled():
+        word = f"{(_ANSI_GREEN if ok else _ANSI_RED)}{word}{_ANSI_RESET}"
     host = target.ssh_fqdn or target.ssh_ip
-    tail = f" {extra}" if extra else ""
-    print(f"      [{state:<7}] {target.label():<32} {host:<22}{tail}".rstrip())
+    tail = f"  {extra}" if extra else ""
+    print(f"      {word}  {target.label():<32} {host:<22}{tail}".rstrip())

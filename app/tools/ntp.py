@@ -57,15 +57,19 @@ from ssh.ntp import NtpSsh
 
 
 def _fail(target: Target, message: str, code: str = "E11") -> None:
+    """Fail-soft NTP box. Human line; DEBUG prints E11/E17 detail."""
     target.status = "failed"
-    target.error = message
-    print_error(
-        code,
-        f"{target.label()}: {message}",
-        "This box is skipped; others continue.",
-        "E11 422: PUT ntp.servers objects (hostname, keyType, keyNo, key).",
-        "E17: wait NTP_VERIFY_DELAY, then chronyc ntpdata must show the hostname.",
-    )
+    low = message.lower()
+    if "http " in low or "422" in message:
+        human = "The Controller rejected the NTP change. Check the report."
+    elif "chronyc" in low:
+        human = "NTP is set, but this box is not using the new server yet. Wait and retry, or check chrony on the appliance."
+    else:
+        human = message
+    target.error = human
+    print_result(target, human, ok=False)
+    if DEBUG:
+        print(f"      Details: {code} {message}", file=sys.stderr)
 
 
 def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
@@ -265,18 +269,14 @@ def main() -> None:
     clients = login_collectives(collectives, step="[1/4]")
     selected = select_appliances(clients, step="[2/4]")
     overwrite = _prompt_merge_mode(clients, selected)
-    dry_run = DRY_RUN
-    if not dry_run:
-        answer = input("\n      Dry-run only (preview, no PUT)? [y/N]: ").strip().lower()
-        dry_run = answer in YES_ANSWERS
-
     started_at = datetime.now(timezone.utc).isoformat()
-    _apply(selected, clients, collectives, overwrite=overwrite, dry_run=dry_run)
+    _apply(selected, clients, collectives, overwrite=overwrite, dry_run=True)
     _emit_report(
-        collectives, selected, overwrite=overwrite, dry_run=dry_run, started_at=started_at
+        collectives, selected, overwrite=overwrite, dry_run=True, started_at=started_at
     )
-
-    if dry_run and any(t.status == "preview" for t in selected):
+    if DRY_RUN:
+        print("      DRY_RUN is set — preview only.", file=sys.stderr)
+    elif any(t.status == "preview" for t in selected):
         apply = input("\n      Apply NTP to these appliances now? [y/N]: ").strip().lower()
         if apply in YES_ANSWERS:
             for target in selected:

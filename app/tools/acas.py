@@ -48,18 +48,19 @@ from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 
 
 def _fail(target: Target, message: str) -> None:
+    """Fail-soft. Console is human; DEBUG prints the SSH/API detail."""
     target.status = "failed"
-    target.error = message
-    host = target.ssh_fqdn or target.ssh_ip
-    print(f"      [{'FAILED':<7}] {target.label():<32} {host:<22}")
-    print_error(
-        "E14",
-        f"{target.label()}: {message}",
-        "This box is skipped; others continue.",
-        "If getaddrinfo failed: FQDN does not resolve — use SSH IP or fix DNS.",
-        "Password prompt only after a real auth failure, not DNS/timeout.",
-        "Unharden: confirm you are on the selected hostname, not another appliance.",
-    )
+    low = message.lower()
+    if "getaddrinfo" in low:
+        human = "Hostname does not resolve. Use the SSH IP or fix DNS."
+    elif "auth" in low:
+        human = "SSH login failed. Check username and password."
+    else:
+        human = "ACAS prep failed on this appliance. Check the report."
+    target.error = human
+    print_result(target, human, ok=False)
+    if DEBUG:
+        print(f"      Details: {message}", file=sys.stderr)
 
 
 def _mode_from_argv() -> str:
@@ -215,30 +216,18 @@ def main() -> None:
 
     clients = login_collectives(collectives, step="[1/3]")
     selected = select_appliances(clients, step="[2/3]")
-    dry_run = DRY_RUN
-    if not dry_run:
-        answer = input("\n      Dry-run only (preview, no SSH changes)? [y/N]: ").strip().lower()
-        dry_run = answer in YES_ANSWERS
-
-    if not dry_run and mode in ("unharden", "deharden"):
-        print(
-            "WARNING: unharden is STIG-hostile (NOPASSWD + open SSHBRUTE). "
-            "Re-harden as soon as the scan finishes.",
-            file=sys.stderr,
-        )
+    if mode in ("unharden", "deharden"):
+        print("This weakens STIG until you harden again.", file=sys.stderr)
     started_at = datetime.now(timezone.utc).isoformat()
-    _apply(selected, collectives, mode, dry_run)
-    _emit_report(mode, collectives, selected, dry_run=dry_run, started_at=started_at)
-
-    if dry_run and any(t.status == "preview" for t in selected):
+    _apply(selected, collectives, mode, True)
+    _emit_report(mode, collectives, selected, dry_run=True, started_at=started_at)
+    if DRY_RUN:
+        print("      DRY_RUN is set — preview only.", file=sys.stderr)
+    elif any(t.status == "preview" for t in selected):
         apply = input("\n      Apply to these appliances now? [y/N]: ").strip().lower()
         if apply in YES_ANSWERS:
             if mode in ("unharden", "deharden"):
-                print(
-                    "WARNING: unharden is STIG-hostile (NOPASSWD + open SSHBRUTE). "
-                    "Re-harden as soon as the scan finishes.",
-                    file=sys.stderr,
-                )
+                print("This weakens STIG until you harden again.", file=sys.stderr)
             for target in selected:
                 if target.status == "preview":
                     target.status = "pending"

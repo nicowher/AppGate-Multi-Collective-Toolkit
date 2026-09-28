@@ -42,8 +42,17 @@ from ssh.password import CzPassword
 
 def _fail(target: Target, message: str) -> None:
     target.status = "failed"
-    target.error = message
-    print_result(target, message, ok=False)
+    low = message.lower()
+    if "auth" in low:
+        human = "SSH login failed. Check username and password."
+    elif "verify" in low:
+        human = "Password may be set, but login with the new password failed. Wait and retry."
+    else:
+        human = "Could not change the appliance SSH password. Check the report."
+    target.error = human
+    print_result(target, human, ok=False)
+    if DEBUG:
+        print(f"      Details: {message}", file=sys.stderr)
 
 
 def _apply(
@@ -150,16 +159,12 @@ def main() -> None:
 
     clients = login_collectives(collectives, step="[1/3]")
     selected = select_appliances(clients, step="[2/3]")
-    dry_run = DRY_RUN
-    if not dry_run:
-        answer = input("\n      Dry-run only (preview, no SSH changes)? [y/N]: ").strip().lower()
-        dry_run = answer in YES_ANSWERS
-
     started_at = datetime.now(timezone.utc).isoformat()
-    _apply(selected, collectives, dry_run=dry_run)
-    _emit_report(collectives, selected, dry_run=dry_run, started_at=started_at)
-
-    if dry_run and any(t.status == "preview" for t in selected):
+    _apply(selected, collectives, dry_run=True)
+    _emit_report(collectives, selected, dry_run=True, started_at=started_at)
+    if DRY_RUN:
+        print("      DRY_RUN is set — preview only.", file=sys.stderr)
+    elif any(t.status == "preview" for t in selected):
         apply = input("\n      Apply to these appliances now? [y/N]: ").strip().lower()
         if apply in YES_ANSWERS:
             for target in selected:
