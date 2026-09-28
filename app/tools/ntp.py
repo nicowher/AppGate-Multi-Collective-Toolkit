@@ -118,6 +118,7 @@ def _apply(
     dry_run: bool,
 ) -> None:
     mode = "overwrite" if overwrite else "add/update"
+    changing = set()
     print(f"\n[3/4] Push NTP via API ({mode})...")
     if overwrite and not dry_run:
         begin_replaced_run()
@@ -125,10 +126,27 @@ def _apply(
         col = collective_for_target(target, collectives)
         servers = col.get("ntp_servers") or []
         if dry_run:
-            print(
-                f"      {target.label()}: would {mode} {_host_list(servers)}"
+            client = clients.get(int(target.collective))
+            current: List[str] = []
+            if client is not None:
+                try:
+                    current = client.peek_ntp(target.appliance_id)
+                except Exception:
+                    current = []
+            desired_hosts = [s.get("hostname") for s in servers if s.get("hostname")]
+            # peek_ntp is hostnames only — overwrite may still change keys, so always preview it.
+            unchanged = (
+                not overwrite
+                and bool(desired_hosts)
+                and all(h in current for h in desired_hosts)
             )
+            if unchanged:
+                target.status = "unchanged"
+                print_result(target, "already set")
+                continue
             target.status = "preview"
+            changing.add(target.label())
+            print(f"      {target.label()}: would {mode} {_host_list(servers)}")
             continue
         client = clients.get(int(target.collective))
         if client is None:
@@ -148,11 +166,14 @@ def _apply(
         except Exception as exc:
             _fail(target, str(exc), code="E11")
 
+    if dry_run and not changing:
+        print("\n      No NTP changes to apply.")
+        return
     print(f"\n[4/4] Restart {NTP_CUSTOMIZATION_UNIT} + chronyc ntpdata...")
     live = [t for t in selected if t.status == "ok"]
     if dry_run:
         for target in selected:
-            if target.status == "preview":
+            if target.status == "preview" and target.label() in changing:
                 print(f"      {target.label()}: would restart NTP apply service then verify")
                 if DEBUG:
                     print(f"      DEBUG would restart {NTP_CUSTOMIZATION_UNIT}", file=sys.stderr)

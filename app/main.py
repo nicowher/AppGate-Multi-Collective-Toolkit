@@ -94,27 +94,28 @@ def _normalize_menu_choice(raw: str) -> str:
 
 def _prompt_menu_choice() -> str:
     """Interactive 1/2/3/D/U/Q menu (launchers only start this file)."""
-    print("AppGate Multi-Collective Toolkit")
+    from core.color import dim, fail, heading, step
+
+    print(heading("AppGate Multi-Collective Toolkit"))
     print()
-    print("  1) SNMP Credential Tool  (configure SNMPv3 USM)")
-    print("  2) ACAS scan prep        (unharden / harden)")
-    print("  3) SNMP Walk             (validate only)")
-    print("  4) Update cz SSH password")
-    print("  5) NTP servers            (Controller API / cz-configd)")
-    print("  6) Allowed sources        (allowSources by function)")
-    print("  C) Configure             (DEBUG, LAB_MODE, timeouts)")
+    print(f"  {step('1)')} SNMP Credential Tool  {dim('(configure SNMPv3 USM)')}")
+    print(f"  {step('2)')} ACAS scan prep        {dim('(unharden / harden)')}")
+    print(f"  {step('3)')} SNMP Walk             {dim('(validate only)')}")
+    print(f"  {step('4)')} Update cz SSH password")
+    print(f"  {step('5)')} NTP servers            {dim('(Controller API)')}")
+    print(f"  {step('6)')} Allowed sources        {dim('(who can reach this box)')}")
+    print(f"  {step('C)')} Configure             {dim('(DEBUG, LAB_MODE, timeouts)')}")
     if not IS_RELEASE:
-        print("  D) Download deps         (prefetch vendor wheels)")
-        print("  U) Update deps           (pip install --upgrade)")
-    print("  Q) Quit")
+        print(f"  {step('D)')} Download deps         {dim('(prefetch vendor wheels)')}")
+        print(f"  {step('U)')} Update deps           {dim('(pip install --upgrade)')}")
+    print(f"  {step('Q)')} Quit")
     print()
     while True:
         raw = input(f"Select {_menu_select_hint()}: ")
         choice = _normalize_menu_choice(raw)
         if choice:
             return choice
-        # print(f"DEBUG menu: invalid choice raw={raw!r}")
-        print("Invalid choice.")
+        print(fail("Invalid choice."))
 
 
 def _run_selected_tool(choice: str, rest: List[str]) -> int:

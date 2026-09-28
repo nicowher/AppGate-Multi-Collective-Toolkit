@@ -412,13 +412,32 @@ def _apply(
         plans[target.label()] = desired
         if dry_run:
             mode = "replace" if overwrite else "add"
+            target.status = "preview"
+            client = clients.get(int(target.collective))
+            if client is not None and not overwrite:
+                try:
+                    have = {
+                        (e.get("address"), int(e.get("netmask") or -1), e.get("nic") or "")
+                        for e in client.peek_allow_sources(target.appliance_id)
+                    }
+                    want = set()
+                    for rows in desired.values():
+                        for e in rows:
+                            want.add(
+                                (e.get("address"), int(e.get("netmask") or -1), e.get("nic") or "")
+                            )
+                    if want and want <= have:
+                        target.status = "unchanged"
+                        print_result(target, "already set")
+                        continue
+                except Exception:
+                    pass
             _print_plan(target.label(), mode, desired)
             if DEBUG:
                 print(
                     f"      DEBUG allow: {target.label()} {mode} {desired!r}",
                     file=sys.stderr,
                 )
-            target.status = "preview"
     if dry_run:
         return
     if overwrite and plans and not skip_guards:

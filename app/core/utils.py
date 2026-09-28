@@ -56,7 +56,9 @@ def debug_log(msg: str) -> None:
 
 def print_error(code: str, message: str, *hints: str) -> None:
     """Always-on (DEBUG off too). code like E02. hints are next steps."""
-    print(f"ERROR {code}: {message}", file=sys.stderr)
+    from core.color import fail
+
+    print(f"{fail('ERROR', stream=sys.stderr)} {code}: {message}", file=sys.stderr)
     for hint in hints:
         if hint:
             print(f"      Next: {hint}", file=sys.stderr)
@@ -447,12 +449,19 @@ def write_replaced_snapshot(kind: str, label: str, body: Dict[str, Any]) -> None
         print(f"      Could not write replace backup: {exc}", file=sys.stderr)
 
 
-def run_target_batch(targets: list, worker: Callable, concurrency: int, on_fail: Callable) -> None:
+def run_target_batch(
+    targets: list,
+    worker: Callable,
+    concurrency: int,
+    on_fail: Callable,
+    progress: Callable = None,
+) -> None:
     """Run one worker per target in a pool. One failure does not stop the rest."""
-    # print(f"DEBUG batch: n={len(targets)} concurrency={concurrency}")
     if not targets:
         return
     workers = max(1, min(concurrency, len(targets)))
+    done = 0
+    n = len(targets)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(worker, t): t for t in targets}
         for future in as_completed(futures):
@@ -461,3 +470,6 @@ def run_target_batch(targets: list, worker: Callable, concurrency: int, on_fail:
                 future.result()
             except Exception as exc:
                 on_fail(target, exc)
+            done += 1
+            if progress:
+                progress(done, n)

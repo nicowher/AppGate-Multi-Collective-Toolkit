@@ -78,6 +78,9 @@ def _host_resolves(host: str) -> bool:
         return False
 
 
+_ssh_progress_active = False
+
+
 class SSHSession:
     def __init__(self, ssh_user: str, ssh_password: str) -> None:
         self.ssh_user = ssh_user
@@ -112,9 +115,27 @@ class SSHSession:
         return self._log_label or addr
 
     def _log(self, msg: str, *, noise: bool = False) -> None:
+        """DEBUG: every line, uncolored. Otherwise hide noise; color only the status word."""
         if noise and not DEBUG:
             return
-        print(f"      {msg}", file=sys.stderr)
+        if DEBUG:
+            print(f"      {msg}", file=sys.stderr)
+            return
+        if _ssh_progress_active:
+            sys.stderr.write("\n")
+        from core.color import fail, ok, warn
+
+        low = msg.lower()
+        if msg.endswith(" ok") or low.endswith(" ok"):
+            painted = msg[: msg.rfind(" ")] + " " + ok("ok")
+        elif "auth failed" in low:
+            painted = msg.replace("auth failed", fail("auth failed"))
+        elif "timeout" in low:
+            idx = low.rfind("timeout")
+            painted = msg[:idx] + warn("timeout") + msg[idx + 7 :]
+        else:
+            painted = msg
+        print(f"      {painted}", file=sys.stderr)
 
     @staticmethod
     def _net_reason(exc: BaseException) -> str:
@@ -168,11 +189,12 @@ class SSHSession:
         self._set_log_label(target)
         for host in addrs:
             if not _host_resolves(host):
-                self._log(f"{self._tag(host)} skip (no DNS)")
+                self._log(f"{self._tag(host)} skip (no DNS)", noise=True)
                 continue
             # print(f"DEBUG prime: try {host!r} known={_hostname_known(host)}")
             if self._with_ssh(host, lambda _c: True, timeout=SSH_PRIME_TIMEOUT) is not None:
-                self._log(f"{self._tag(host)} ok")
+                if DEBUG:
+                    self._log(f"{self._tag(host)} ok")
                 self._pin(target, host)
                 return True
             self._log(f"{self._tag(host)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
@@ -349,14 +371,15 @@ class SSHSession:
         auth_hit = ""
         for i, addr in enumerate(addrs):
             if not _host_resolves(addr):
-                self._log(f"{self._tag(addr)} skip (no DNS)")
+                self._log(f"{self._tag(addr)} skip (no DNS)", noise=True)
                 continue
             last = addr
             result = self._with_ssh(addr, fn)
             if result is False:
                 raise ValueError(f"{error} (connected but failed) ({label or addr})")
             if result is not None:
-                self._log(f"{self._tag(addr)} ok")
+                if DEBUG:
+                    self._log(f"{self._tag(addr)} ok")
                 self._pin(target, addr)
                 return result
             self._log(f"{self._tag(addr)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
@@ -515,10 +538,10 @@ class _PromptAddHostKeyPolicy(paramiko.MissingHostKeyPolicy):
 
 
 def prime_target_host_keys(targets, collectives) -> None:
-    """Main thread: try each appliance's SSH endpoints until one connects.
+    """Main thread: connect each box once and pin ssh_ok_host.
 
-    Stops after the first working address so overlay/data-plane IPs do not
-    add 10s timeouts (SSH_PRIME_TIMEOUT). Unresolvable FQDNs are skipped.
+    Stops after the first working address so overlay IPs do not add timeouts.
+    Success lines are DEBUG-only. Failures (timeout, auth) always print.
     """
     from core.prompts import collective_for_target
 
@@ -568,13 +591,26 @@ def run_ssh_batch(
     concurrency: int,
     on_fail: Callable,
 ) -> None:
-    """Pool first; SSH failures retry on the main thread with a password prompt."""
+    """Pool first. Quiet mode: SSH n/N. DEBUG: every host line, no counter.
+    Failures retry on the main thread with a password prompt.
+    """
     failed = []
 
     def _capture(target, exc) -> None:
         failed.append((target, exc))
 
-    run_target_batch(targets, worker, concurrency, _capture)
+    def _progress(done: int, n: int) -> None:
+        global _ssh_progress_active
+        if DEBUG or n < 2:
+            return
+        _ssh_progress_active = done < n
+        sys.stderr.write(f"\r      SSH {done}/{n}")
+        sys.stderr.flush()
+        if done >= n:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+    run_target_batch(targets, worker, concurrency, _capture, progress=_progress)
     for target, exc in failed:
         label = target.label() if hasattr(target, "label") else str(target)
         msg = str(exc).lower()

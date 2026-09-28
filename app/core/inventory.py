@@ -332,8 +332,9 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
     for i, t in enumerate(targets, 1):
         funcs = ",".join(t.functions) or "-"
         host = t.ssh_fqdn or t.ssh_ip
+        health = "—" if (t.health or "").strip().lower() in ("n/a", "na", "unknown", "") else t.health
         print(
-            f"     {i:2d}  {t.collective:<10}  {t.hostname[:INVENTORY_NAME_WIDTH]:<{INVENTORY_NAME_WIDTH}}  {host:<22}  {funcs:<22}  {t.health}"
+            f"     {i:2d}  {t.collective:<10}  {t.hostname[:INVENTORY_NAME_WIDTH]:<{INVENTORY_NAME_WIDTH}}  {host:<22}  {funcs:<22}  {health}"
         )
     raw = input(
         "\n      Exclude (e.g. 1,3 or 1-10,12-20 or 1.hostname; Enter for all): "

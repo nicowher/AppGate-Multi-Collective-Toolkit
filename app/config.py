@@ -81,14 +81,16 @@ def silence_third_party_warnings() -> None:
 def warn_insecure_transport() -> None:
     """LAB_MODE on: warning only, never blocks. Off: no prompt here (ask after TLS fail)."""
     silence_third_party_warnings()
+    from core.color import warn
+
     if LAB_MODE:
         print(
-            "WARNING: LAB_MODE=True — TLS/SSH verification off; STIG new-password skipped.",
+            f"{warn('WARNING', stream=sys.stderr)}: LAB_MODE=True — TLS/SSH verification off; STIG new-password skipped.",
             file=sys.stderr,
         )
     if DEBUG:
         print(
-            "WARNING: DEBUG=True — hostnames, engine IDs, and hash lengths print "
+            f"{warn('WARNING', stream=sys.stderr)}: DEBUG=True — hostnames, engine IDs, and hash lengths print "
             "to the console (no passwords/tokens). Set DEBUG=False for production.",
             file=sys.stderr,
         )
