@@ -35,9 +35,9 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **DEBUG off:** GUI names (SSH, SPA/HTTPS, Admin/API, Ping, SNMP), no engine-ID hex, no Python dicts. **DEBUG on:** plus raw API fields, endpoints, engine hex, STEP_* (ACAS), SSH script preview.
 - **Shared run path:** `core/run.py` (login, inventory/exclude, add vs replace, result line). Appliance PUT helpers: `api/snmp.py`, `api/ntp.py`, `api/allow_sources.py` mixins on `AppGateClient`.
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
-- **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime connects until the first working address (`SSH_PRIME_TIMEOUT`). Auth failure stops the IP walk (SSHBRUTE). Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. With `DEBUG=False`, each try is one line (`label address timeout|ok|auth failed`).
+- **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime connects until the first working address (`SSH_PRIME_TIMEOUT`). Auth failure stops the IP walk (SSHBRUTE). Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. **DEBUG off:** `SSH n/N` and failures only. **DEBUG on:** every try, uncolored.
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
-- **Dependencies:** unpacked wheels in `app/vendor/site` are on `sys.path` (no pip). The 1.0 release zip includes a Windows/Python-matched `vendor/site`. Empty site is filled by extracting `vendor/wheels`. Git clones without vendor may still pip.
+- **Dependencies:** unpacked wheels in `app/vendor/site` are on `sys.path` (no pip). Release zips include a Windows amd64 / Python 3.14 `vendor/site`. Empty site is filled by extracting `vendor/wheels`. Git clones without vendor may still pip.
 
 ## 1) SNMP Credential Tool
 
@@ -46,9 +46,9 @@ Configures **authPriv** SNMPv3 USM on selected appliances so a scanner (e.g. ESX
 **CLI (`[1/8]` … `[8/8]`):**
 
 1. **Authenticate** to each Controller (`POST /admin/login`). FQDN first; IP if TLS/connect fails (not on 401/403). Self-signed: `Proceed anyway? [y/N]`.
-2. **Inventory** `GET /admin/appliances` + status. **Dry-run only? [y/N]** (preview hashes; no pin/push/purge/walk/snmpd restart). Then the exclude table (Enter = all).
+2. **Inventory** `GET /admin/appliances` + status, then the exclude table (Enter = all). The run **previews first** (no pin/push/purge/walk/snmpd restart). Apply is offered after the preview unless `DRY_RUN=True`.
 3. **Pin** `engineIDType 3` via appliance PUT (dry-run prints only). PUT is the full GET document: only `snmpd.conf` / `enabled` may change; `site` object becomes the same UUID (never stripped); `tcpPort` is never added. Any other field diff aborts (`DEBUG` dumps redacted GET/PUT).
-4. **SSH** (host keys primed on the main thread, then up to `SSH_CONCURRENCY` in parallel). Read `oldEngineID` from persistent snmpd.conf and check it against `eth0` MAC (RFC 3411 type 3). **Live** restarts snmpd so type 3 applies; **dry-run does not**.
+4. **SSH** (host keys primed on the main thread, then up to `SSH_CONCURRENCY` in parallel). **DEBUG off:** `SSH n/N` and failure lines only. **DEBUG on:** every try. Read `oldEngineID` from persistent snmpd.conf and check it against `eth0` MAC (RFC 3411 type 3). **Live** restarts snmpd so type 3 applies; **preview does not**.
 5. **Localize** auth/priv in-process (RFC 3414 SHA-256) per engine ID. Uses that collective’s `snmp_*` if set. Prints ESXi `user/Kul/Kul/priv` when `PRINT_ESXI_KEYS` (follows `LAB_MODE`).
 6. **Push** via Controller: **1) Add** keeps other USM users and add/updates this username; **2) Replace** drops other `createUser`/`rouser` lines (backup under `reports/replaced/`). Then `createUser` (localized `-l 0x…`), optional `rouser`, `engineIDType 3`. No `exactEngineID`. SNMPv1/v2c community lines are stripped.
 7. **SSH purge:** stop snmpd, delete leftover persistent `usmUser`, start snmpd so `createUser` recreates the user.
@@ -60,7 +60,7 @@ After a dry-run preview: **Push config to these appliances now?** re-runs 3–8 
 
 Temporary overlays so ACAS/Nessus can SSH without hanging or lockout. **Do not PUT these via the appliance API** — that would make unharden the source of truth. Check the **same hostname** you selected (not a connector that was not in the list).
 
-Submenu: **1) Unharden** or **2) Harden**. Then `[1/3]` login, `[2/3]` inventory / exclude / dry-run, `[3/3]` SSH (`SSH_CONCURRENCY`). Host keys primed first.
+Submenu: **1) Unharden** or **2) Harden**. Then `[1/3]` login, `[2/3]` inventory / exclude, preview, then Apply. `[3/3]` SSH (`SSH_CONCURRENCY`). Host keys primed first. Unharden prints: **This weakens STIG until you harden again.**
 
 **Unharden (order matters):**
 
@@ -69,7 +69,7 @@ Submenu: **1) Unharden** or **2) Harden**. Then `[1/3]` login, `[2/3]` inventory
 3. `mkdir -p /home/svc-acas` (SCAP).
 4. **Last:** `iptables` / `ip6tables` `-w -F SSHBRUTE; -A ACCEPT` (`cz-config set` rebuilds the chain if you flush first). Hardened chain is SET/LOG/DROP/ACCEPT; unharden should be ACCEPT only. Check: `sudo iptables -S SSHBRUTE`.
 
-**Harden:** `nopasswd false`, restore `*.pre-acas`, remove drop-in, `nohup systemctl restart cz-configd` (foreground restart drops SSH). Re-harden as soon as the scan finishes — NOPASSWD + open SSHBRUTE are STIG findings if left on.
+**Harden:** `nopasswd false`, restore `*.pre-acas`, remove drop-in, `nohup systemctl restart cz-configd` (foreground restart drops SSH). Re-harden as soon as the scan finishes.
 
 Report: `reports/acas-unharden-*.json` / `acas-harden-*.json`.
 
@@ -78,7 +78,7 @@ Report: `reports/acas-unharden-*.json` / `acas-harden-*.json`.
 Validate-only: **no SSH to appliances and no config push.** Confirms authPriv with current `snmp_*`.
 
 - **1) Single IP / FQDN** — always prompted (never defaults to Controller `agip`). SNMP secrets only; **no SSH**. Then *Walk another?*. No `walk-*.json` for this path.
-- **2) Pull from Controller(s)** — `[1/3]` login, `[2/3]` inventory / exclude, `[3/3]` parallel walks (`WALK_CONCURRENCY`). API secrets for inventory; **no SSH**. Health from `GET /admin/appliances/status` (often `n/a`). Report: `reports/walk-*.json`.
+- **2) Pull from Controller(s)** — `[1/3]` login, `[2/3]` inventory / exclude, `[3/3]` parallel walks (`WALK_CONCURRENCY`). API secrets for inventory; **no SSH**. Missing health shows **—**. Report: `reports/walk-*.json`.
 
 Each inventory host: FQDN then IP, `WALK_FQDN_ATTEMPTS` / `WALK_IP_ATTEMPTS`. pysnmp if Net-SNMP is not on PATH.
 
@@ -93,7 +93,7 @@ On each selected box (after host-key prime):
 1. `openssl passwd -6` with the **new** password on stdin (not in `ps` argv).
 2. `cz-config set users/0/encrypted-password "$HASH"`.
 3. `cz-config set -j users/0/nopasswd false` (sudo password required again).
-4. Wait `CZ_PASSWORD_VERIFY_DELAY`, then SSH again with the **new** password → `login PASS` or `FAIL`.
+4. Wait `CZ_PASSWORD_VERIFY_DELAY`, then SSH again with the **new** password → **OK** or **Failed**.
 
 `ssh_password_new` is required for this tool only. Global-only value prints a warning (every collective gets the same new password). STIG complexity (15 chars, upper/lower/digit/special) when `LAB_MODE=False`. Report: `reports/cz-password-*.json`.
 
@@ -103,9 +103,7 @@ Pushes NTP the Admin UI way (`ntp.servers` on the appliance object) so it surviv
 
 `[1/4]` login, `[2/4]` inventory / exclude. Shows **current NTP from GET** (one sample appliance). **1) Add** (update `key`/`keyType`/`keyNo` if hostname matches, else append) or **2) Overwrite** the whole list.
 
-`[3/4]` GET appliance, set `ntp.servers`, PUT the same document. Only `ntp` / legacy `ntpServer(s)` plus `site` UUID reshape may differ; otherwise abort. SHA256 keys without `HEX:` get that prefix. GET does not return the secret; put `key` in `credentials.json`.
-
-`[3/4]` dry-run prompt, then GET/PUT. Overwrite writes a redacted GET to `reports/replaced/<UTC>/`. `[4/4]` SSH `systemctl restart cz-customization.service` (needed so NTP actually applies), wait `NTP_VERIFY_DELAY`, then `chronyc ntpdata` → PASS only if a configured hostname appears. Report: `reports/ntp-*.json` (hostnames only, no keys).
+Preview first. **Add** prints **OK already set** when that hostname is already there. **Overwrite** always previews (the peek is hostnames only, so a key change would be invisible). `[3/4]` GET appliance, set `ntp.servers`, PUT the same document. Only `ntp` / legacy `ntpServer(s)` plus `site` UUID reshape may differ; otherwise abort. SHA256 keys without `HEX:` get that prefix. GET does not return the secret; put `key` in `credentials.json`. Overwrite writes a redacted GET to `reports/replaced/<UTC>/`. `[4/4]` SSH restarts the NTP apply service (`cz-customization.service`), wait `NTP_VERIFY_DELAY`, then `sudo chronyc ntpdata <host>` → **OK** only if that hostname appears. Report: `reports/ntp-*.json` (hostnames only, no keys).
 
 ## 6) Allowed sources
 
@@ -122,7 +120,9 @@ Updates 6.7.4 `allowSources` (`address`, `netmask`, `nic`). **No SSH.** JSON is 
 
 Every type has `ssh`, `spa`, `ping`, `snmp`. **`admin` only on `controller` and `logServer`.** **`https` only on `portal`.** `spa` and `https` share `clientInterface` (union if both apply).
 
-PUT only that field, and only if `allowSources` already exists on the parent. Does not create `sshServer` / etc. **/32 and /128** matching **this** box’s IPs are dropped. **1) Add** per slot. **2) Replace** per slot (empty replace refused; backup `reports/replaced/`). Replace always shows the full plan, then **y** then type **YES** (cannot be disabled). Before PUT, **E20** if this workstation’s outbound IP would not match new **SSH** (`ALLOW_SOURCES_LOCKOUT_SSH`) or **Admin/API / SPA/HTTPS** (`ALLOW_SOURCES_LOCKOUT_HTTPS`) rules — both default on; turn off in Configure. E08 on unexpected PUT diffs. Client Profile View still required on portals.
+Blank `nic` (or omit it) means **Any NIC**. The PUT omits `nic`; `"nic": ""` is HTTP 422. `allowed_sources` may be global or on a `collectives[]` row.
+
+PUT only that field, and only if `allowSources` already exists on the parent. Does not create `sshServer` / etc. **/32 and /128** matching **this** box’s IPs are dropped. **1) Add** per slot (**OK already set** if those rows are already there). **2) Replace** per slot (empty replace refused; backup `reports/replaced/`). Preview first. Replace always shows the full plan, then **y** then type **YES** (cannot be disabled). Before PUT, **E20** if this computer’s outbound IP would not match new **SSH** (`ALLOW_SOURCES_LOCKOUT_SSH`) or **Admin/API / SPA/HTTPS** (`ALLOW_SOURCES_LOCKOUT_HTTPS`) — both default on. Unexpected PUT diffs abort. Client Profile View still required on portals.
 
 ## C) Configure
 
@@ -132,7 +132,7 @@ Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, `S
 
 - **D:** `pip download` into `app/vendor/wheels` on a **networked machine with the same OS and Python**, then unpack into `app/vendor/site`. Copy `app/vendor/` to the air-gap host.  
 - **U:** `pip install --upgrade` into this interpreter (needs network).  
-- GitHub **1.0 zip** includes `app/vendor/RELEASE` (gitignored) so **D** and **U** are omitted. Source clones have no that file, so D/U stay on the menu.
+- A GitHub **release zip** includes `app/vendor/RELEASE` (gitignored) so **D** and **U** are omitted. Source clones have no that file, so D/U stay on the menu. The Windows zip also omits the Linux and macOS launchers.
 
 ## Launchers
 
@@ -146,7 +146,7 @@ Double-click the launcher for the menu, or pass a tool: `MultiCollectiveToolkit-
 
 ## Prerequisites
 
-- Python 3.7+
+- Python 3.7+ (Windows release zips are built for **Python 3.14**)
 - SSH to the appliance with sudo
 - AppGate admin API (MFA-exempt local user recommended)
 
@@ -155,9 +155,9 @@ Double-click the launcher for the menu, or pass a tool: `MultiCollectiveToolkit-
 | Action | Target | Needed for |
 | --- | --- | --- |
 | View | Appliance | All API tools (login / inventory) |
-| Edit | Appliance | Menus 1 and 5 (full appliance PUT) |
-| View | Site | Menus 1 and 5 (PUT re-checks `site`) |
-| View | Client Profile | Menus 1 and 5 on **portal** appliances (`portal.profiles[]` are client profile names; missing View → HTTP 422) |
+| Edit | Appliance | Menus 1, 5, and 6 (full appliance PUT) |
+| View | Site | Menus 1, 5, and 6 (PUT re-checks `site`) |
+| View | Client Profile | Menus 1, 5, and 6 on **portal** appliances (`portal.profiles[]` are client profile names; missing View → HTTP 422) |
 
 Optional walk backend: Linux `snmp` / `net-snmp-utils`, macOS `brew install net-snmp`, or Windows Net-SNMP. Otherwise walks use `pysnmp`.
 
@@ -184,6 +184,7 @@ Copy `credentials.example.json` to `credentials.json` next to the launchers. Mis
 | `rouser` | Optional | Menu 1 | Read-only username written into snmpd.conf |
 | `mibs` | Never | Reserved | Array of MIB/OID names (e.g. `["SNMPv2-MIB"]`) |
 | `ntp_servers` | Menu 5 | NTP | Array of `{hostname, keyType, keyNo, key}`. SHA256 keys get `HEX:` prepended. Collective list overrides global |
+| `allowed_sources` | Menu 6 | allowSources | `all` then type → slot → `{address, netmask, nic?}`. Omit `nic` for Any. Collective object overrides global |
 
 **Each object in `collectives[]`:**
 
@@ -210,6 +211,16 @@ A one-controller file (no `collectives[]`, just top-level `fqdn`/`agip`) still w
   "ntp_servers": [
     { "hostname": "time.example.com", "keyType": "SHA256", "keyNo": "1", "key": "aabbccdd" }
   ],
+  "allowed_sources": {
+    "all": {
+      "ssh": [ { "address": "10.0.0.0", "netmask": 8 } ],
+      "spa": [],
+      "ping": [],
+      "snmp": []
+    },
+    "controller": { "admin": [] },
+    "portal": { "https": [] }
+  },
   "collectives": [
     {
       "fqdn": "ctrl-a.example.com",
@@ -234,7 +245,7 @@ Applies mainly to **menu 1** (SNMP) and **menu 4** (cz password).
 | RFC 3414 | Password-to-key localization (SHA-256). |
 | RFC 7630 / 7860 | Auth HMAC-SHA-256. |
 | RFC 3826 family | Privacy AES-256 CFB. |
-| CNSA 2.0 | Default SHA-256 + AES-256. MD5 and SHA-1 rejected for SNMP. NTP `keyType` MD5/SHA1 refused when `LAB_MODE=False`. |
+| DISA / CNSA 1.0 | Default SHA-256 + AES-256. MD5 and SHA-1 rejected for SNMP. NTP `keyType` MD5/SHA1 refused when `LAB_MODE=False`. CNSA 2.0 hashes are SHA-384/512 — not the default. |
 | DISA | authPriv only; v1/v2c stripped; passphrase floor; STIG cz password when `LAB_MODE=False`. |
 
 **Known deviations (`app/config.py`):**
@@ -245,13 +256,13 @@ Applies mainly to **menu 1** (SNMP) and **menu 4** (cz password).
 
 ## Tunables (`app/config.py`)
 
-Three switches people actually flip:
+Switches:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `LAB_MODE` | `False` | **Security posture (keep off in production).** `True`: skip TLS verify, WarningPolicy SSH keys, print ESXi Kul, SNMP passphrase min 8, skip STIG cz-password check. `False`: verify TLS (prompt after cert fail), prompt/save SSH host keys, hide Kul, SNMP min 15, STIG cz password on. |
 | `DEBUG` | `False` | **Console noise (keep off in production).** `True`: step traces, full JSON dump, pysnmp CFB warning, MAC/oldEngineID lines. Does **not** change TLS, SSH keys, or STIG. Unrelated to `LAB_MODE`. |
-| `DRY_RUN` | `False` | **Force preview.** `True`: skip the “Dry-run only?” prompt and never pin/push/purge/walk/restart snmpd. You can still dry-run when this is `False` by answering `y` at the prompt. Unrelated to `LAB_MODE`. |
+| `DRY_RUN` | `False` | **Preview only.** `True`: still previews, never offers Apply. Unrelated to `LAB_MODE`. |
 | `SKIP_CREDENTIAL_WALK` | `False` | **Skip step 8 walk** on menu 1 dry-run and live push. Menu 3 is unchanged. |
 | `ALLOW_SOURCES_LOCKOUT_SSH` | `True` | Menu 6 replace: **E20** if this host would miss new SSH rules. |
 | `ALLOW_SOURCES_LOCKOUT_HTTPS` | `True` | Menu 6 replace: **E20** if this host would miss new Admin/API or SPA/HTTPS rules. |
@@ -269,7 +280,7 @@ Other knobs:
 | `ACAS_*` | Banner, sudoers drop-in, SSHBRUTE, cz-configd unit, `ACAS_SCAP_HOME` (`/home/svc-acas`) |
 | `WALK_IP_ATTEMPTS` / `WALK_FQDN_ATTEMPTS` | Walk tries per address (default 2) |
 | `WRITE_RUN_REPORT` / `REPORTS_DIRNAME` | Write `reports/*.json` |
-| `MENU_CHOICE_ALIASES` | CLI tokens → `1` / `2` / `3` / `4` / `5` / `c` / `d` / `u` |
+| `MENU_CHOICE_ALIASES` | CLI tokens → `1` / `2` / `3` / `4` / `5` / `6` / `c` / `d` / `u` |
 | `SNMP_RELOAD_DELAY` | Wait after API pin/push so cz-configd can settle |
 
 ## Security notes
@@ -278,12 +289,12 @@ Other knobs:
 - Reports store hash *lengths*, not hex. Engine ID hex only if `DEBUG=True`. `PRINT_ESXI_KEYS` follows `LAB_MODE`.
 - Replace/overwrite (SNMP, NTP, allowed-sources) writes a redacted GET to `reports/replaced/<UTC>/` before PUT.
 - `credentials.json` is gitignored. Reports are `0600` where the OS honors it.
-- ACAS unharden leaves `NOPASSWD` and an open `SSHBRUTE` until harden.
+- ACAS unharden weakens STIG until you harden again.
 - Identical `snmp_auth` / `snmp_priv` prints a DISA warning.
 
 ## Error codes
 
-Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue. `ERROR E0x` is the operator line; the tool does not print it twice.
+Per-box errors skip that appliance and continue. The console line is a sentence (**Failed** …). The `E0x` code is in **Details** when `DEBUG=True`, and in the report.
 
 | Code | When | What to do |
 | --- | --- | --- |
@@ -304,7 +315,7 @@ Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue
 | **E15** | pip / vendor wheels | Menu **D** on matching OS/Python; copy `app/vendor/` |
 | **E16** | No snmpwalk/pysnmp | Install Net-SNMP or `pip install pysnmp` (menu D). Workers cannot install. |
 | **E17** | NTP chronyc / cz-customization failed | Wait `NTP_VERIFY_DELAY`; `chronyc ntpdata` must show the configured hostname |
-| Allowed sources missing | Add `allowed_sources` (`all` or per Controller) in credentials.json before login |
+| Allowed sources missing | Before login: “Allowed sources for this Controller are missing.” Add `allowed_sources` (`all` or on that `collectives[]` row). |
 | **E20** | This computer (x.x.x.x) would no longer be allowed to SSH/HTTPS to \<host\> | Add this computer’s IP, use Add, or turn off lockout in Configure |
 
 ## Troubleshooting
@@ -312,10 +323,10 @@ Printed even when `DEBUG=False`. Per-box errors skip that appliance and continue
 | Symptom | What to check |
 | --- | --- |
 | 401 login failed | API user, MFA exemption, `APPGATE_PROVIDER` |
-| 403 Forbidden | Admin role: Appliance View (+ Edit for menus 1/5), Site View, Client Profile View on portals |
+| 403 Forbidden | Admin role: Appliance View (+ Edit for menus 1/5/6), Site View, Client Profile View on portals |
 | HTTP 422 `portal.profiles[0]` | **View** on **Client Profile** (not a Portal Profile type) |
 | TLS verify failed | Self-signed: answer Proceed anyway, or `LAB_MODE=True` |
-| Health always `n/a` | `/appliances/status` empty or 403 |
+| Health shows **—** | `/appliances/status` empty or 403 |
 | Gateway missing from list | Need Appliance **View** on those tags |
 | Engine ID not found | `engineIDType 3`, SSH/sudo, MAC on `ETH_IFACE` |
 | Walk / digest error | Leftover `usmUser`, algorithm mismatch |
