@@ -37,7 +37,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **TLS:** `LAB_MODE=False` verifies Controller certs. On failure: `Certificate could not be verified. Proceed anyway? [y/N]:`.
 - **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime connects until the first working address (`SSH_PRIME_TIMEOUT`). Auth failure stops the IP walk (SSHBRUTE). Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. **DEBUG off:** `SSH n/N` and failures only. **DEBUG on:** every try, uncolored.
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
-- **Dependencies:** unpacked wheels in `app/vendor/site` are on `sys.path` (no pip). Release zips include a Windows amd64 / Python 3.14 `vendor/site`. Empty site is filled by extracting `vendor/wheels`. Git clones without vendor may still pip.
+- **Dependencies:** unpacked wheels in `app/vendor/site` are on `sys.path` (no pip). Release zips include a Windows amd64 / **Python 3.10** `vendor/site` (oldest the current pins support; `pysnmp` 7 requires 3.10+). Empty site is filled by extracting `vendor/wheels`. Git clones without vendor may still pip.
 
 ## 1) SNMP Credential Tool
 
@@ -146,7 +146,7 @@ Double-click the launcher for the menu, or pass a tool: `MultiCollectiveToolkit-
 
 ## Prerequisites
 
-- Python 3.7+ (Windows release zips are built for **Python 3.14**)
+- Python 3.10+ (Windows release zips are built for **Python 3.10**)
 - SSH to the appliance with sudo
 - AppGate admin API (MFA-exempt local user recommended)
 
