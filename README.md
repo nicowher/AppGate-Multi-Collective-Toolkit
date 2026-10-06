@@ -180,7 +180,7 @@ Copy `credentials.example.json` to `credentials.json` next to the launchers. Mis
 | `api_password` | All tools | Controller API | Admin API password (old name: `admin_password`) |
 | `snmp_user` | Menus 1 and 3 | SNMPv3 | USM user name |
 | `snmp_auth` | Menus 1 and 3 | SNMPv3 | Auth passphrase (min 8 lab / 15 if `LAB_MODE=False`) |
-| `snmp_priv` | Menus 1 and 3 | SNMPv3 | Priv passphrase. If missing or too short, auth is reused |
+| `snmp_priv` | Menus 1 and 3 | SNMPv3 | Priv passphrase. Prompted if missing or too short. Identical to auth prints a DISA warning |
 | `rouser` | Optional | Menu 1 | Read-only username written into snmpd.conf |
 | `mibs` | Never | Reserved | Array of MIB/OID names (e.g. `["SNMPv2-MIB"]`) |
 | `ntp_servers` | Menu 5 | NTP | Array of `{hostname, keyType, keyNo, key}`. SHA256 keys get `HEX:` prepended. Collective list overrides global |

@@ -452,11 +452,7 @@ def _global_skip_keys(
     ):
         min_len = SNMP_MIN_PASSPHRASE_LEN if key in ("snmp_auth", "snmp_priv") else 0
         if key == "snmp_priv":
-            if all(
-                _field_filled(c, "snmp_priv", min_len=min_len)
-                or _field_filled(c, "snmp_auth", min_len=SNMP_MIN_PASSPHRASE_LEN)
-                for c in collectives
-            ):
+            if all(_field_filled(c, "snmp_priv", min_len=min_len) for c in collectives):
                 skip.add(key)
             continue
         if all(_field_filled(c, key, min_len=min_len) for c in collectives):
@@ -495,22 +491,13 @@ def _fill_secret_fields(
                 min_len=SNMP_MIN_PASSPHRASE_LEN,
             )
         if "snmp_priv" not in skip:
-            priv = (bucket.get("snmp_priv") or "").strip()
-            if not priv or len(priv) < SNMP_MIN_PASSPHRASE_LEN:
-                bucket["snmp_priv"] = bucket.get("snmp_auth") or ""
-                if bucket["snmp_priv"]:
-                    print(
-                        f"      {label} SNMP Priv missing or short — using SNMP Auth.",
-                        file=sys.stderr,
-                    )
-            else:
-                bucket["snmp_priv"] = _require(
-                    bucket,
-                    "snmp_priv",
-                    f"{label} SNMP Priv",
-                    sensitive=True,
-                    min_len=SNMP_MIN_PASSPHRASE_LEN,
-                )
+            bucket["snmp_priv"] = _require(
+                bucket,
+                "snmp_priv",
+                f"{label} SNMP Priv",
+                sensitive=True,
+                min_len=SNMP_MIN_PASSPHRASE_LEN,
+            )
     if need_new_password and "ssh_password_new" not in skip:
         bucket["ssh_password_new"] = _require_new_password(bucket, label)
 
@@ -590,11 +577,6 @@ def prepare_collectives(
                 ):
                     inherited = ""
                 col[key] = inherited
-        if need_snmp:
-            auth = (col.get("snmp_auth") or "").strip()
-            priv = (col.get("snmp_priv") or "").strip()
-            if auth and (not priv or len(priv) < SNMP_MIN_PASSPHRASE_LEN):
-                col["snmp_priv"] = auth
         if not col.get("mibs"):
             col["mibs"] = resolve_mibs(col, creds)
         if not col.get("ntp_servers"):
