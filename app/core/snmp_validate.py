@@ -11,14 +11,17 @@ Menu 1 step 8 walks ssh_ok_host only. Menu 3 (no SSH) still tries FQDN then IP.
 Attempts per address are tunable (WALK_IP_ATTEMPTS / WALK_FQDN_ATTEMPTS).
 Install/prompt must stay on the main thread — workers cannot call input().
 
-Backends: Net-SNMP snmpwalk → SnmpSoft → pysnmp (auto-install vendor/pip).
+Backends: Net-SNMP snmpwalk (passphrases in a 0600 snmp.conf, not argv) or pysnmp.
+SnmpSoft is detected and then skipped because it only accepts passwords on argv.
 """
 import asyncio
 import ipaddress
+import os
 import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import List, Optional, Sequence, Tuple, Union
@@ -155,38 +158,13 @@ class SNMPValidator:
                         return True
                     continue
 
-                # Never print -A / -X / -aw / -pw — those are live passphrases.
+                # Passphrases go in a 0600 snmp.conf, never on argv.
+                # SnmpSoft has no conf-file equivalent, so that backend is not used.
                 if tool_type == "snmpsoft":
-                    cmd = [
-                        executable,
-                        f"-r:{ip}",
-                        "-v:3",
-                        f"-sn:{user}",
-                        f"-ap:{SNMP_AUTH_PROTOCOL}",
-                        f"-aw:{auth}",
-                        f"-pp:{SNMP_PRIV_PROTOCOL}",
-                        f"-pw:{priv}",
-                    ]
-                    safe_cmd = f"{executable} -r:{ip} -v:3 -sn:{user} (passwords omitted)"
-                else:
-                    cmd = [
-                        executable,
-                        "-v3",
-                        "-u", user,
-                        "-l", "authPriv",
-                        "-a", SNMP_AUTH_PROTOCOL,
-                        "-A", auth,
-                        "-x", SNMP_PRIV_PROTOCOL,
-                        "-X", priv,
-                        ip,
-                    ]
-                    safe_cmd = (
-                        f"{executable} -v3 -u {user} -l authPriv "
-                        f"-a {SNMP_AUTH_PROTOCOL} -x {SNMP_PRIV_PROTOCOL} {ip} "
-                        "(passwords omitted)"
-                    )
-
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=SNMPWALK_TIMEOUT)
+                    if self._validate_snmp_walk_pysnmp(ip, user, auth, priv, engine_id):
+                        return True
+                    continue
+                result = self._snmpwalk_with_conf(executable, ip, user, auth, priv)
                 if result.returncode == 0:
                     return True
                 self._set_walk_error(
@@ -194,13 +172,59 @@ class SNMPValidator:
                     f"{result.stderr.strip()[:WALK_ERROR_PREVIEW] or result.stdout.strip()[:WALK_ERROR_PREVIEW]}"
                 )
                 if DEBUG:
-                    print(f"      cmd: {safe_cmd}", file=sys.stderr)
+                    print(
+                        f"      cmd: {executable} -v3 -u {user} -l authPriv "
+                        f"-a {SNMP_AUTH_PROTOCOL} -x {SNMP_PRIV_PROTOCOL} {ip} "
+                        "(passphrases in 0600 snmp.conf)",
+                        file=sys.stderr,
+                    )
             except subprocess.TimeoutExpired:
                 self._set_walk_error(f"SNMP walk timed out after {SNMPWALK_TIMEOUT}s")
 
         if DEBUG:
             print(f"      SNMP walk validation failed after {max_attempts} attempts", file=sys.stderr)
         return False
+
+    def _snmpwalk_with_conf(self, executable: str, ip: str, user: str, auth: str, priv: str):
+        """Run snmpwalk with passphrases in a 0600 conf file, not on argv.
+
+        createUser uses SHA512. snmp.conf wants SHA-512. Insert the hyphen.
+        """
+        auth_type = SNMP_AUTH_PROTOCOL
+        if auth_type.startswith("SHA") and "-" not in auth_type:
+            auth_type = f"{auth_type[:3]}-{auth_type[3:]}"
+        conf = (
+            "defVersion 3\n"
+            f"defSecurityName {user}\n"
+            "defSecurityLevel authPriv\n"
+            f"defAuthType {auth_type}\n"
+            f"defPrivType {SNMP_PRIV_PROTOCOL}\n"
+            f"defAuthPassphrase {auth}\n"
+            f"defPrivPassphrase {priv}\n"
+        )
+        tmp = tempfile.mkdtemp(prefix="mct-snmp-")
+        path = os.path.join(tmp, "snmp.conf")
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+        try:
+            os.write(fd, conf.encode("utf-8"))
+        finally:
+            os.close(fd)
+        env = os.environ.copy()
+        env["SNMPCONFPATH"] = tmp
+        try:
+            return subprocess.run(
+                [executable, "-v3", "-l", "authPriv", ip],
+                capture_output=True,
+                text=True,
+                timeout=SNMPWALK_TIMEOUT,
+                env=env,
+            )
+        finally:
+            try:
+                os.remove(path)
+                os.rmdir(tmp)
+            except OSError:
+                pass
 
     def _cached_detect(self) -> Tuple[Optional[str], Optional[str]]:
         if self._tool is None:

@@ -2,11 +2,11 @@
 
 Password auth first; keyboard-interactive is the fallback some AppGate
 boxes require (allowed_types has keyboard-interactive but not password).
-kbd-int uses Transport, so host keys are verified separately (fingerprint
-printed on TOFU). Timeouts come from config (SSH_TIMEOUT / SSH_AUTH_TIMEOUT)
-so a dead host cannot hang the toolkit. Host-key policy is
-SSH_STRICT_HOST_KEY (lab WarningPolicy / production TOFU: prompt on the
-main thread, then save ~/.ssh/known_hosts). Never input() from a worker.
+kbd-int uses Transport, so host keys are checked with the same policy.
+Timeouts come from config (SSH_TIMEOUT / SSH_AUTH_TIMEOUT)
+so a dead host cannot hang the toolkit. SSH_STRICT_HOST_KEY follows
+LAB_MODE: lab uses WarningPolicy; production rejects unknown keys and
+requires SSH_KNOWN_HOSTS or ssh_host_keys. Never input() from a worker.
 """
 from core.utils import ensure_package, run_target_batch
 
@@ -16,8 +16,6 @@ except ImportError:
     ensure_package("paramiko", "paramiko")
     import paramiko
 
-import base64
-import hashlib
 import ipaddress
 import logging
 import os
@@ -33,6 +31,7 @@ from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 from config import (
     DEBUG,
+    LAB_MODE,
     SSH_AUTH_TIMEOUT,
     SSH_KNOWN_HOSTS,
     SSH_KNOWN_HOSTS_MODE,
@@ -150,33 +149,25 @@ class SSHSession:
         return name
 
     def _apply_host_key_policy(self, client: paramiko.SSHClient) -> None:
-        path = SSH_KNOWN_HOSTS.strip() or str(Path.home() / ".ssh" / "known_hosts")
-        path = os.path.expanduser(path)
+        """SSH_STRICT_HOST_KEY follows LAB_MODE. Strict rejects unknown keys. Lab accepts any."""
+        if not SSH_STRICT_HOST_KEY:
+            client.set_missing_host_key_policy(paramiko.WarningPolicy())
+            return
+        if not host_key_store_provisioned():
+            raise paramiko.SSHException(
+                "SSH_STRICT_HOST_KEY is on. Set SSH_KNOWN_HOSTS or ssh_host_keys "
+                "before connecting. Unknown keys are not accepted."
+            )
+        path = _known_hosts_path()
         try:
-            parent = os.path.dirname(path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            if not os.path.isfile(path):
-                fd = os.open(
-                    path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, SSH_KNOWN_HOSTS_MODE
-                )
-                os.close(fd)
             client.load_host_keys(path)
         except OSError as exc:
-            print(f"      Could not prepare known_hosts {path}: {exc}", file=sys.stderr)
+            raise paramiko.SSHException(f"Could not load known_hosts {path}: {exc}") from exc
         try:
             client.load_system_host_keys()
         except OSError:
             pass
-        # Strict: trust-on-first-use (add unknown, reject changed keys).
-        # Lab: WarningPolicy (do not persist).
-        if SSH_STRICT_HOST_KEY:
-            if threading.current_thread() is threading.main_thread():
-                client.set_missing_host_key_policy(_PromptAddHostKeyPolicy())
-            else:
-                client.set_missing_host_key_policy(paramiko.RejectPolicy())
-        else:
-            client.set_missing_host_key_policy(paramiko.WarningPolicy())
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     def prime_host_keys(self, hosts: Union[str, Sequence[str]]) -> bool:
         """Try hosts until one SSH session works. Short timeout. True if any connected.
@@ -191,7 +182,7 @@ class SSHSession:
             if not _host_resolves(host):
                 self._log(f"{self._tag(host)} skip (no DNS)", noise=True)
                 continue
-            # print(f"DEBUG prime: try {host!r} known={_hostname_known(host)}")
+            # print(f"DEBUG prime: try {host!r}")
             if self._with_ssh(host, lambda _c: True, timeout=SSH_PRIME_TIMEOUT) is not None:
                 if DEBUG:
                     self._log(f"{self._tag(host)} ok")
@@ -484,57 +475,56 @@ class SSHSession:
         return output
 
 
+_oob_known_hosts = ""
+
+
+def host_key_store_provisioned() -> bool:
+    """True when an out-of-band known_hosts file or ssh_host_keys was supplied."""
+    return bool(SSH_KNOWN_HOSTS.strip() or _oob_known_hosts)
+
+
 def _known_hosts_path() -> str:
+    if _oob_known_hosts:
+        return _oob_known_hosts
     path = SSH_KNOWN_HOSTS.strip() or str(Path.home() / ".ssh" / "known_hosts")
     return os.path.expanduser(path)
 
 
-def _hostname_known(hostname: str) -> bool:
-    path = _known_hosts_path()
-    if not os.path.isfile(path):
-        return False
-    try:
-        keys = paramiko.HostKeys(path)
-        return keys.lookup(hostname) is not None
-    except OSError:
-        return False
+def install_oob_host_keys(collectives) -> None:
+    """Load appliance host keys from credentials. Not from the Controller API."""
+    global _oob_known_hosts
+    lines = []
+    for col in collectives or []:
+        raw = col.get("ssh_host_keys")
+        if raw is None:
+            raw = col.get("ssh_host_key")
+        if isinstance(raw, str) and raw.strip():
+            lines.append(raw.strip())
+        elif isinstance(raw, list):
+            lines.extend(str(item).strip() for item in raw if str(item).strip())
+    path = SSH_KNOWN_HOSTS.strip()
+    if not lines and not path:
+        return
+    if not path:
+        from core.utils import REPO_ROOT
 
-
-def _save_host_key(client, hostname, key) -> None:
-    client.get_host_keys().add(hostname, key.get_name(), key)
-    path = getattr(client, "_host_keys_filename", None) or _known_hosts_path()
-    try:
-        client.save_host_keys(path)
-    except OSError as exc:
-        print(f"      Could not save known_hosts: {exc}", file=sys.stderr)
-
-
-class _PromptAddHostKeyPolicy(paramiko.MissingHostKeyPolicy):
-    """TOFU: prompt on the main thread only (worker input() deadlocks)."""
-
-    def missing_host_key(self, client, hostname, key) -> None:
-        digest = base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
-        print(
-            f"      SSH host key for {hostname} is not in known_hosts.",
-            file=sys.stderr,
-        )
-        print(
-            f"      {key.get_name()} SHA256:{digest}",
-            file=sys.stderr,
-        )
-        ans = input("      Trust and save this host key? [y/N]: ").strip().lower()
-        if ans not in YES_ANSWERS:
-            print(
-                f"ERROR E07: SSH host key for {hostname} rejected.",
-                file=sys.stderr,
-            )
-            print(
-                "      Next: answer y to Trust and save, or add the key to ~/.ssh/known_hosts.",
-                file=sys.stderr,
-            )
-            raise paramiko.SSHException(f"Host key for {hostname} rejected")
-        _save_host_key(client, hostname, key)
-        print(f"      Saved host key for {hostname}.", file=sys.stderr)
+        path = os.path.join(REPO_ROOT, "certs", "known_hosts")
+        _oob_known_hosts = path
+    else:
+        path = os.path.expanduser(path)
+        _oob_known_hosts = path
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    existing = ""
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as fh:
+            existing = fh.read()
+    with open(path, "a", encoding="utf-8") as fh:
+        for line in lines:
+            if line not in existing:
+                fh.write(line + "\n")
+                existing += line + "\n"
 
 
 def prime_target_host_keys(targets, collectives) -> None:
@@ -545,9 +535,10 @@ def prime_target_host_keys(targets, collectives) -> None:
     """
     from core.prompts import collective_for_target
 
+    install_oob_host_keys(collectives)
     # print(f"DEBUG prime_keys: n={len(targets)}")
     print(
-        "      SSH host keys: accept each new host before parallel work starts.",
+        "      SSH: checking host keys before parallel work starts.",
         file=sys.stderr,
     )
     for target in targets:

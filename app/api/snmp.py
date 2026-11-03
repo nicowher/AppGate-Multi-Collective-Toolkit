@@ -82,7 +82,7 @@ class SnmpMixin:
                 f"{self.base_url}{path}",
                 headers=self.headers,
                 params={"range": f"{start}-{end}"},
-                verify=_tls_verify,
+                verify=self._verify(),
                 timeout=API_TIMEOUT,
             )
             if response.status_code not in (200, 206):
@@ -132,7 +132,7 @@ class SnmpMixin:
         response = requests.get(
             f"{self.base_url}/appliances",
             headers=self.headers,
-            verify=_tls_verify,
+            verify=self._verify(),
             timeout=API_TIMEOUT,
         )
         response.raise_for_status()

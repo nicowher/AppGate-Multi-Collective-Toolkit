@@ -411,7 +411,7 @@ def redact_for_backup(obj: Any) -> Any:
         for key, value in obj.items():
             kl = str(key).lower()
             if key in _REDACT_KEYS or any(s in kl for s in _REDACT_KEY_SUBSTR):
-                out[key] = "<redacted>"
+                out[key] = f"<redacted:{key}>"
             else:
                 out[key] = redact_for_backup(value)
         return out

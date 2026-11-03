@@ -6,7 +6,7 @@ Configure flow is phase-aligned across collectives (finish a phase on every
 selected box before the next phase) so logs stay readable and one slow site
 does not interleave with another mid-step.
 
-  0. Credentials + dry-run choice — fail early on bad input; preview before mutate
+  0. Credentials — fail early on bad input. Preview always runs; Apply is a later prompt
   1. Login each Controller — separate tokens; never reuse bearer across sites
   2. Inventory + exclude — API list (api/) + Target/exclude (core/inventory)
   3. engineIDType 3 via API — type-3 MAC engine IDs are stable and ESXi-friendly;
@@ -14,11 +14,11 @@ does not interleave with another mid-step.
   4. SSH engine ID — localization needs the real engine ID; dry-run skips snmpd
      restart so preview does not bounce production daemons
   5. Localize hashes — createUser stores Kul, not plaintext; each engine ID differs
-  6. deleteUser then createUser — two PUTs so final conf has no deleteUser line
+  6. Add keeps other USM users. Replace drops other createUser/rouser lines, then createUser
   7. Purge persistent usmUser — see ssh.engine (net-snmp ignores createUser if
      the user already exists under /var/lib/snmp)
   8. Walk — proves authPriv with the new passphrases (not the hashes)
-  After dry-run: optional live apply on the same selection (no re-login)
+  After preview: optional live apply on the same selection unless DRY_RUN (no re-login)
 """
 import os
 import sys

@@ -7,8 +7,9 @@ This file only talks HTTP.
 One AppGateClient per collective (own bearer token) so a token from site A
 is never sent to site B (403 / wrong collective).
 
-   1  login() — FQDN first (Controller admin-hostname guidance); agip only when
-      the name does not connect. Never fall back on 401/403 (that is auth, not DNS).
+   1  login() — production pins the Controller CA before the password is sent.
+       FQDN first; agip only when the name does not connect. Never fall back
+       on 401/403 (that is auth, not DNS). Lab mode skips the pin.
    2  list_targets() — Controller inventory is source of truth; status endpoint
       is 6.3+ /appliances/status (not removed /stats/appliances).
    3  ensure_engine_id_type3() — type-3 MAC engine IDs are stable for ESXi USM.
@@ -55,6 +56,7 @@ from config import (
     SNMP_AUTH_PROTOCOL,
     SNMP_PRIV_PROTOCOL,
     STRIP_V1V2_COMMUNITIES,
+    LAB_MODE,
     TLS_VERIFY,
     confirm_skip_tls_verify,
 )
@@ -65,6 +67,7 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
+from core.ca_pin import CaPinError, ensure_ca_pin, stage_next_ca
 from core.inventory import (
     Target,
     appliance_functions,
@@ -88,6 +91,7 @@ if not _tls_verify:
 
 
 def _disable_tls_verify() -> None:
+    """Lab-only. Production must not call this or the CA pin is bypassed."""
     global _tls_verify
     _tls_verify = False
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
@@ -240,6 +244,15 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             "Content-Type": "application/json",
         }
         self._set_endpoint(self.agip)
+        self._ca_bundle = ""
+
+    def _verify(self):
+        """Lab skips verify. Production uses the pinned CA file when one is stored."""
+        if LAB_MODE:
+            return False
+        if self._ca_bundle:
+            return self._ca_bundle
+        return _tls_verify
 
     def _set_endpoint(self, host: str) -> None:
         self.agip = host
@@ -263,12 +276,19 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         last_connect_error: Optional[Exception] = None
         for host in self.endpoints:
             self._set_endpoint(host)
+            if not LAB_MODE:
+                try:
+                    self._ca_bundle = ensure_ca_pin(host, self.base_url)
+                except CaPinError as exc:
+                    print(f"ERROR E06: {exc}", file=sys.stderr)
+                    last_connect_error = exc
+                    continue
             try:
                 response = requests.post(
                     f"{self.base_url}/login",
                     headers=self.headers,
                     json=payload,
-                    verify=_tls_verify,
+                    verify=self._verify(),
                     timeout=API_TIMEOUT,
                 )
             except requests.exceptions.SSLError as exc:
@@ -277,7 +297,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     f"      TLS verify failed for {host} (self-signed or untrusted CA).",
                     file=sys.stderr,
                 )
-                if confirm_skip_tls_verify():
+                if LAB_MODE and confirm_skip_tls_verify():
                     _disable_tls_verify()
                     try:
                         response = requests.post(
@@ -325,6 +345,8 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     f"HTTP {response.status_code}."
                 )
             self.headers["Authorization"] = f"Bearer {token}"
+            if not LAB_MODE and self._ca_bundle:
+                stage_next_ca(host, self.base_url, self.headers, self._verify())
             if host != self.fqdn and self.fqdn:
                 print(f"      Using IP fallback {host} (FQDN {self.fqdn} unreachable)", file=sys.stderr)
             return token
@@ -387,7 +409,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 f"{self.base_url}{path}",
                 headers=self.headers,
                 params={"range": f"{start}-{end}"},
-                verify=_tls_verify,
+                verify=self._verify(),
                 timeout=API_TIMEOUT,
             )
             if response.status_code not in (200, 206):
@@ -437,7 +459,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         response = requests.get(
             f"{self.base_url}/appliances",
             headers=self.headers,
-            verify=_tls_verify,
+            verify=self._verify(),
             timeout=API_TIMEOUT,
         )
         response.raise_for_status()
@@ -548,7 +570,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         response = requests.get(
             f"{self.base_url}/appliances/{aid}",
             headers=self.headers,
-            verify=_tls_verify,
+            verify=self._verify(),
             timeout=API_TIMEOUT,
         )
         response.raise_for_status()
@@ -614,7 +636,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             raise AppliancePutError(f"Refusing {what} PUT; appliance id missing")
         url = f"{self.base_url}/appliances/{aid}"
         put_response = requests.put(
-            url, headers=self.headers, json=body, verify=_tls_verify, timeout=API_TIMEOUT
+            url, headers=self.headers, json=body, verify=self._verify(), timeout=API_TIMEOUT
         )
         if put_response.status_code != 200:
             if DEBUG:

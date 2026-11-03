@@ -30,8 +30,8 @@ class HashgenTests(unittest.TestCase):
         data = self.gen.generate_hashes(
             "user", "authpassphrase15", "privpassphrase15", "8000000001020304"
         )
-        self.assertEqual(len(data["hashes"]["auth"]), 64)
-        self.assertEqual(len(data["hashes"]["priv"]), 64)
+        self.assertEqual(len(data["hashes"]["auth"]), 128)
+        self.assertEqual(len(data["hashes"]["priv"]), 128)
         self.assertNotEqual(data["hashes"]["auth"], data["hashes"]["priv"])
 
     def test_rejects_md5_and_sha1(self) -> None:

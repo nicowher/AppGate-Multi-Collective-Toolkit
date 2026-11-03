@@ -45,7 +45,7 @@ def login_collectives(collectives: list, *, step: str = "[1/N]") -> ClientMap:
                 "E02",
                 f"[{idx}] LOGIN FAILED: {exc}",
                 "Check api_username/api_password and MFA exemption.",
-                "Self-signed: answer y on Proceed anyway, or LAB_MODE=True.",
+                "Production: CA pin mismatch is E06. Lab only: LAB_MODE=True.",
             )
     if not clients:
         halt(

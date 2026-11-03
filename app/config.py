@@ -4,8 +4,9 @@ import warnings
 # ============================================================================
 # SNMPv3 Algorithm Configuration
 # ============================================================================
-# Why SHA-256 + AES-256: DISA SNMP STIG / CNSA 1.0 baseline for SNMPv3 authPriv.
-# CNSA 2.0 hash profile is SHA-384/SHA-512 — change HASH/AUTH/PRIV together if required.
+# Why SHA-512 + AES-256: SHA-512 is the strongest hash this SNMPv3 path and
+# current SolarWinds can both do. Privacy stays AES-256 CFB (not GCM).
+# CNSA 2.0 also wants AES-GCM, which this appliance SNMP stack does not offer.
 # All three paths must use the same trio or walks fail with digest errors:
 #   1. createUser line (api/appgate.py)
 #   2. RFC 3414 localization (core/snmp_hashgen.py)
@@ -16,8 +17,8 @@ import warnings
 # Older appliances that only do SHA-1/AES-128 need a coordinated change of
 # all three values below (not recommended for regulated environments).
 # ============================================================================
-SNMP_HASH_ALGO = "sha256"
-SNMP_AUTH_PROTOCOL = "SHA256"
+SNMP_HASH_ALGO = "sha512"
+SNMP_AUTH_PROTOCOL = "SHA512"
 SNMP_PRIV_PROTOCOL = "AES256"
 # CNSA 2.0 / DISA: do not localize with MD5 or SHA-1.
 ALLOWED_HASH_ALGOS = ("sha256", "sha384", "sha512")
@@ -38,26 +39,41 @@ STRIP_V1V2_COMMUNITIES = True
 # Falls back to raw OID tuples if the import fails.
 # ============================================================================
 def get_auth_protocol():
-    try:
-        from pysnmp.hlapi.v3arch.asyncio import usmHMAC192SHA256AuthProtocol
-        return usmHMAC192SHA256AuthProtocol
-    except ImportError:
+    """Walk auth object for SNMP_HASH_ALGO. createUser and localization use the same setting."""
+    table = {
+        "sha256": ("usmHMAC192SHA256AuthProtocol", (1, 3, 6, 1, 6, 3, 10, 1, 1, 5)),
+        "sha384": ("usmHMAC256SHA384AuthProtocol", (1, 3, 6, 1, 6, 3, 10, 1, 1, 6)),
+        "sha512": ("usmHMAC384SHA512AuthProtocol", (1, 3, 6, 1, 6, 3, 10, 1, 1, 7)),
+    }
+    name, oid = table.get(SNMP_HASH_ALGO, table["sha512"])
+    for mod in ("pysnmp.hlapi.v3arch.asyncio", "pysnmp.hlapi"):
         try:
-            from pysnmp.hlapi import usmHMAC192SHA256AuthProtocol
-            return usmHMAC192SHA256AuthProtocol
+            module = __import__(mod, fromlist=[name])
         except ImportError:
-            return (1, 3, 6, 1, 6, 3, 10, 1, 1, 5)
+            continue
+        obj = getattr(module, name, None)
+        if obj is not None:
+            return obj
+    return oid
 
 def get_priv_protocol():
-    try:
-        from pysnmp.hlapi.v3arch.asyncio import usmAesCfb256Protocol
-        return usmAesCfb256Protocol
-    except ImportError:
+    """Walk privacy object for SNMP_PRIV_PROTOCOL. Same token as createUser."""
+    table = {
+        "AES": ("usmAesCfb128Protocol", (1, 3, 6, 1, 6, 3, 10, 1, 2, 4)),
+        "AES128": ("usmAesCfb128Protocol", (1, 3, 6, 1, 6, 3, 10, 1, 2, 4)),
+        "AES192": ("usmAesCfb192Protocol", (1, 3, 6, 1, 4, 1, 9, 12, 6, 1, 101)),
+        "AES256": ("usmAesCfb256Protocol", (1, 3, 6, 1, 4, 1, 9, 12, 6, 1, 102)),
+    }
+    name, oid = table.get(SNMP_PRIV_PROTOCOL, table["AES256"])
+    for mod in ("pysnmp.hlapi.v3arch.asyncio", "pysnmp.hlapi"):
         try:
-            from pysnmp.hlapi import usmAesCfb256Protocol
-            return usmAesCfb256Protocol
+            module = __import__(mod, fromlist=[name])
         except ImportError:
-            return (1, 3, 6, 1, 4, 1, 9, 12, 6, 1, 102)
+            continue
+        obj = getattr(module, name, None)
+        if obj is not None:
+            return obj
+    return oid
 
 def silence_third_party_warnings() -> None:
     """Hide pysnmp/cryptography CFB noise unless DEBUG is on.
@@ -79,7 +95,7 @@ def silence_third_party_warnings() -> None:
 
 
 def warn_insecure_transport() -> None:
-    """LAB_MODE on: warning only, never blocks. Off: no prompt here (ask after TLS fail)."""
+    """LAB_MODE on: warning only, never blocks. Off: no prompt here. CA pin runs at login."""
     silence_third_party_warnings()
     from core.color import warn
 
@@ -101,7 +117,7 @@ _skip_tls_ok = False
 
 
 def confirm_skip_tls_verify() -> bool:
-    """Once per run: untrusted cert. Default No. LAB_MODE already skips verify."""
+    """Lab-only bypass. Production login pins the CA and does not call this."""
     global _skip_tls_asked, _skip_tls_ok
     if LAB_MODE:
         return True
@@ -125,7 +141,8 @@ def confirm_skip_tls_verify() -> bool:
     return _skip_tls_ok
 
 SSH_PORT = 22
-# Empty = ~/.ssh/known_hosts (created if missing). Used when SSH_STRICT_HOST_KEY.
+# Production (SSH_STRICT_HOST_KEY) requires this path or credentials ssh_host_keys.
+# Empty does not trust ~/.ssh/known_hosts. Lab mode does not require a store.
 SSH_KNOWN_HOSTS = ""
 # Unix mode for new known_hosts (owner read/write). Windows ignores most bits.
 SSH_KNOWN_HOSTS_MODE = 0o600
@@ -140,7 +157,7 @@ DEBUG = False
 WRITE_RUN_REPORT = True
 # Unix mode for new report files (owner read/write only). Windows ignores most bits.
 REPORT_FILE_MODE = 0o600
-# When True: first pass is dry-run without asking. Prompt can still enable dry-run when False.
+# When True: preview still runs, Apply is not offered. False: preview, then Apply.
 DRY_RUN = False
 # When True: menu 1 live push skips step 8 walk. Menu 3 is unchanged.
 SKIP_CREDENTIAL_WALK = False
@@ -358,8 +375,8 @@ VENDOR_PACKAGES = ("requests", "paramiko", "pysnmp")
 # Lab / production transport switch (keep at the bottom)
 # ============================================================================
 # LAB_MODE only (DEBUG stays independent).
-# True: skip TLS/SSH verify, print ESXi Kul, SNMP pw min 8, skip STIG cz pw.
-# False: TLS verify (prompt after fail), SSH TOFU into known_hosts, SNMP pw min 15, STIG cz pw.
+# True: skip TLS verify, accept any SSH host key, print ESXi Kul, SNMP pw min 8, skip STIG cz pw.
+# False: pin Controller CA, reject unknown SSH host keys, SNMP pw min 15, STIG cz pw.
 LAB_MODE = False
 TLS_VERIFY = not LAB_MODE
 SSH_STRICT_HOST_KEY = not LAB_MODE
@@ -374,7 +391,7 @@ NTP_CUSTOMIZATION_UNIT = "cz-customization.service"
 NTP_VERIFY_DELAY = 3
 # 6.7 ntp.servers[].key: SHA256 values without this prefix get it prepended.
 NTP_KEY_HEX_PREFIX = "HEX:"
-# CNSA 2.0 / DISA: reject these NTP MAC algorithms when LAB_MODE=False.
+# DISA: reject these NTP MAC algorithms when LAB_MODE=False. SHA256 NTP keys are still allowed.
 NTP_WEAK_KEY_TYPES = ("MD5", "SHA1")
 NTP_KEY_TYPE_MAP = {
     "SHA256": "SHA256",

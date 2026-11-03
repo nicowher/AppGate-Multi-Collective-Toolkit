@@ -213,6 +213,7 @@ def _row_from_item(item: dict) -> Dict[str, Any]:
         "agip": str(item.get("agip") or "").strip(),
         "mibs": _parse_mibs(item.get("mibs")),
         "ntp_servers": _parse_ntp_servers(item.get("ntp_servers")),
+        "ssh_host_keys": item.get("ssh_host_keys", item.get("ssh_host_key")),
     }
     for key in COLLECTIVE_OPTIONAL_STR:
         row[key] = _optional_str(item, key)
@@ -298,6 +299,11 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
             entry[key] = _optional_str(row, key)
         if isinstance(row.get("allowed_sources"), dict) and row["allowed_sources"]:
             entry["allowed_sources"] = row["allowed_sources"]
+        host_keys = row.get("ssh_host_keys")
+        if host_keys is None:
+            host_keys = row.get("ssh_host_key") or creds.get("ssh_host_keys") or creds.get("ssh_host_key")
+        if host_keys:
+            entry["ssh_host_keys"] = host_keys
         out.append(entry)
 
     from_file = os.path.isfile(CREDENTIALS_PATH) and any(

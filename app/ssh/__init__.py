@@ -1,8 +1,8 @@
 """Shared SSH for appliance work.
 
 SSHSession is the reusable connect / sudo / run layer (password then
-keyboard-interactive). Host-key TOFU runs on the main thread only
-(worker input() deadlocks). SNMPEngineFetcher adds step 4 engine-ID read
+keyboard-interactive). SSH_STRICT_HOST_KEY follows LAB_MODE: production
+rejects unknown host keys; lab accepts any. SNMPEngineFetcher adds step 4 engine-ID read
 and step 7 persistent USM purge. AcasPrep is menu 2. CzPassword is menu 4.
 NtpSsh restarts cz-customization after the NTP PUT (no REST for that unit).
 """
