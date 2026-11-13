@@ -56,7 +56,7 @@ from config import (
     SSH_CONCURRENCY,
     WALK_CONCURRENCY,
     SUMMARY_WIDTH,
-    TLS_VERIFY,
+    insecure_api_enabled,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
@@ -508,7 +508,7 @@ def _build_run_report(
             for c in collectives
         ],
         "api_version": APPGATE_API_VERSION,
-        "tls_verify": TLS_VERIFY,
+        "insecure_api": insecure_api_enabled(),
         "config": {
             "hash": SNMP_HASH_ALGO,
             "auth": SNMP_AUTH_PROTOCOL,

@@ -28,7 +28,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **Exclude collectives** (number, range `1-3`, or FQDN) then **exclude appliances** (`1,3` / `1-10,12-20` / `1.hostname`). `1-10,12-20` leaves row 11.
 - **FQDN first**, then IP (pinned working IP first after a successful SSH). Gateways never use the Controller IP.
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **Defaults off.** **`DEBUG` and `DRY_RUN` are separate.**
-- **Production TLS:** before login the toolkit fetches the Controller CA (`GET /certificate-authority/ca-pem`, no token), hashes the certificate itself, shows that SHA-256, and stores `certs/<host>.pem`. The JSON fingerprint is ignored if it does not match the bytes. The first accept is still an operator confirm of that hash, not a pre-loaded pin from Secrets Manager. Later API calls use that file as `verify`. A changed fingerprint stops the login. After login, a next CA is appended so a planned rotation keeps working. Lab mode does not pin. Configure can still turn `LAB_MODE` on. The release zip does not force it off.
+- **Controller CA:** copy the CA off the appliance into `certs/<host>.pem` before login. The file name is the host you dial. FQDN and IP are separate files. Several collectives means several files. Current and next CA can be in the same PEM. Login uses that file as `verify` and does not download a CA. A missing file skips that host. A file that is not a CA certificate (`CA:TRUE`), a PEM or `certs/` directory that is group/world writable on Unix, or a PEM, `certs/`, or the parent of `certs/` writable by Everyone, Users, or Authenticated Users on Windows (in-process DACL, allow-ACEs and object allow-ACEs, matched by SID; an unparsed ACE type stops login), or a host-name collision stops login and does not send a password. If `cryptography` is missing, login stops with that reason instead of a traceback. `INSECURE_API=True` prints a warning at startup. `INSECURE_API=True` skips the file (`verify` off) and does not change SSH or STIG. `LAB_MODE` does not control this. A release zip ignores `INSECURE_API`.
 - **Production SSH:** `SSH_STRICT_HOST_KEY` follows `LAB_MODE` (`True` when lab is off). Strict mode rejects unknown host keys. Set `SSH_KNOWN_HOSTS` or `ssh_host_keys` in credentials.json before connecting. Lab mode still accepts any host key.
 - **Ctrl+C during a tool:** `Cancel this job and return to menu? [y/N]` (default N continues). Second Ctrl+C cancels. In-flight SSH/walks are not killed instantly. At the menu / Return to menu, Ctrl+C just redisplays the menu.
 - **Preview first**, then Apply. Replace (menu 6) uses **y** then type **YES**. `DRY_RUN=True` skips Apply.
@@ -36,7 +36,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **DEBUG on:** unfiltered — every SSH try, no `SSH n/N` counter, dumps uncolored. **DEBUG off:** `SSH n/N`, failures only. Preview prints **OK already set** when nothing would change (NTP add only; overwrite always previews because keys are not in the peek).
 - **DEBUG off:** GUI names (SSH, SPA/HTTPS, Admin/API, Ping, SNMP), no engine-ID hex, no Python dicts. **DEBUG on:** plus raw API fields, endpoints, engine hex, STEP_* (ACAS), SSH script preview.
 - **Shared run path:** `core/run.py` (login, inventory/exclude, add vs replace, result line). Appliance PUT helpers: `api/snmp.py`, `api/ntp.py`, `api/allow_sources.py` mixins on `AppGateClient`.
-- **TLS:** production pins the Controller CA before login (see above). `Proceed anyway?` and `verify=False` run only when `LAB_MODE=True`.
+- **TLS:** the CA file is required unless `INSECURE_API=True`. That switch is not lab mode.
 - **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime connects until the first working address (`SSH_PRIME_TIMEOUT`). Auth failure stops the IP walk (SSHBRUTE). Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. **DEBUG off:** `SSH n/N` and failures only. **DEBUG on:** every try, uncolored. Production does not prompt to trust a new host key.
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
 - **Dependencies:** unpacked wheels in `app/vendor/site` are on `sys.path` (no pip). Release zips include a Windows amd64 / **Python 3.14** `vendor/site`. Current pins need Python 3.10+; this zip is 3.14 only. Empty site is filled by extracting `vendor/wheels`. Git clones without vendor may still pip.
@@ -263,8 +263,9 @@ Switches:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `LAB_MODE` | `False` | **Security posture (keep off in production).** `True`: skip TLS verify, accept any SSH host key, print ESXi Kul, SNMP passphrase min 8, skip STIG cz-password check. `False`: pin the Controller CA, reject unknown SSH host keys, hide Kul, SNMP min 15, STIG cz password on. |
+| `LAB_MODE` | `False` | **SSH and STIG only.** `True`: accept any SSH host key, print ESXi Kul, SNMP passphrase min 8, skip STIG cz-password check. Does **not** skip the Controller CA file. |
 | `DEBUG` | `False` | **Console noise (keep off in production).** `True`: step traces, full JSON dump, pysnmp CFB warning, MAC/oldEngineID lines. Does **not** change TLS, SSH keys, or STIG. Unrelated to `LAB_MODE`. |
+| `INSECURE_API` | `False` | **API only.** `True`: do not require `certs/<host>.pem` and do not verify the Controller certificate. Does not change SSH or STIG. A release zip ignores this. |
 | `DRY_RUN` | `False` | **Preview only.** `True`: still previews, never offers Apply. Unrelated to `LAB_MODE`. |
 | `SKIP_CREDENTIAL_WALK` | `False` | **Skip step 8 walk** on menu 1 dry-run and live push. Menu 3 is unchanged. |
 | `ALLOW_SOURCES_LOCKOUT_SSH` | `True` | Menu 6 replace: **E20** if this host would miss new SSH rules. |
@@ -274,6 +275,7 @@ Other knobs:
 
 | Variable | Meaning |
 | --- | --- |
+| `CA_DIRNAME` | Folder of hand-placed Controller CA PEMs. Default `certs`. File name is the dialed host plus `.pem`. |
 | `SSH_KNOWN_HOSTS` | Production: set this, or set `ssh_host_keys`. Empty does **not** fall back to trusting `~/.ssh/known_hosts`. Lab mode does not require it. |
 | `SSH_PRIME_TIMEOUT` | Seconds per address when priming host keys (default 3; skip dead NICs) |
 | `SSH_CONCURRENCY` / `WALK_CONCURRENCY` | Parallel SSH / SNMP walks (default 5) |

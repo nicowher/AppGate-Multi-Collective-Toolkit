@@ -1,7 +1,7 @@
 """Menu C: edit common knobs in config.py (DEBUG, LAB_MODE, SSH timeouts).
 
 Why a dedicated editor: operators on air-gap hosts should not hand-edit
-Python. LAB_MODE derived knobs (TLS_VERIFY, SSH_STRICT_HOST_KEY, Kul print,
+Python. LAB_MODE derived knobs (SSH_STRICT_HOST_KEY, Kul print,
 SNMP min passphrase) are recomputed on save so they cannot drift.
 """
 import os
@@ -20,7 +20,8 @@ CONFIG_PATH = os.path.join(_APP_DIR, "config.py")
 # name, type, short help — LAB_MODE derived TLS/SSH/Kul/minlen stay computed in config.py
 EDITABLE = (
     ("DEBUG", bool, "step traces and JSON dump on console"),
-    ("LAB_MODE", bool, "lab TLS/SSH/STIG posture (TLS_VERIFY follows this)"),
+    ("LAB_MODE", bool, "SSH host keys, passphrase floor, STIG cz password"),
+    ("INSECURE_API", bool, "skip Controller CA file (API only, not SSH)"),
     ("DRY_RUN", bool, "force preview; skip pin/push/purge/walk"),
     ("SKIP_CREDENTIAL_WALK", bool, "skip walk after SNMP credential push"),
     ("ALLOW_SOURCES_LOCKOUT_SSH", bool, "abort replace if this host fails new SSH rules"),
@@ -91,7 +92,6 @@ def _parse_int(raw: str, current: int, name: str = "") -> int:
 def _apply_runtime(name: str, value) -> None:
     setattr(config, name, value)
     if name == "LAB_MODE":
-        config.TLS_VERIFY = not value
         config.SSH_STRICT_HOST_KEY = not value
         config.PRINT_ESXI_KEYS = value
         config.SNMP_MIN_PASSPHRASE_LEN = (
@@ -104,7 +104,7 @@ def _apply_runtime(name: str, value) -> None:
 def main() -> bool:
     # print(f"DEBUG settings: path={CONFIG_PATH} DEBUG={config.DEBUG} LAB_MODE={config.LAB_MODE}")
     print("Configure config.py (Enter keeps the current value).")
-    print("TLS_VERIFY / SSH_STRICT_HOST_KEY follow LAB_MODE.")
+    print("SSH_STRICT_HOST_KEY follows LAB_MODE. INSECURE_API does not.")
     print()
     values = {name: getattr(config, name) for name, _t, _h in EDITABLE}
     while True:

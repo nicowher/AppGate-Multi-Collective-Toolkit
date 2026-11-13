@@ -1,3 +1,4 @@
+import os
 import sys
 import warnings
 
@@ -101,7 +102,12 @@ def warn_insecure_transport() -> None:
 
     if LAB_MODE:
         print(
-            f"{warn('WARNING', stream=sys.stderr)}: LAB_MODE=True — TLS/SSH verification off; STIG new-password skipped.",
+            f"{warn('WARNING', stream=sys.stderr)}: LAB_MODE=True — SSH host-key checks off; STIG new-password skipped.",
+            file=sys.stderr,
+        )
+    if insecure_api_enabled():
+        print(
+            f"{warn('WARNING', stream=sys.stderr)}: INSECURE_API=True — Controller CA file not required; API certificate is not verified.",
             file=sys.stderr,
         )
     if DEBUG:
@@ -111,34 +117,6 @@ def warn_insecure_transport() -> None:
             file=sys.stderr,
         )
 
-
-_skip_tls_asked = False
-_skip_tls_ok = False
-
-
-def confirm_skip_tls_verify() -> bool:
-    """Lab-only bypass. Production login pins the CA and does not call this."""
-    global _skip_tls_asked, _skip_tls_ok
-    if LAB_MODE:
-        return True
-    if _skip_tls_asked:
-        return _skip_tls_ok
-    _skip_tls_asked = True
-    # print(f"DEBUG tls: confirm_skip asked for this run")
-    ans = input(
-        "Certificate could not be verified. Proceed anyway? [y/N]: "
-    ).strip().lower()
-    _skip_tls_ok = ans in YES_ANSWERS
-    if not _skip_tls_ok:
-        print(
-            "ERROR E06: TLS certificate not trusted; login skipped for this host.",
-            file=sys.stderr,
-        )
-        print(
-            "      Next: answer y to Proceed anyway, set LAB_MODE=True, or trust the Controller CA.",
-            file=sys.stderr,
-        )
-    return _skip_tls_ok
 
 SSH_PORT = 22
 # Production (SSH_STRICT_HOST_KEY) requires this path or credentials ssh_host_keys.
@@ -161,6 +139,12 @@ REPORT_FILE_MODE = 0o600
 DRY_RUN = False
 # When True: menu 1 live push skips step 8 walk. Menu 3 is unchanged.
 SKIP_CREDENTIAL_WALK = False
+# API only. Does not change SSH host keys or STIG checks. Default off.
+# True: do not require certs/<host>.pem and do not verify the Controller cert.
+# A release zip (app/vendor/RELEASE) ignores this and still requires the file.
+INSECURE_API = False
+# Folder of hand-placed Controller CA PEMs. File name is the dialed host.
+CA_DIRNAME = "certs"
 # Menu 6 replace: abort (E20) if this workstation would not match new SSH allowSources.
 ALLOW_SOURCES_LOCKOUT_SSH = True
 # Menu 6 replace: abort (E20) if this workstation would not match new Admin/API or SPA/HTTPS rules.
@@ -377,8 +361,15 @@ VENDOR_PACKAGES = ("requests", "paramiko", "pysnmp")
 # LAB_MODE only (DEBUG stays independent).
 # True: skip TLS verify, accept any SSH host key, print ESXi Kul, SNMP pw min 8, skip STIG cz pw.
 # False: pin Controller CA, reject unknown SSH host keys, SNMP pw min 15, STIG cz pw.
+def insecure_api_enabled() -> bool:
+    """True only in a git clone with INSECURE_API set. Release zips cannot skip the CA file."""
+    marker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", "RELEASE")
+    if os.path.isfile(marker):
+        return False
+    return bool(INSECURE_API)
+
+
 LAB_MODE = False
-TLS_VERIFY = not LAB_MODE
 SSH_STRICT_HOST_KEY = not LAB_MODE
 PRINT_ESXI_KEYS = LAB_MODE
 SNMP_MIN_PASSPHRASE_LEN = (

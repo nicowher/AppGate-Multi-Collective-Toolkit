@@ -47,7 +47,6 @@ _STDIN_WAIT_NAMES = frozenset(
         "prompt_until_valid",
         "_require",
         "_ask_cancel_job",
-        "confirm_skip_tls_verify",
     }
 )
 

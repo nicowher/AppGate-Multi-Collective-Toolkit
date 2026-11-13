@@ -1,214 +1,251 @@
-"""Controller CA pin. Production only. Lab mode does not call this.
+"""Controller CA file check. Not a download.
 
-The current CA PEM is an unauthenticated GET, so it is fetched before login.
-The fingerprint confirm is the anti-MITM step. Later calls use verify=<pem>.
-The next CA is staged after login so a planned rotation does not break the pin.
+The operator copies the CA off the appliance and drops it in certs/.
+The file name is the host string used in the login URL. FQDN and IP are
+separate files. Several collectives means several files in that folder.
 """
 from __future__ import annotations
 
-import base64
-import hashlib
 import os
 import re
-import sys
-import threading
+import ssl
 
-import requests
-
-from config import (
-    API_TIMEOUT,
-    APPGATE_API_VERSION,
-    YES_ANSWERS,
-)
+from config import CA_DIRNAME
 from core.utils import REPO_ROOT
 
-CA_PEM_PATH = "/certificate-authority/ca-pem"
-CA_NEXT_PATH = "/certificate-authority/ca-next"
+_seen_safe = {}
 
 
 class CaPinError(RuntimeError):
-    """Operator rejected the CA, or a stored pin did not match."""
+    """No usable CA file for this host. Do not send credentials."""
 
-
-def _store_dir() -> str:
-    path = os.path.join(REPO_ROOT, "certs")
-    os.makedirs(path, exist_ok=True)
-    return path
+    def __init__(self, message: str, *, fatal: bool = False) -> None:
+        """fatal=True stops the FQDN/IP fallback. A missing file is not fatal."""
+        super().__init__(message)
+        self.fatal = fatal
 
 
 def _safe_host(host: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", host)[:80] or "controller"
-
-
-def _pem_path(host: str) -> str:
-    return os.path.join(_store_dir(), f"{_safe_host(host)}.pem")
-
-
-def _fp_path(host: str) -> str:
-    return _pem_path(host) + ".fp"
-
-
-def _read_fps(host: str) -> set:
-    path = _fp_path(host)
-    if not os.path.isfile(path):
-        return set()
-    with open(path, encoding="utf-8") as fh:
-        return {line.strip().lower() for line in fh if line.strip()}
-
-
-def _append_fp(host: str, fingerprint: str) -> None:
-    fp = fingerprint.strip().lower()
-    if not fp or fp in _read_fps(host):
-        return
-    with open(_fp_path(host), "a", encoding="utf-8") as fh:
-        fh.write(fp + "\n")
-
-
-def pem_from_payload(payload: dict) -> str:
-    """CaConfig.certificate is PEM text or base64 DER/PEM."""
-    raw = str(payload.get("certificate") or "").strip()
-    if not raw:
-        raise CaPinError("CA response had no certificate")
-    if "BEGIN CERTIFICATE" in raw:
-        return raw if raw.endswith("\n") else raw + "\n"
-    try:
-        blob = base64.b64decode(raw)
-    except (ValueError, TypeError) as exc:
-        raise CaPinError(f"CA certificate was not valid base64: {exc}") from exc
-    if blob.startswith(b"-----BEGIN"):
-        text = blob.decode("utf-8")
-        return text if text.endswith("\n") else text + "\n"
-    b64 = base64.b64encode(blob).decode("ascii")
-    lines = [b64[i : i + 64] for i in range(0, len(b64), 64)]
-    return "-----BEGIN CERTIFICATE-----\n" + "\n".join(lines) + "\n-----END CERTIFICATE-----\n"
-
-
-def fingerprint_of_pem(pem: str) -> str:
-    """SHA-256 of the certificate DER. Do not trust the JSON fingerprint field."""
-    body = pem
-    if "BEGIN CERTIFICATE" in pem:
-        lines = [
-            line.strip()
-            for line in pem.splitlines()
-            if line.strip() and "BEGIN CERTIFICATE" not in line and "END CERTIFICATE" not in line
-        ]
-        der = base64.b64decode("".join(lines))
-    else:
-        der = pem.encode("utf-8")
-    return hashlib.sha256(der).hexdigest()
-
-
-def fingerprint_from_payload(payload: dict, pem: str) -> str:
-    """Use the computed fingerprint. Reject a JSON fingerprint that does not match."""
-    computed = fingerprint_of_pem(pem)
-    claimed = str(payload.get("fingerprint") or "").replace(":", "").strip().lower()
-    if claimed and claimed != computed:
+    """File name only. Slashes must not escape certs/."""
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", host)[:80] or "controller"
+    prior = _seen_safe.get(safe)
+    if prior is not None and prior != host:
         raise CaPinError(
-            "CA JSON fingerprint does not match the certificate bytes. Refusing to pin."
+            f"CA file name {safe}.pem already used for {prior}, not {host}.",
+            fatal=True,
         )
-    return computed
+    _seen_safe[safe] = host
+    return safe
 
 
-def _accept_header() -> dict:
-    return {"Accept": f"application/vnd.appgate.peer-v{APPGATE_API_VERSION}+json"}
+def ca_path_for(host: str) -> str:
+    """Path the operator must fill. Not created here."""
+    return os.path.join(REPO_ROOT, CA_DIRNAME, f"{_safe_host(host)}.pem")
 
 
-def _fetch_ca(base_url: str, path: str, *, verify, headers: dict) -> requests.Response:
-    return requests.get(
-        f"{base_url}{path}",
-        headers=headers,
-        verify=verify,
-        timeout=API_TIMEOUT,
-    )
+def _ensure_dir(path: str) -> None:
+    """Create certs/ as 0700 so other users cannot drop a PEM in beside yours."""
+    folder = os.path.dirname(path)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    if os.name == "posix":
+        os.chmod(folder, 0o700)
 
 
-def _confirm(host: str, fingerprint: str) -> None:
-    """Out-of-band confirm. The GET itself is not the trust anchor."""
-    if threading.current_thread() is not threading.main_thread():
-        raise CaPinError("CA fingerprint confirm must run on the main thread")
-    print(f"      Controller CA SHA-256 for {host}:", file=sys.stderr)
-    print(f"      {fingerprint}", file=sys.stderr)
-    ans = input("      Trust this CA? [y/N]: ").strip().lower()
-    if ans not in YES_ANSWERS:
-        raise CaPinError(
-            f"CA for {host} was not trusted. No credentials were sent."
-        )
-
-
-def _save_pem(host: str, pem: str, fingerprint: str) -> str:
-    path = _pem_path(host)
-    existing = ""
-    if os.path.isfile(path):
-        with open(path, encoding="utf-8") as fh:
-            existing = fh.read()
-    if pem not in existing:
-        with open(path, "a", encoding="utf-8") as fh:
-            if existing and not existing.endswith("\n"):
-                fh.write("\n")
-            fh.write(pem)
-    _append_fp(host, fingerprint)
-    return path
-
-
-def ensure_ca_pin(host: str, base_url: str) -> str:
-    """Fetch the current CA before login. Return the PEM path for verify=."""
-    stored = _read_fps(host)
-    verify = _pem_path(host) if stored and os.path.isfile(_pem_path(host)) else False
-    try:
-        response = _fetch_ca(base_url, CA_PEM_PATH, verify=verify, headers=_accept_header())
-    except requests.exceptions.SSLError as exc:
-        raise CaPinError(
-            f"Controller certificate for {host} did not match the pinned CA."
-        ) from exc
-    if response.status_code != 200:
-        raise CaPinError(
-            f"CA fetch for {host} failed (HTTP {response.status_code})."
-        )
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise CaPinError(f"CA fetch for {host} returned non-JSON") from exc
-    if not isinstance(payload, dict):
-        raise CaPinError(f"CA fetch for {host} was not an object")
-    pem = pem_from_payload(payload)
-    fingerprint = fingerprint_from_payload(payload, pem)
-    if not fingerprint:
-        raise CaPinError(f"CA response for {host} had no fingerprint")
-    if stored:
-        if fingerprint not in stored:
+def _reject_loose(path: str, *, directory: bool = False) -> None:
+    """Check the PEM and certs/. Delete-child on the folder replaces the file even if the file ACL is tight."""
+    if os.name == "posix":
+        mode = os.stat(path).st_mode
+        if mode & 0o022:
+            kind = "directory" if directory else "file"
             raise CaPinError(
-                f"CA fingerprint for {host} changed ({fingerprint}). "
-                "Refusing to send credentials."
+                f"{path} is a group or world writable {kind}. Restrict it before login.",
+                fatal=True,
             )
-    else:
-        _confirm(host, fingerprint)
-    return _save_pem(host, pem, fingerprint)
+        return
+    _reject_loose_windows(path, directory=directory)
 
 
-def stage_next_ca(host: str, base_url: str, headers: dict, verify) -> None:
-    """After login, add the next CA to the pin bundle if the Controller has one."""
+def _require_ca(path: str, pem: str) -> None:
+    """A leaf is not a trust anchor. Reject anything without CA:TRUE."""
     try:
-        response = _fetch_ca(base_url, CA_NEXT_PATH, verify=verify, headers=headers)
-    except requests.exceptions.RequestException as exc:
-        print(f"      Could not read next CA for {host}: {exc}", file=sys.stderr)
-        return
-    if response.status_code == 404:
-        return
-    if response.status_code != 200:
-        return
+        from cryptography import x509
+    except ImportError as exc:
+        raise CaPinError(
+            f"Cannot validate {path}. Install cryptography before login.",
+            fatal=True,
+        ) from exc
+
+    cert = x509.load_pem_x509_certificate(pem.encode("utf-8"))
     try:
-        payload = response.json()
-    except ValueError:
-        return
-    if not isinstance(payload, dict) or not payload.get("certificate"):
-        return
+        ext = cert.extensions.get_extension_for_class(x509.BasicConstraints)
+    except x509.ExtensionNotFound as exc:
+        raise CaPinError(f"{path} is not a CA certificate.", fatal=True) from exc
+    if not ext.value.ca:
+        raise CaPinError(f"{path} is not a CA certificate.", fatal=True)
+
+
+def _reject_loose_windows(path: str, *, directory: bool = False) -> None:
+    """Read the DACL in-process. SIDs, not names, and no PowerShell."""
+    import ctypes
+    from ctypes import wintypes
+
+    advapi = ctypes.windll.advapi32
+    kernel = ctypes.windll.kernel32
+    advapi.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    advapi.GetAclInformation.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    advapi.GetAce.argtypes = [
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+    advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
+    SE_FILE_OBJECT = 1
+    DACL_SECURITY_INFORMATION = 0x4
+    ACCESS_ALLOWED_ACE_TYPE = 0
+    ACCESS_DENIED_ACE_TYPE = 1
+    ACCESS_ALLOWED_OBJECT_ACE_TYPE = 5
+    ACCESS_DENIED_OBJECT_ACE_TYPE = 6
+    ACE_OBJECT_TYPE_PRESENT = 0x1
+    ACE_INHERITED_OBJECT_TYPE_PRESENT = 0x2
+    broad = {b"S-1-1-0", b"S-1-5-11", b"S-1-5-32-545"}
+    write_bits = 0x02 | 0x04 | 0x10 | 0x100 | 0x10000 | 0x40000 | 0x80000 | 0x40000000
+    if directory:
+        write_bits |= 0x40
+
+    def refuse(reason: str) -> None:
+        raise CaPinError(
+            f"Could not verify permissions on {path}. Refusing to use it. {reason}",
+            fatal=True,
+        )
+
+    sd = ctypes.c_void_p()
+    dacl = ctypes.c_void_p()
+    status = advapi.GetNamedSecurityInfoW(
+        path,
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION,
+        None,
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(sd),
+    )
+    if status != 0 or not sd:
+        refuse(f"GetNamedSecurityInfo returned {status}.")
     try:
-        pem = pem_from_payload(payload)
-        fingerprint = fingerprint_from_payload(payload, pem)
-    except CaPinError as exc:
-        print(f"      Next CA for {host} was not staged: {exc}", file=sys.stderr)
-        return
-    if not fingerprint or fingerprint in _read_fps(host):
-        return
-    _save_pem(host, pem, fingerprint)
-    print(f"      Staged next CA for {host}: {fingerprint}", file=sys.stderr)
+        if not dacl:
+            raise CaPinError(
+                f"{path} has no DACL, so any user can write it. Restrict the ACL before login.",
+                fatal=True,
+            )
+        class ACL_SIZE(ctypes.Structure):
+            _fields_ = [
+                ("AceCount", wintypes.DWORD),
+                ("AclBytesInUse", wintypes.DWORD),
+                ("AclBytesFree", wintypes.DWORD),
+            ]
+
+        info = ACL_SIZE()
+        if not advapi.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), 2):
+            refuse("GetAclInformation failed.")
+        for index in range(info.AceCount):
+            ace = ctypes.c_void_p()
+            if not advapi.GetAce(dacl, index, ctypes.byref(ace)) or not ace:
+                refuse(f"GetAce failed at {index}.")
+            header = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))
+            ace_type = header[0]
+            if ace_type in (ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE):
+                continue
+            mask = ctypes.cast(ace, ctypes.POINTER(wintypes.DWORD))[1]
+            if ace_type == ACCESS_ALLOWED_ACE_TYPE:
+                sid_off = 8
+            elif ace_type == ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+                flags = ctypes.cast(ace, ctypes.POINTER(wintypes.DWORD))[2]
+                sid_off = 12
+                if flags & ACE_OBJECT_TYPE_PRESENT:
+                    sid_off += 16
+                if flags & ACE_INHERITED_OBJECT_TYPE_PRESENT:
+                    sid_off += 16
+            else:
+                refuse(f"Unhandled ACE type {ace_type} at {index}.")
+                continue
+            sid_ptr = ctypes.c_void_p(ace.value + sid_off)
+            sid_str = ctypes.c_wchar_p()
+            if not advapi.ConvertSidToStringSidW(sid_ptr, ctypes.byref(sid_str)) or not sid_str:
+                refuse(f"Could not read ACE SID at {index}.")
+            try:
+                sid = (sid_str.value or "").encode("ascii")
+            finally:
+                kernel.LocalFree(ctypes.cast(sid_str, ctypes.c_void_p))
+            if sid in broad and mask & write_bits:
+                raise CaPinError(
+                    f"{path} is writable by other users. Restrict the ACL before login.",
+                    fatal=True,
+                )
+    finally:
+        kernel.LocalFree(sd)
+
+
+def _parse_pem(path: str, text: str) -> None:
+    """Reject a file that is not a certificate before any password is sent."""
+    chunks = text.split("-----END CERTIFICATE-----")
+    found = 0
+    for chunk in chunks:
+        if "BEGIN CERTIFICATE" not in chunk:
+            continue
+        body = chunk.split("BEGIN CERTIFICATE-----", 1)[-1]
+        pem = "-----BEGIN CERTIFICATE-----" + body + "-----END CERTIFICATE-----\n"
+        try:
+            ssl.PEM_cert_to_DER_cert(pem)
+        except ssl.SSLError as exc:
+            raise CaPinError(f"{path} is not a valid certificate: {exc}", fatal=True) from exc
+        _require_ca(path, pem)
+        found += 1
+    if not found:
+        raise CaPinError(
+            f"{path} has no PEM certificate. Export the Controller CA, not a key or a leaf-only note.",
+            fatal=True,
+        )
+
+
+def require_ca_file(host: str) -> str:
+    """Return the PEM path or stop. Never fetches a CA to pin it."""
+    # print(f"DEBUG ca: host={host!r} path={ca_path_for(host)!r}")
+    path = ca_path_for(host)
+    _ensure_dir(path)
+    cert_dir = os.path.dirname(path)
+    _reject_loose(cert_dir, directory=True)
+    parent = os.path.dirname(cert_dir)
+    if parent and parent != cert_dir:
+        _reject_loose(parent, directory=True)
+    if not os.path.isfile(path):
+        raise CaPinError(
+            f"No CA file for {host}. Copy the Controller CA from the appliance to {path}."
+        )
+    _reject_loose(path)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        raise CaPinError(f"Could not read CA file {path}: {exc}", fatal=True) from exc
+    _parse_pem(path, text)
+    return path

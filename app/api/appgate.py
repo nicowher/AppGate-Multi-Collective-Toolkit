@@ -47,7 +47,6 @@ from config import (
     APPLIANCE_LIST_PAGE,
     APPLIANCE_STATUS_PATH,
     ENGINE_ID_TYPE,
-    LAB_MODE,
     NTP_KEY_HEX_PREFIX,
     ALLOW_SOURCES_PUT_ALLOWED,
     ALLOW_SOURCES_SLOT_PARENT,
@@ -56,9 +55,7 @@ from config import (
     SNMP_AUTH_PROTOCOL,
     SNMP_PRIV_PROTOCOL,
     STRIP_V1V2_COMMUNITIES,
-    LAB_MODE,
-    TLS_VERIFY,
-    confirm_skip_tls_verify,
+    insecure_api_enabled,
 )
 import copy
 import ipaddress
@@ -67,7 +64,7 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-from core.ca_pin import CaPinError, ensure_ca_pin, stage_next_ca
+from core.ca_pin import CaPinError, require_ca_file
 from core.inventory import (
     Target,
     appliance_functions,
@@ -84,18 +81,14 @@ from .errors import AppliancePutError
 from .ntp import NtpMixin
 from .snmp import SnmpMixin
 
-_tls_verify = TLS_VERIFY
-if not _tls_verify:
-    from requests.packages.urllib3.exceptions import InsecureRequestWarning
-    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
-
 def _disable_tls_verify() -> None:
-    """Lab-only. Production must not call this or the CA pin is bypassed."""
-    global _tls_verify
-    _tls_verify = False
+    """INSECURE_API only. Hides urllib3 noise when verify is off."""
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
     requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+
+if insecure_api_enabled():
+    _disable_tls_verify()
 
 
 SNMP_PUT_ALLOWED = ("snmpServer.snmpd.conf", "snmpServer.enabled")
@@ -247,12 +240,12 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         self._ca_bundle = ""
 
     def _verify(self):
-        """Lab skips verify. Production uses the pinned CA file when one is stored."""
-        if LAB_MODE:
+        """INSECURE_API skips verify. Otherwise the hand-placed CA file. Never the system store."""
+        if insecure_api_enabled():
             return False
         if self._ca_bundle:
             return self._ca_bundle
-        return _tls_verify
+        raise CaPinError("Controller CA file was not loaded. Refusing to call the API.")
 
     def _set_endpoint(self, host: str) -> None:
         self.agip = host
@@ -276,12 +269,14 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         last_connect_error: Optional[Exception] = None
         for host in self.endpoints:
             self._set_endpoint(host)
-            if not LAB_MODE:
+            if not insecure_api_enabled():
                 try:
-                    self._ca_bundle = ensure_ca_pin(host, self.base_url)
+                    self._ca_bundle = require_ca_file(host)
                 except CaPinError as exc:
                     print(f"ERROR E06: {exc}", file=sys.stderr)
                     last_connect_error = exc
+                    if exc.fatal:
+                        break
                     continue
             try:
                 response = requests.post(
@@ -297,21 +292,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     f"      TLS verify failed for {host} (self-signed or untrusted CA).",
                     file=sys.stderr,
                 )
-                if LAB_MODE and confirm_skip_tls_verify():
-                    _disable_tls_verify()
-                    try:
-                        response = requests.post(
-                            f"{self.base_url}/login",
-                            headers=self.headers,
-                            json=payload,
-                            verify=False,
-                            timeout=API_TIMEOUT,
-                        )
-                    except (requests.ConnectionError, requests.Timeout, OSError) as retry_exc:
-                        last_connect_error = retry_exc
-                        continue
-                else:
-                    continue
+                continue
             except (requests.ConnectionError, requests.Timeout, OSError) as exc:
                 last_connect_error = exc
                 print(
@@ -345,8 +326,6 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     f"HTTP {response.status_code}."
                 )
             self.headers["Authorization"] = f"Bearer {token}"
-            if not LAB_MODE and self._ca_bundle:
-                stage_next_ca(host, self.base_url, self.headers, self._verify())
             if host != self.fqdn and self.fqdn:
                 print(f"      Using IP fallback {host} (FQDN {self.fqdn} unreachable)", file=sys.stderr)
             return token
