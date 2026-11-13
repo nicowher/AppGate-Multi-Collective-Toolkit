@@ -8,3 +8,5 @@ app/vendor/*.zip
 reports/*.json
 reports/replaced/
 certs/
+AGENTS.md
+.kilo/
