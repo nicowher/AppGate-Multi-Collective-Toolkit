@@ -130,8 +130,33 @@ VENDOR_WHEELS = os.path.join(VENDOR_DIR, "wheels")
 VENDOR_SITE = os.path.join(VENDOR_DIR, "site")
 
 
+def install_machine_id() -> str:
+    """One UUID per install. A shared constant cannot be revoked for one workstation."""
+    import uuid
+
+    folder = os.path.join(REPO_ROOT, "certs")
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    path = os.path.join(folder, ".machine-id")
+    if os.path.isfile(path):
+        text = open(path, encoding="utf-8").read().strip()
+        try:
+            return str(uuid.UUID(text))
+        except ValueError:
+            pass
+    value = str(uuid.uuid4())
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (value + "\n").encode("ascii"))
+    finally:
+        os.close(fd)
+    if os.name == "posix":
+        os.chmod(path, 0o600)
+    # print(f"DEBUG machine-id: path={path!r} new={not os.path.isfile(path)}")
+    return value
+
+
 def ensure_vendor_site() -> None:
-    """Put unpacked wheels on sys.path. Extract *.whl into site if it is empty. No pip."""
+    """Put unpacked wheels on sys.path before imports. Extract only if site is empty so a bad wheel is not re-read every start."""
     if os.path.isdir(VENDOR_WHEELS) and (
         not os.path.isdir(VENDOR_SITE) or not any(os.scandir(VENDOR_SITE))
     ):
@@ -397,11 +422,31 @@ def write_json_report(prefix: str, payload: Dict[str, Any]) -> None:
         print(f"      Could not write report file: {exc}", file=sys.stderr)
 
 
-_REDACT_KEY_SUBSTR = ("password", "token", "secret", "p12")
+_REDACT_KEY_SUBSTR = (
+    "password",
+    "token",
+    "secret",
+    "p12",
+    "passphrase",
+    "community",
+    "privatekey",
+    "authkey",
+    "privkey",
+)
+_SECRET_JSON = re.compile(
+    r'("(?:password|token|secret|passphrase|community|privateKey|authKey|key)"\s*:\s*")[^"]*"',
+    re.I,
+)
 _REDACT_KEYS = frozenset(
     {"snmpd.conf", "key", "httpsP12", "awsSecret", "p12", "password", "token"}
 )
 _replaced_run_dir = ""
+
+
+def redact_preview(text: str, limit: int = 300) -> str:
+    """Cap an error body and hide echoed secrets. Controllers sometimes repeat the POST."""
+    clipped = (text or "")[:limit]
+    return _SECRET_JSON.sub(r'\1<redacted>"', clipped)
 
 
 def redact_for_backup(obj: Any) -> Any:

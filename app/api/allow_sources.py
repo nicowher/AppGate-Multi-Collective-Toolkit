@@ -20,7 +20,9 @@ class AllowSourcesMixin:
         try:
             mask = int(entry.get("netmask"))
         except (TypeError, ValueError):
-            mask = -1
+            return ("", -1, "")
+        if mask < 1:
+            return ("", -1, "")
         return (
             str(entry.get("address") or "").strip(),
             mask,
@@ -31,8 +33,8 @@ class AllowSourcesMixin:
     def _allow_source_body(entry: Any) -> Dict[str, Any]:
         """GUI blank NIC = Any: omit nic. Empty string 422s (must not be empty)."""
         key = AllowSourcesMixin._allow_source_key(entry)
-        if not key[0]:
-            return {}
+        if not key[0] or key[1] < 1:
+            raise AppliancePutError("allowSources address or netmask is invalid")
         out: Dict[str, Any] = {"address": key[0], "netmask": key[1]}
         if key[2]:
             out["nic"] = key[2]
@@ -98,24 +100,21 @@ class AllowSourcesMixin:
             rows = block.get("allowSources")
             if not isinstance(rows, list):
                 rows = []
+            built = [self._allow_source_body(x) for x in desired]
+            if overwrite and not built:
+                raise AppliancePutError(
+                    "Refusing replace that would empty allowSources (admin lockout)"
+                )
             if overwrite:
-                new_rows = [
-                    b for b in (self._allow_source_body(x) for x in desired) if b
-                ]
+                new_rows = built
             else:
                 seen = {self._allow_source_key(x) for x in rows}
-                new_rows = [
-                    b
-                    for b in (self._allow_source_body(x) for x in rows if isinstance(x, dict))
-                    if b
-                ]
-                for item in desired:
-                    key = self._allow_source_key(item)
+                new_rows = [x for x in rows if isinstance(x, dict)]
+                for body in built:
+                    key = self._allow_source_key(body)
                     if key[0] and key not in seen:
                         seen.add(key)
-                        body = self._allow_source_body(item)
-                        if body:
-                            new_rows.append(body)
+                        new_rows.append(body)
             block["allowSources"] = new_rows
             appliance[parent] = block
             counts[parent] = len(new_rows)

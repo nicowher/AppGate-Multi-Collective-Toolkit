@@ -28,7 +28,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **Exclude collectives** (number, range `1-3`, or FQDN) then **exclude appliances** (`1,3` / `1-10,12-20` / `1.hostname`). `1-10,12-20` leaves row 11.
 - **FQDN first**, then IP (pinned working IP first after a successful SSH). Gateways never use the Controller IP.
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **Defaults off.** **`DEBUG` and `DRY_RUN` are separate.**
-- **Controller CA:** copy the CA off the appliance into `certs/<host>.pem` before login. The file name is the host you dial. FQDN and IP are separate files. Several collectives means several files. Current and next CA can be in the same PEM. Login uses that file as `verify` and does not download a CA. A missing file skips that host. A file that is not a CA certificate (`CA:TRUE`), a PEM or `certs/` directory that is group/world writable on Unix, or a PEM, `certs/`, or the parent of `certs/` writable by Everyone, Users, or Authenticated Users on Windows (in-process DACL, allow-ACEs and object allow-ACEs, matched by SID; an unparsed ACE type stops login), or a host-name collision stops login and does not send a password. If `cryptography` is missing, login stops with that reason instead of a traceback. `INSECURE_API=True` prints a warning at startup. `INSECURE_API=True` skips the file (`verify` off) and does not change SSH or STIG. `LAB_MODE` does not control this. A release zip ignores `INSECURE_API`.
+- **Controller CA:** copy the AppGate CA export into `certs/`. `AppGate_SDP_<host>_CA.cer` is accepted, as are `<host>.cer` and `<host>.pem`. The file name is the host you dial. FQDN and IP may share one file. If the FQDN `.cer` is present, the IP fallback uses it. Several collectives means several files. Current and next CA can be in the same PEM. Login uses that file as `verify` and does not download a CA. A missing file skips that host. A file that is not a CA certificate (`CA:TRUE`), a PEM or `certs/` directory that is group/world writable on Unix, or a PEM, `certs/`, or the parent of `certs/` writable by Everyone, Users, or Authenticated Users on Windows (in-process DACL, allow-ACEs and object allow-ACEs, matched by SID; an unparsed ACE type stops login), or a host-name collision stops login and does not send a password. If `cryptography` is missing, login stops with that reason instead of a traceback. `INSECURE_API=True` prints a warning at startup. `INSECURE_API=True` skips the file (`verify` off) and does not change SSH or STIG. `LAB_MODE` does not control this. A release zip ignores `INSECURE_API`.
 - **Production SSH:** `SSH_STRICT_HOST_KEY` follows `LAB_MODE` (`True` when lab is off). Strict mode rejects unknown host keys. Set `SSH_KNOWN_HOSTS` or `ssh_host_keys` in credentials.json before connecting. Lab mode still accepts any host key.
 - **Ctrl+C during a tool:** `Cancel this job and return to menu? [y/N]` (default N continues). Second Ctrl+C cancels. In-flight SSH/walks are not killed instantly. At the menu / Return to menu, Ctrl+C just redisplays the menu.
 - **Preview first**, then Apply. Replace (menu 6) uses **y** then type **YES**. `DRY_RUN=True` skips Apply.
@@ -47,7 +47,7 @@ Configures **authPriv** SNMPv3 USM on selected appliances so a scanner (e.g. ESX
 
 **CLI (`[1/8]` … `[8/8]`):**
 
-1. **Authenticate** to each Controller (`POST /admin/login`). Production pins the CA first (no password until the fingerprint is accepted or already stored). FQDN first; IP if connect/HTTP fails (not on 401/403). `Proceed anyway?` is lab mode only.
+1. **Authenticate** to each Controller (`POST /admin/login`). Production pins the CA first (no password until the fingerprint is accepted or already stored). Before the password is sent, `GET /admin/version` sets `Accept` to `peerVersion`. Peer 24 sends `machineId`; peer 25 sends `deviceId` (same UUID). FQDN first; IP if connect/HTTP fails (not on 401/403). `Proceed anyway?` is lab mode only.
 2. **Inventory** `GET /admin/appliances` + status, then the exclude table (Enter = all). The run **previews first** (no pin/push/purge/walk/snmpd restart). Apply is offered after the preview unless `DRY_RUN=True`.
 3. **Pin** `engineIDType 3` via appliance PUT (dry-run prints only). PUT is the full GET document: only `snmpd.conf` / `enabled` may change; `site` object becomes the same UUID (never stripped); `tcpPort` is never added. Any other field diff aborts (`DEBUG` dumps redacted GET/PUT).
 4. **SSH** (host keys primed on the main thread, then up to `SSH_CONCURRENCY` in parallel). **DEBUG off:** `SSH n/N` and failure lines only. **DEBUG on:** every try. Read `oldEngineID` from persistent snmpd.conf and check it against `eth0` MAC (RFC 3411 type 3). **Live** restarts snmpd so type 3 applies; **preview does not**.
@@ -265,7 +265,7 @@ Switches:
 | --- | --- | --- |
 | `LAB_MODE` | `False` | **SSH and STIG only.** `True`: accept any SSH host key, print ESXi Kul, SNMP passphrase min 8, skip STIG cz-password check. Does **not** skip the Controller CA file. |
 | `DEBUG` | `False` | **Console noise (keep off in production).** `True`: step traces, full JSON dump, pysnmp CFB warning, MAC/oldEngineID lines. Does **not** change TLS, SSH keys, or STIG. Unrelated to `LAB_MODE`. |
-| `INSECURE_API` | `False` | **API only.** `True`: do not require `certs/<host>.pem` and do not verify the Controller certificate. Does not change SSH or STIG. A release zip ignores this. |
+| `INSECURE_API` | `False` | **API only.** `True`: do not require `certs/AppGate_SDP_<host>_CA.cer` (or `<host>.cer` / `.pem`) and do not verify the Controller certificate. The FQDN file is reused for that Controller's IP fallback. Does not change SSH or STIG. A release zip ignores this. |
 | `DRY_RUN` | `False` | **Preview only.** `True`: still previews, never offers Apply. Unrelated to `LAB_MODE`. |
 | `SKIP_CREDENTIAL_WALK` | `False` | **Skip step 8 walk** on menu 1 dry-run and live push. Menu 3 is unchanged. |
 | `ALLOW_SOURCES_LOCKOUT_SSH` | `True` | Menu 6 replace: **E20** if this host would miss new SSH rules. |
@@ -275,8 +275,8 @@ Other knobs:
 
 | Variable | Meaning |
 | --- | --- |
-| `CA_DIRNAME` | Folder of hand-placed Controller CA PEMs. Default `certs`. File name is the dialed host plus `.pem`. |
-| `SSH_KNOWN_HOSTS` | Production: set this, or set `ssh_host_keys`. Empty does **not** fall back to trusting `~/.ssh/known_hosts`. Lab mode does not require it. |
+| `CA_DIRNAME` | Folder of hand-placed Controller CA files. Default `certs`. Names: `AppGate_SDP_<host>_CA.cer`, `<host>.cer`, `<host>.pem`. DER is converted under `certs/.converted/` and removed when the process exits. |
+| `SSH_KNOWN_HOSTS` | Production: set this, or set `ssh_host_keys`. Strict mode does not load `~/.ssh/known_hosts`. Wildcard lines are refused. Lab mode does not require a pin. |
 | `SSH_PRIME_TIMEOUT` | Seconds per address when priming host keys (default 3; skip dead NICs) |
 | `SSH_CONCURRENCY` / `WALK_CONCURRENCY` | Parallel SSH / SNMP walks (default 5) |
 | `SNMP_HASH_ALGO` / `SNMP_AUTH_PROTOCOL` / `SNMP_PRIV_PROTOCOL` | Must stay in sync (SHA-512 / AES-256) |
@@ -290,7 +290,10 @@ Other knobs:
 
 ## Security notes
 
+- `DEBUG` and `LAB_MODE` default off. `INSECURE_API` defaults off and is the only switch that skips the Controller CA. `LAB_MODE` does not.
 - Tokens and passphrases are not printed. New cz password is not on the remote argv.
+- Login probes `GET /admin/version` and sets `Accept` to `peerVersion`. Peer 24 sends `machineId`. Peer 25 sends `deviceId`. A login retry happens only if the Controller names `peer-vN` in the error. The device UUID is per install in `certs/.machine-id`, not a shared constant.
+- SSH refuses SHA-1, CBC, and `diffie-hellman-group14-sha1`. A status read failure does not treat the box as healthy. Prefix `0` allow-sources are refused. Menu C caps concurrency at 8.
 - Reports store hash *lengths*, not hex. Engine ID hex only if `DEBUG=True`. `PRINT_ESXI_KEYS` follows `LAB_MODE`.
 - Replace/overwrite writes a secret-free GET to `reports/replaced/<UTC>/` before PUT. Markers are `<redacted:field>`. That file can restore `allowSources`. It cannot restore SNMP config or NTP keys. Use the Admin UI or a snapshot for those.
 - `credentials.json` is gitignored. Reports are `0600` where the OS honors it.
@@ -308,7 +311,7 @@ Per-box errors skip that appliance and continue. The console line is a sentence 
 | **E03** | No appliances with SSH | Activated boxes with hostname/SSH IP; Appliance **View** on tags |
 | **E04** | Nothing left after appliance exclude | Enter to keep all, or exclude fewer |
 | **E05** | All collectives excluded | Enter to keep all Controllers |
-| **E06** | CA pin rejected or fingerprint changed | Confirm the printed SHA-256 out of band, or delete `certs/<host>.pem` only if you intend to re-pin. Lab: `LAB_MODE=True` |
+| **E06** | CA file missing, not a CA, or ACL too open | Place the Controller CA in `certs/`. Restrict the file, `certs/`, and its parent. `INSECURE_API=True` skips the file. `LAB_MODE` does not. |
 | **E07** | SSH host key rejected | Production does not prompt. Add the appliance host key to `SSH_KNOWN_HOSTS` or `ssh_host_keys`. Lab accepts any key |
 | **E08** | Appliance PUT refused / HTTP 422 | Unexpected field diff, missing `site`, or **View** on **Client Profile** (`portal.profiles[]`). Not SSH. |
 | **E09** | SNMP engine-ID / SSH box failed | Try a new SSH password after FQDN+IP; sudo; `engineIDType 3`; `ETH_IFACE` MAC |

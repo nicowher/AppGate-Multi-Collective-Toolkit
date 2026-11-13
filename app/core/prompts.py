@@ -279,10 +279,10 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
         )
         key = fqdn.lower()
         if key in seen:
-            print(
-                f"WARNING: collectives {seen[key]} and {i} share FQDN {fqdn}. "
-                "The same collective will be configured twice.",
-                file=sys.stderr,
+            halt(
+                "E05",
+                f"Collective {i} reuses FQDN {fqdn} (already index {seen[key]})",
+                "Use a different Controller, or exclude the duplicate before adding.",
             )
         else:
             seen[key] = i
@@ -337,7 +337,16 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
             more = input("      Add another Controller? [y/N]: ").strip().lower()
         if more not in YES_ANSWERS:
             break
-        _add(len(out) + 1, _row_from_item({}))
+        used = set()
+        for col in out:
+            try:
+                used.add(int(col.get("index") or 0))
+            except (TypeError, ValueError):
+                continue
+        nxt = max(used or {0}) + 1
+        while nxt in used:
+            nxt += 1
+        _add(nxt, _row_from_item({}))
     return out
 
 

@@ -41,17 +41,23 @@ def login_collectives(collectives: list, *, step: str = "[1/N]") -> ClientMap:
             clients[idx] = client
             print(f"      [{idx}] {color_ok('Authenticated')}")
         except Exception as exc:
-            print_error(
-                "E02",
-                f"[{idx}] LOGIN FAILED: {exc}",
-                "Check api_username/api_password and MFA exemption.",
-                "Production: CA pin mismatch is E06. Lab only: LAB_MODE=True.",
-            )
+            text = str(exc)
+            if "No CA file" in text or "not a CA" in text or "Could not verify permissions" in text:
+                hints = (
+                    "Copy the AppGate .cer to the path in the E06 line. No password was sent.",
+                    "INSECURE_API=True skips the file. LAB_MODE does not.",
+                )
+            else:
+                hints = (
+                    "Check api_username/api_password and MFA exemption.",
+                    "Port 8443 /admin. A bad CA file is E06, not a password error.",
+                )
+            print_error("E02", f"[{idx}] LOGIN FAILED: {exc}", *hints)
     if not clients:
         halt(
             "E02",
             "No Controller accepted login",
-            "Fix API creds, TLS, or agip. https://<fqdn>:8443/admin.",
+            "If E06 printed a certs\\ path, copy the AppGate .cer there. Otherwise check API creds and port 8443.",
         )
     return clients
 

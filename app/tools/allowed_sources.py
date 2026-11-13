@@ -109,8 +109,8 @@ def _normalize_source(entry: Any) -> Dict[str, Any]:
         vmax = 32 if isinstance(ip, ipaddress.IPv4Address) else 128
     except ValueError:
         return {}
-    if netmask < 0 or netmask > vmax:
-        return {}
+    if netmask < 1 or netmask > vmax:
+        raise ValueError(f"allowSources prefix {netmask} is not allowed")
     out: Dict[str, Any] = {"address": str(ip), "netmask": netmask}
     if nic:
         out["nic"] = nic
@@ -260,6 +260,11 @@ def _rule_allows(local_ip: str, rows: List[Dict[str, Any]]) -> bool:
                 strict=False,
             )
         except (TypeError, ValueError):
+            continue
+        nic = str(row.get("nic") or "").strip()
+        if nic:
+            # Egress NIC on the appliance is unknown from this host. Fail closed.
+            # print(f"DEBUG lockout: nic set, skip {row.get('address')}")
             continue
         if addr in net:
             # print(f"DEBUG lockout: {local_ip} in {net}")

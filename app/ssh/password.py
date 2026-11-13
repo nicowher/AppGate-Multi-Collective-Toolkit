@@ -38,6 +38,8 @@ class CzPassword(SSHSession):
         # print(f"DEBUG czpw: hosts={host!r} new_len={len(new_password)}")
         if not (new_password or "").strip():
             raise ValueError("New SSH password is empty")
+        if "\n" in new_password or "\r" in new_password:
+            raise ValueError("New SSH password must be one line")
         return self._run_script(host, new_password)
 
     def _script(self) -> str:

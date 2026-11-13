@@ -7,9 +7,10 @@ This file only talks HTTP.
 One AppGateClient per collective (own bearer token) so a token from site A
 is never sent to site B (403 / wrong collective).
 
-   1  login() — production pins the Controller CA before the password is sent.
-       FQDN first; agip only when the name does not connect. Never fall back
-       on 401/403 (that is auth, not DNS). Lab mode skips the pin.
+    1  login() — production pins the Controller CA before the password is sent.
+        FQDN first; agip only when the name does not connect. Never fall back
+        on 401/403 (that is auth, not DNS). Only INSECURE_API skips the pin.
+        LAB_MODE does not.
    2  list_targets() — Controller inventory is source of truth; status endpoint
       is 6.3+ /appliances/status (not removed /stats/appliances).
    3  ensure_engine_id_type3() — type-3 MAC engine IDs are stable for ESXi USM.
@@ -37,7 +38,6 @@ from config import (
     APPGATE_ADMIN_PORT,
     APPGATE_ADMIN_PREFIX,
     APPGATE_API_VERSION,
-    APPGATE_MACHINE_ID,
     API_AUTH_FAIL_CODES,
     API_ERROR_BODY_PREVIEW,
     APPGATE_PROVIDER,
@@ -73,7 +73,7 @@ from core.inventory import (
     is_selectable,
     status_self_ips,
 )
-from core.utils import print_error, write_replaced_snapshot
+from core.utils import print_error, redact_preview, write_replaced_snapshot
 
 
 from .allow_sources import AllowSourcesMixin
@@ -161,19 +161,10 @@ def _log_unknown_appliance_keys(appliance: Dict[str, Any], where: str) -> None:
 
 
 def _redact_appliance_for_debug(obj: Any) -> Any:
-    """Strip snmpd.conf hashes and NTP keys before DEBUG dumps."""
-    data = copy.deepcopy(obj)
-    if not isinstance(data, dict):
-        return data
-    snmp = data.get("snmpServer")
-    if isinstance(snmp, dict) and snmp.get("snmpd.conf"):
-        snmp["snmpd.conf"] = "<redacted snmpd.conf>"
-    ntp = data.get("ntp")
-    if isinstance(ntp, dict):
-        for row in ntp.get("servers") or []:
-            if isinstance(row, dict) and row.get("key"):
-                row["key"] = "<redacted>"
-    return data
+    """Same secret list as replace backups. DEBUG dumps must not keep keys or tokens."""
+    from core.utils import redact_for_backup
+
+    return redact_for_backup(obj)
 
 
 def _site_uuid_reshape(before: Any, after: Any) -> bool:
@@ -231,7 +222,11 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         self.agip = self.endpoints[0]
         self.api_version = api_version or APPGATE_API_VERSION
         self.provider = provider
-        self.machine_id = APPGATE_MACHINE_ID
+        from core.utils import install_machine_id
+
+        self.machine_id = install_machine_id()
+        self._login_id_field = "machineId"
+        self._version_learned = False
         self.headers: Dict[str, str] = {
             "Accept": f"application/vnd.appgate.peer-v{self.api_version}+json",
             "Content-Type": "application/json",
@@ -257,27 +252,186 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             pass
         self.base_url = f"https://{h}:{APPGATE_ADMIN_PORT}{APPGATE_ADMIN_PREFIX}"
 
-    def login(self, username: str, password: str, provider: Optional[str] = None) -> str:
-        """Step 1: POST /admin/login. FQDN first; IP if connect/HTTP fails (not 401/403)."""
-        provider_name = provider or self.provider
-        payload = {
-            "machineId": self.machine_id,
+    def _peer_from_payload(self, payload: Any) -> str:
+        """peerVersion is the Accept number. A 7.x product string is peer 25 if that field is missing."""
+        if not isinstance(payload, dict):
+            return ""
+        for key in ("peerVersion", "peer_version"):
+            raw = payload.get(key)
+            if raw not in (None, ""):
+                return str(raw).split(".", 1)[0]
+        product = str(payload.get("version") or "")
+        if product.startswith("7"):
+            return "25"
+        return ""
+
+    def _set_peer_version(self, version: str) -> None:
+        """7.0 rejects a v24 Accept as a fake 403, so the header must match the probe."""
+        self.api_version = str(version).split(".", 1)[0]
+        self.headers["Accept"] = f"application/vnd.appgate.peer-v{self.api_version}+json"
+        self._version_learned = True
+        print(f"      API version {self.api_version}", file=sys.stderr)
+
+    def _version_in_text(self, text: str) -> str:
+        """406/403 bodies name the Accept the Controller will speak. Do not guess one."""
+        match = re.search(r"peer-v(\d+)", text or "")
+        return match.group(1) if match else ""
+
+    def _use_controller_api_version(self) -> None:
+        """GET /admin/version has no auth. Try the header this client already speaks, then json."""
+        accepts = (
+            self.headers.get("Accept") or "application/json",
+            "application/json",
+            "*/*",
+        )
+        seen = []
+        last = ""
+        for accept in accepts:
+            if accept in seen:
+                continue
+            seen.append(accept)
+            try:
+                response = requests.get(
+                    f"{self.base_url}/version",
+                    headers={"Accept": accept},
+                    verify=self._verify(),
+                    timeout=API_TIMEOUT,
+                )
+            except requests.exceptions.RequestException as exc:
+                last = str(exc)
+                if DEBUG:
+                    print(f"      DEBUG version GET failed accept={accept!r} err={exc}", file=sys.stderr)
+                continue
+            body = (response.text or "")[:LOGIN_BODY_PREVIEW]
+            if DEBUG:
+                print(
+                    f"      DEBUG version GET status={response.status_code} accept={accept!r}",
+                    file=sys.stderr,
+                )
+            # print(f"DEBUG version probe: status={response.status_code} accept={accept}")
+            named = self._version_in_text(body)
+            if named:
+                self._set_peer_version(named)
+                return
+            if response.status_code != 200:
+                last = f"HTTP {response.status_code} body={body!r}"
+                continue
+            try:
+                payload = response.json()
+            except ValueError:
+                last = "non-JSON"
+                continue
+            version = self._peer_from_payload(payload)
+            if version:
+                self._set_peer_version(version)
+                return
+            last = f"no peerVersion keys={sorted(payload) if isinstance(payload, dict) else type(payload).__name__}"
+        print(f"      API version probe failed ({last}); login stays on v{self.api_version}", file=sys.stderr)
+
+    def _peer_major(self) -> int:
+        """peerVersion is '24' or '25'. A non-numeric value stays on the v24 login body."""
+        raw = str(self.api_version).split(".", 1)[0]
+        try:
+            return int(raw)
+        except ValueError:
+            return 24
+
+    def _identity_provider_names(self) -> list:
+        """Provider display names are public. A mismatch is a 403, not a bad password."""
+        try:
+            response = requests.get(
+                f"{self.base_url}/identity-providers/names",
+                headers=self.headers,
+                verify=self._verify(),
+                timeout=API_TIMEOUT,
+            )
+        except requests.exceptions.RequestException as exc:
+            if DEBUG:
+                print(f"      DEBUG providers: {exc}", file=sys.stderr)
+            return []
+        if DEBUG:
+            print(
+                f"      DEBUG providers status={response.status_code}",
+                file=sys.stderr,
+            )
+        # print(f"DEBUG providers: status={response.status_code}")
+        if response.status_code != 200:
+            return []
+        try:
+            payload = response.json()
+        except ValueError:
+            return []
+        data = payload.get("data") if isinstance(payload, dict) else payload
+        names = []
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, str) and item.strip():
+                    names.append(item.strip())
+                elif isinstance(item, dict):
+                    name = str(item.get("name") or item.get("displayName") or "").strip()
+                    if name:
+                        names.append(name)
+        return names
+
+    @staticmethod
+    def _match_provider(wanted: str, names: list) -> str:
+        """Use the Controller's spelling when it differs only by case."""
+        if not names:
+            return wanted
+        for name in names:
+            if name == wanted:
+                return name
+        for name in names:
+            if name.lower() == (wanted or "").lower():
+                return name
+        return wanted
+
+    def _login_payload(self, username: str, password: str, provider_name: str) -> Dict[str, str]:
+        """6.7 accepts machineId. 7.0 (peer 25) requires deviceId. Same UUID either way."""
+        field = "deviceId" if self._peer_major() >= 25 else "machineId"
+        self._login_id_field = field
+        # print(f"DEBUG login id field={field} peer={self.api_version}")
+        return {
+            field: self.machine_id,
             "providerName": provider_name,
             "username": username,
             "password": password,
         }
+
+    def login(self, username: str, password: str, provider: Optional[str] = None) -> str:
+        """Step 1: POST /admin/login. FQDN first; IP if connect/HTTP fails (not 401/403).
+
+        One collective CA covers both names. If the FQDN file exists, the IP
+        fallback reuses it instead of demanding a second .cer.
+        """
+        provider_name = provider or self.provider
         last_connect_error: Optional[Exception] = None
+        pinned = ""
         for host in self.endpoints:
             self._set_endpoint(host)
             if not insecure_api_enabled():
                 try:
                     self._ca_bundle = require_ca_file(host)
+                    pinned = self._ca_bundle
                 except CaPinError as exc:
-                    print(f"ERROR E06: {exc}", file=sys.stderr)
-                    last_connect_error = exc
-                    if exc.fatal:
-                        break
-                    continue
+                    if pinned and not exc.fatal:
+                        self._ca_bundle = pinned
+                    else:
+                        print(f"ERROR E06: {exc}", file=sys.stderr)
+                        last_connect_error = exc
+                        if exc.fatal:
+                            break
+                        continue
+            self._use_controller_api_version()
+            names = self._identity_provider_names()
+            provider_name = self._match_provider(provider or self.provider, names)
+            if DEBUG and names and provider_name not in names:
+                print(
+                    f"      DEBUG provider {provider_name!r} not in {names!r}",
+                    file=sys.stderr,
+                )
+            payload = self._login_payload(username, password, provider_name)
+            self._login_retried = False
             try:
                 response = requests.post(
                     f"{self.base_url}/login",
@@ -286,6 +440,12 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     verify=self._verify(),
                     timeout=API_TIMEOUT,
                 )
+                if DEBUG:
+                    print(
+                        f"      DEBUG login POST accept={self.headers.get('Accept')!r} "
+                        f"id_field={self._login_id_field} status={response.status_code}",
+                        file=sys.stderr,
+                    )
             except requests.exceptions.SSLError as exc:
                 last_connect_error = exc
                 print(
@@ -300,6 +460,30 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     file=sys.stderr,
                 )
                 continue
+            named = self._version_in_text(response.text or "")
+            if (
+                response.status_code == 403
+                and named
+                and named != str(self.api_version)
+            ):
+                # Only retry when the Controller names the Accept it wants. A blind v25 retry still 403s.
+                print(f"      Accept rejected; retrying peer {named}", file=sys.stderr)
+                self._set_peer_version(named)
+                payload = self._login_payload(username, password, provider_name)
+                response = requests.post(
+                    f"{self.base_url}/login",
+                    headers=self.headers,
+                    json=payload,
+                    verify=self._verify(),
+                    timeout=API_TIMEOUT,
+                )
+                if DEBUG:
+                    print(
+                        f"      DEBUG login retry status={response.status_code} "
+                        f"accept={self.headers.get('Accept')!r} "
+                        f"body={(response.text or '')[:LOGIN_BODY_PREVIEW]!r}",
+                        file=sys.stderr,
+                    )
             if response.status_code != 200:
                 if response.status_code in API_AUTH_FAIL_CODES:
                     self._handle_login_error(response, username, provider_name)
@@ -337,11 +521,11 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         """Provide actionable guidance for common 401/403 responses."""
         try:
             body = response.json()
-            msg = body.get("message", response.text)
+            msg = redact_preview(str(body.get("message", response.text)), LOGIN_BODY_PREVIEW)
             err_id = body.get("id", "")
             failure = body.get("failureType", "")
         except (ValueError, TypeError, requests.JSONDecodeError):
-            msg = response.text or f"HTTP {response.status_code}"
+            msg = redact_preview(response.text or f"HTTP {response.status_code}", LOGIN_BODY_PREVIEW)
             err_id = ""
             failure = ""
 
@@ -363,13 +547,15 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 "\nTroubleshooting tips:\n"
                 "  - Confirm the account has API access and is exempt from Admin MFA\n"
                 "  - Verify providerName is correct (common values: 'local', 'saml', 'oidc')\n"
-                "  - Ensure the machineId is accepted by the Controller\n",
+                "  - Ensure machineId (peer 24) or deviceId (peer 25) is accepted\n",
                 file=sys.stderr,
             )
         elif response.status_code == 403:
             print(
-                f"ERROR: Insufficient permissions (HTTP 403): {msg}\n"
-                "Ensure the API user has the required admin role privileges.",
+                f"ERROR: HTTP 403 from API v{self.api_version} as {_username} "
+                f"({self._login_id_field}): {msg}\n"
+                "Accept matched this Controller. This is not the v24 header rejection. "
+                "The account authenticated far enough to be denied admin rights.",
                 file=sys.stderr,
             )
         else:
@@ -395,8 +581,8 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 response.raise_for_status()
             try:
                 payload = response.json()
-            except ValueError:
-                break
+            except ValueError as exc:
+                raise RuntimeError(f"GET {path} returned non-JSON") from exc
             body_range = ""
             if isinstance(payload, list):
                 chunk = payload
@@ -465,13 +651,11 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
 
     def get_appliance_status(self) -> Dict[str, Dict[str, Any]]:
         """6.3+ replacement for GET /stats/appliances → GET /appliances/status."""
-        try:
-            # print(f"DEBUG step2: GET {APPLIANCE_STATUS_PATH} host={self.agip}")
-            if DEBUG:
-                print(f"      DEBUG step2: GET {APPLIANCE_STATUS_PATH} on {self.agip}", file=sys.stderr)
-            items = self._paged_get(APPLIANCE_STATUS_PATH)
-        except (requests.RequestException, ValueError, OSError):
-            return {}
+        # A failed status read must not look like n/a and stay selectable.
+        # print(f"DEBUG step2: GET {APPLIANCE_STATUS_PATH} host={self.agip}")
+        if DEBUG:
+            print(f"      DEBUG step2: GET {APPLIANCE_STATUS_PATH} on {self.agip}", file=sys.stderr)
+        items = self._paged_get(APPLIANCE_STATUS_PATH)
         out: Dict[str, Dict[str, Any]] = {}
         for item in items:
             if not isinstance(item, dict):
@@ -622,7 +806,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 print(f"      DEBUG {what} PUT HTTP {put_response.status_code}", file=sys.stderr)
                 print(json.dumps(_redact_appliance_for_debug(body), indent=2, default=str), file=sys.stderr)
                 print((put_response.text or "")[:API_ERROR_BODY_PREVIEW], file=sys.stderr)
-            body_preview = (put_response.text or "")[:API_ERROR_BODY_PREVIEW]
+            body_preview = redact_preview(put_response.text or "", API_ERROR_BODY_PREVIEW)
             hint = ""
             text_l = (put_response.text or "").lower()
             if put_response.status_code == 422 and "portal.profiles" in text_l:

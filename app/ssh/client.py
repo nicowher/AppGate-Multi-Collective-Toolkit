@@ -29,6 +29,29 @@ logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
+# SHA-1, CBC, and group14-sha1 are below the SSH STIG floor. Fail closed if the box needs them.
+_SSH_DISABLED = {
+    "kex": [
+        "diffie-hellman-group1-sha1",
+        "diffie-hellman-group14-sha1",
+        "diffie-hellman-group-exchange-sha1",
+    ],
+    "ciphers": [
+        "3des-cbc",
+        "aes128-cbc",
+        "aes192-cbc",
+        "aes256-cbc",
+        "blowfish-cbc",
+        "arcfour",
+        "arcfour128",
+        "arcfour256",
+    ],
+    "macs": ["hmac-sha1", "hmac-sha1-96", "hmac-md5", "hmac-md5-96"],
+    "keys": ["ssh-rsa", "ssh-dss"],
+    "pubkeys": ["ssh-rsa", "ssh-dss"],
+}
+
+
 from config import (
     DEBUG,
     LAB_MODE,
@@ -163,10 +186,7 @@ class SSHSession:
             client.load_host_keys(path)
         except OSError as exc:
             raise paramiko.SSHException(f"Could not load known_hosts {path}: {exc}") from exc
-        try:
-            client.load_system_host_keys()
-        except OSError:
-            pass
+        # System known_hosts is not the production pin. A planted key there must not pass.
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     def prime_host_keys(self, hosts: Union[str, Sequence[str]]) -> bool:
@@ -213,6 +233,7 @@ class SSHSession:
                 allow_agent=False,
                 look_for_keys=False,
                 auth_timeout=min(wait, SSH_AUTH_TIMEOUT),
+                disabled_algorithms=_SSH_DISABLED,
             )
             self._ssh_fail_kind = ""
             self._last_reason = "ok"
@@ -294,7 +315,7 @@ class SSHSession:
         try:
             sock = socket.create_connection((ip, SSH_PORT), timeout=SSH_TIMEOUT)
             sock.settimeout(SSH_TIMEOUT)
-            transport = paramiko.Transport(sock)
+            transport = paramiko.Transport(sock, disabled_algorithms=_SSH_DISABLED)
             transport.banner_timeout = SSH_TIMEOUT
             transport.auth_timeout = SSH_AUTH_TIMEOUT
             transport.start_client(timeout=SSH_TIMEOUT)
@@ -396,6 +417,15 @@ class SSHSession:
         kind = self._ssh_fail_kind or "network"
         raise ValueError(f"{error} ({kind}) ({label or last})")
 
+    def _sudo_skips_password(self, client: paramiko.SSHClient) -> bool:
+        """True when sudo -n works. The SSH password must not share that stdin."""
+        try:
+            _stdin, stdout, _stderr = client.exec_command("sudo -n true", timeout=10)
+            stdout.channel.settimeout(10)
+            return stdout.channel.recv_exit_status() == 0
+        except (OSError, TimeoutError, socket.timeout):
+            return False
+
     def _sudo(self, client: paramiko.SSHClient, command: str, check: bool = True) -> str:
         return self._run(client, f"sudo -S {command}", sudo=True, check=check)
 
@@ -406,12 +436,18 @@ class SSHSession:
         timeout: Optional[int] = None,
         extra_stdin: str = "",
     ) -> Optional[Tuple[int, str]]:
-        cmd = f"sudo -S bash -c {shlex.quote(script)}"
         wait = SSH_TIMEOUT if timeout is None else timeout
-        stdin, stdout, stderr = client.exec_command(cmd)
+        nopass = self._sudo_skips_password(client)
+        # print(f"DEBUG sudo: nopass={nopass}")
+        if nopass:
+            cmd = f"sudo -n bash -c {shlex.quote(script)}"
+        else:
+            cmd = f"sudo -S bash -c {shlex.quote(script)}"
+        stdin, stdout, stderr = client.exec_command(cmd, timeout=wait)
         stdout.channel.settimeout(wait)
         stderr.channel.settimeout(wait)
-        stdin.write(self.ssh_password + "\n")
+        if not nopass:
+            stdin.write(self.ssh_password + "\n")
         if extra_stdin:
             if not extra_stdin.endswith("\n"):
                 extra_stdin += "\n"
@@ -490,6 +526,21 @@ def _known_hosts_path() -> str:
     return os.path.expanduser(path)
 
 
+def _checked_host_key_line(line: str) -> str:
+    """A wildcard or negation in known_hosts would trust more than the pinned box."""
+    from paramiko.hostkeys import HostKeyEntry
+
+    text = (line or "").strip()
+    entry = HostKeyEntry.from_line(text)
+    if entry is None:
+        raise ValueError("ssh_host_keys line is not a known_hosts entry")
+    names = getattr(entry, "hostnames", None) or []
+    for name in names:
+        if "*" in name or "?" in name or str(name).startswith("!"):
+            raise ValueError(f"Refusing wildcard or negated host key pattern: {name}")
+    return text
+
+
 def install_oob_host_keys(collectives) -> None:
     """Load appliance host keys from credentials. Not from the Controller API."""
     global _oob_known_hosts
@@ -520,11 +571,16 @@ def install_oob_host_keys(collectives) -> None:
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as fh:
             existing = fh.read()
+    accepted = [_checked_host_key_line(line) for line in lines]
     with open(path, "a", encoding="utf-8") as fh:
-        for line in lines:
+        for line in accepted:
             if line not in existing:
                 fh.write(line + "\n")
                 existing += line + "\n"
+    try:
+        os.chmod(path, SSH_KNOWN_HOSTS_MODE)
+    except OSError as exc:
+        raise ValueError(f"Could not restrict {path}: {exc}") from exc
 
 
 def prime_target_host_keys(targets, collectives) -> None:

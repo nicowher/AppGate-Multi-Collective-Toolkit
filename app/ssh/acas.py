@@ -146,6 +146,9 @@ fi
 echo STEP_IPTABLES_START
 for bin in {bins}; do
   if "$bin" -w -n -L {chain} >/dev/null 2>&1; then
+    rules="/var/tmp/mct-${{bin}}-sshbrute.rules"
+    "$bin" -S {chain} > "$rules" || exit 1
+    chmod 600 "$rules" 2>/dev/null || true
     "$bin" -w -F {chain}
     "$bin" -w -A {chain} -j ACCEPT
     echo STEP_IPTABLES_OK "$bin"
@@ -166,10 +169,37 @@ echo STEP_UNHARDEN_DONE
         mark_b = shlex.quote(ACAS_SUDOERS_MARK_BEGIN)
         mark_e = shlex.quote(ACAS_SUDOERS_MARK_END)
         user_q = shlex.quote(f"{user} ALL=(ALL) NOPASSWD: ALL")
+        chain = shlex.quote(ACAS_IPTABLES_CHAIN)
         return f"""
 if command -v cz-config >/dev/null 2>&1; then
-  cz-config set -j users/0/nopasswd false && echo STEP_CZCONFIG_NOPASSWD_FALSE || true
+  if cz-config set -j users/0/nopasswd false; then
+    echo STEP_CZCONFIG_NOPASSWD_FALSE
+  else
+    echo STEP_CZCONFIG_NOPASSWD_FAIL
+    exit 1
+  fi
 fi
+echo STEP_IPTABLES_RESTORE
+for bin in iptables ip6tables; do
+  rules="/var/tmp/mct-${{bin}}-sshbrute.rules"
+  chain={chain}
+  if [ ! -f "$rules" ]; then
+    continue
+  fi
+  "$bin" -F "$chain" || exit 1
+  while IFS= read -r line; do
+    case "$line" in
+      -A*) "$bin" $line || exit 1 ;;
+    esac
+  done < "$rules"
+  saved=$(grep '^-A' "$rules" | sort)
+  live=$("$bin" -S "$chain" | grep '^-A' | sort)
+  if [ "$saved" != "$live" ]; then
+    echo STEP_IPTABLES_RESTORE_FAIL "$bin"
+    exit 1
+  fi
+  echo STEP_IPTABLES_RESTORED "$bin"
+done
 echo STEP_BANNER_RESTORE
 f={banner}
 if [ -f "${{f}}.pre-acas" ]; then

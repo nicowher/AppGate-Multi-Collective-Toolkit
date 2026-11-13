@@ -289,11 +289,12 @@ CREDENTIALS_FILENAME = "credentials.json"
 SNMP_PERSISTENT_CONF = "/var/lib/snmp/snmpd.conf"
 SNMP_PERSISTENT_CONF_ALT = "/var/net-snmp/snmpd.conf"
 
-# AppGate admin API
+# Fallback Accept until GET /admin/version. 6.7 is 24; 7.0 is 25.
 APPGATE_API_VERSION = "24"
 APPGATE_ADMIN_PORT = 8443
 APPGATE_ADMIN_PREFIX = "/admin"
 APPGATE_PROVIDER = "local"
+# Not used for login. The live id is certs/.machine-id, created on first run.
 APPGATE_MACHINE_ID = "f0031c00-0522-43b3-a642-ae23cfd1bc22"
 # Do not fall back to IP on these (credentials/ACL, not a bad FQDN).
 API_AUTH_FAIL_CODES = (401, 403)

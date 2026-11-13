@@ -53,6 +53,7 @@ def _literal(value) -> str:
 
 
 def _write_assignment(text: str, name: str, value) -> str:
+    """Replace one assignment. A loose match would rewrite the wrong knob."""
     lit = _literal(value)
     pat = re.compile(
         rf"^({re.escape(name)}\s*=\s*)(True|False|-?\d+)(\s*(#.*)?)?$",
@@ -82,10 +83,20 @@ def _parse_int(raw: str, current: int, name: str = "") -> int:
     n = int(s, 10)
     if n < 0:
         raise ValueError("Must be >= 0")
-    if "CONCURRENCY" in name and n < 1:
-        raise ValueError("Concurrency must be >= 1")
-    if "TIMEOUT" in name and n < 1:
-        raise ValueError("Timeout must be >= 1")
+    if "CONCURRENCY" in name:
+        if n < 1 or n > 8:
+            raise ValueError("Concurrency must be 1-8")
+    elif name == "SSH_PORT":
+        if n < 1 or n > 65535:
+            raise ValueError("Port must be 1-65535")
+    elif "TIMEOUT" in name:
+        if n < 1 or n > 600:
+            raise ValueError("Timeout must be 1-600")
+    elif "ATTEMPTS" in name or "RETRIES" in name:
+        if n < 1 or n > 10:
+            raise ValueError("Attempts must be 1-10")
+    elif "DELAY" in name and n > 300:
+        raise ValueError("Delay must be 0-300")
     return n
 
 
