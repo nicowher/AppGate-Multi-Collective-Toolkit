@@ -360,7 +360,11 @@ def _exclude_collectives(cols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not raw:
         return cols
     # print(f"DEBUG collectives: exclude raw={raw!r}")
-    tokens = expand_exclude_tokens(raw)
+    try:
+        tokens = expand_exclude_tokens(raw)
+    except ValueError as exc:
+        print(f"      {exc}", file=sys.stderr)
+        return _exclude_collectives(cols)
     kept: List[Dict[str, Any]] = []
     for col in cols:
         keys = {

@@ -72,7 +72,8 @@ class SNMPHashGenerator:
                     f"SNMP passphrase must be at least {SNMP_MIN_PASSPHRASE_LEN} characters"
                 )
         auth_hash = self._localize(auth, engine_id, algo)
-        priv_hash = self._localize(priv, engine_id, algo)
+        # AES-256 wants 32 bytes. SHA-384/512 Kul is longer; the extra bytes are not a key.
+        priv_hash = self._localize(priv, engine_id, algo)[:64]
         print("      Hashed passwords in-process (RFC 3414).", file=sys.stderr)
         data = {
             "user": user,
@@ -98,8 +99,8 @@ class SNMPHashGenerator:
 
     @staticmethod
     def _check_lengths(data: Dict[str, Any], hash_algo: str) -> Dict[str, Any]:
-        expected_len = HASH_HEX_LEN[hash_algo]
-        for key in ("auth", "priv"):
+        expected = {"auth": HASH_HEX_LEN[hash_algo], "priv": 64}
+        for key, expected_len in expected.items():
             value = data.get("hashes", {}).get(key)
             if value and len(value) != expected_len:
                 raise RuntimeError(

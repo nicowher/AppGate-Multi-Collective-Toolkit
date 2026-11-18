@@ -79,8 +79,8 @@ def expand_exclude_tokens(raw: str) -> set:
     """Comma-separated exclude tokens. ``1-10,12-20`` expands to those row numbers.
 
     Only digit-digit ranges expand so a UUID or hostname with hyphens stays a
-    single token. Huge ranges are capped at APPLIANCE_LIST_MAX so 1-999999999
-    cannot hang the exclude prompt.
+    single token. The width check is last minus first, so a span of
+    APPLIANCE_LIST_MAX is still accepted.
     """
     tokens = set()
     for part in raw.split(","):
@@ -90,17 +90,20 @@ def expand_exclude_tokens(raw: str) -> set:
         if "-" in part:
             left, _, right = part.partition("-")
             left, right = left.strip(), right.strip()
-            if left.isdigit() and right.isdigit():
+            if left.isdigit() or right.isdigit():
+                if not (left.isdigit() and right.isdigit()):
+                    raise ValueError(
+                        f"Exclude range {part!r} is incomplete. Use 1-3 or a single number."
+                    )
                 start, end = int(left), int(right)
                 if start > end:
                     start, end = end, start
                 if end - start > APPLIANCE_LIST_MAX:
-                    print(
-                        f"      Skip range {start}-{end}: wider than {APPLIANCE_LIST_MAX}.",
-                        file=sys.stderr,
+                    raise ValueError(
+                        f"Exclude range {start}-{end} is wider than {APPLIANCE_LIST_MAX}."
                     )
-                    continue
                 tokens.update(str(n) for n in range(start, end + 1))
+                # print(f"DEBUG exclude: span={end - start}")
                 continue
         tokens.add(part)
     # print(f"DEBUG exclude: raw={raw!r} tokens={sorted(tokens)[:20]!r} n={len(tokens)}")
@@ -523,8 +526,9 @@ def run_target_batch(
     workers = max(1, min(concurrency, len(targets)))
     done = 0
     n = len(targets)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(worker, t): t for t in targets}
+    pool = ThreadPoolExecutor(max_workers=workers)
+    futures = {pool.submit(worker, t): t for t in targets}
+    try:
         for future in as_completed(futures):
             target = futures[future]
             try:
@@ -534,3 +538,8 @@ def run_target_batch(
             done += 1
             if progress:
                 progress(done, n)
+    except KeyboardInterrupt:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True, cancel_futures=True)

@@ -3,8 +3,8 @@
 Password auth first; keyboard-interactive is the fallback some AppGate
 boxes require (allowed_types has keyboard-interactive but not password).
 kbd-int uses Transport, so host keys are checked with the same policy.
-Connect and channel reads use SSH_TIMEOUT / SSH_AUTH_TIMEOUT.
-recv_exit_status() is not bounded. SSH_STRICT_HOST_KEY follows
+Connect, channel reads, and the exit-status wait use SSH_TIMEOUT.
+SSH_STRICT_HOST_KEY follows
 LAB_MODE: lab uses WarningPolicy; production rejects unknown keys and
 requires SSH_KNOWN_HOSTS or ssh_host_keys. Never input() from a worker.
 """
@@ -50,6 +50,13 @@ _SSH_DISABLED = {
     "keys": ["ssh-rsa", "ssh-dss"],
     "pubkeys": ["ssh-rsa", "ssh-dss"],
 }
+
+
+def _exit_status(stdout, wait: int) -> int:
+    """recv_exit_status() waits forever. Bound it to the same SSH timeout."""
+    if not stdout.channel.status_event.wait(wait):
+        raise TimeoutError("SSH exit status timed out")
+    return stdout.channel.recv_exit_status()
 
 
 from config import (
@@ -422,7 +429,7 @@ class SSHSession:
         try:
             _stdin, stdout, _stderr = client.exec_command("sudo -n true", timeout=10)
             stdout.channel.settimeout(10)
-            return stdout.channel.recv_exit_status() == 0
+            return _exit_status(stdout, 10) == 0
         except (OSError, TimeoutError, socket.timeout):
             return False
 
@@ -460,7 +467,7 @@ class SSHSession:
         try:
             output = stdout.read().decode("utf-8", errors="replace")
             err_output = stderr.read().decode("utf-8", errors="replace")
-            exit_status = stdout.channel.recv_exit_status()
+            exit_status = _exit_status(stdout, wait)
         except (OSError, TimeoutError, socket.timeout) as exc:
             print(
                 f"      SSH script timed out or failed ({type(exc).__name__}): {exc}",
@@ -487,7 +494,7 @@ class SSHSession:
         timeout: Optional[int] = None,
     ) -> str:
         wait = SSH_TIMEOUT if timeout is None else timeout
-        stdin, stdout, stderr = client.exec_command(command)
+        stdin, stdout, stderr = client.exec_command(command, timeout=wait)
         stdout.channel.settimeout(wait)
         stderr.channel.settimeout(wait)
         if sudo:
@@ -496,10 +503,10 @@ class SSHSession:
         try:
             output = stdout.read().decode("utf-8", errors="replace")
             err_output = stderr.read().decode("utf-8", errors="replace")
-            exit_status = stdout.channel.recv_exit_status()
+            exit_status = _exit_status(stdout, wait)
         except (socket.timeout, TimeoutError, OSError) as exc:
             print(f"      SSH command timed out or failed ({type(exc).__name__}): {exc}", file=sys.stderr)
-            return ""
+            return "timeout"
         if check and exit_status not in (0, 1):
             print(
                 f"      SSH command failed (exit {exit_status}): "

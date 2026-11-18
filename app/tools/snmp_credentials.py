@@ -259,7 +259,8 @@ def main() -> None:
                     snmp_priv=inputs["snmp_priv"],
                     rouser_line=rouser_line,
                     dry_run=False,
-                    replace=replace,
+                replace=replace,
+                snapshot_label=target.label(),
                 )
                 _print_summary(selected, user=user, rouser_line=rouser_line, dry_run=False)
                 live_report = _build_run_report(

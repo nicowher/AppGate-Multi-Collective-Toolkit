@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import ipaddress
 from typing import Any, Dict, List
 
 from config import ALLOW_SOURCES_PUT_ALLOWED, ALLOW_SOURCES_SLOT_PARENT
@@ -15,6 +16,7 @@ ALLOW_SOURCES_PARENTS = tuple(sorted(set(ALLOW_SOURCES_SLOT_PARENT.values())))
 class AllowSourcesMixin:
     @staticmethod
     def _allow_source_key(entry: Any) -> tuple:
+        """Canonicalize the address so fe80::1 and the long form are one row."""
         if not isinstance(entry, dict):
             return ("", -1, "")
         try:
@@ -23,8 +25,14 @@ class AllowSourcesMixin:
             return ("", -1, "")
         if mask < 1:
             return ("", -1, "")
+        address = str(entry.get("address") or "").strip()
+        if address:
+            try:
+                address = str(ipaddress.ip_address(address.split("%")[0]))
+            except ValueError:
+                pass
         return (
-            str(entry.get("address") or "").strip(),
+            address,
             mask,
             str(entry.get("nic") or "").strip(),
         )

@@ -42,7 +42,7 @@ def main() -> None:
 
 
 def upgrade_main() -> None:
-    # print(f"DEBUG deps: pip install --upgrade {VENDOR_PACKAGES}")
+    # print("DEBUG deps: reinstall pinned vendor set")
     if DEBUG:
         print(f"      DEBUG deps: pip install --upgrade {VENDOR_PACKAGES}", file=sys.stderr)
     try:

@@ -128,6 +128,7 @@ class SnmpMixin:
         enabled: bool = True,
         appliance_id: Optional[str] = None,
         replace: bool = False,
+        snapshot_label: str = "",
     ) -> bool:
         """Step 6: PUT createUser + optional rouser + engineIDType 3 (live run only).
 
@@ -146,7 +147,7 @@ class SnmpMixin:
         if replace:
             write_replaced_snapshot(
                 "snmp",
-                str(appliance.get("name") or appliance_id or user),
+                snapshot_label or str(appliance.get("name") or appliance_id or user),
                 appliance,
             )
             lines = self._snmpd_lines_without_all_users(appliance)

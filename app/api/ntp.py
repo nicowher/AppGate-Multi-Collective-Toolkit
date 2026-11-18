@@ -97,6 +97,7 @@ class NtpMixin:
         servers: List[Dict[str, Any]],
         *,
         overwrite: bool,
+        snapshot_label: str = "",
     ) -> List[Dict[str, Any]]:
         """PUT appliance.ntp so cz-configd applies (survives reboot)."""
         appliance = self._get_appliance(appliance_id)
@@ -105,7 +106,9 @@ class NtpMixin:
         desired = [self._ntp_key_for_api(s) for s in servers if self._ntp_hostname(s)]
         if overwrite:
             write_replaced_snapshot(
-                "ntp", str(original.get("name") or appliance_id), original
+                "ntp",
+                snapshot_label or str(original.get("name") or appliance_id),
+                original,
             )
             merged = desired
         else:

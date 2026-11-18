@@ -164,7 +164,9 @@ class SNMPValidator:
                     if self._validate_snmp_walk_pysnmp(ip, user, auth, priv, engine_id):
                         return True
                     continue
-                result = self._snmpwalk_with_conf(executable, ip, user, auth, priv)
+                result = self._snmpwalk_with_conf(
+                    executable, ip, user, auth, priv, engine_id
+                )
                 if result.returncode == 0:
                     return True
                 self._set_walk_error(
@@ -185,7 +187,9 @@ class SNMPValidator:
             print(f"      SNMP walk validation failed after {max_attempts} attempts", file=sys.stderr)
         return False
 
-    def _snmpwalk_with_conf(self, executable: str, ip: str, user: str, auth: str, priv: str):
+    def _snmpwalk_with_conf(
+        self, executable: str, ip: str, user: str, auth: str, priv: str, engine_id: str = ""
+    ):
         """Run snmpwalk with passphrases in a 0600 conf file, not on argv.
 
         createUser uses SHA512. snmp.conf wants SHA-512. Insert the hyphen.
@@ -212,8 +216,13 @@ class SNMPValidator:
         env = os.environ.copy()
         env["SNMPCONFPATH"] = tmp
         try:
+            cmd = [executable, "-v3", "-l", "authPriv"]
+            if engine_id:
+                hex_id = engine_id[2:] if engine_id.lower().startswith("0x") else engine_id
+                cmd.extend(["-e", f"0x{hex_id}"])
+            cmd.extend([ip, SNMP_WALK_OID])
             return subprocess.run(
-                [executable, "-v3", "-l", "authPriv", ip],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=SNMPWALK_TIMEOUT,

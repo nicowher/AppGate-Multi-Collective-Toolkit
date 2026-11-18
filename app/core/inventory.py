@@ -341,7 +341,11 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
     ).strip()
     if not raw:
         return list(targets)
-    tokens = expand_exclude_tokens(raw)
+    try:
+        tokens = expand_exclude_tokens(raw)
+    except ValueError as exc:
+        print(f"      {exc}", file=sys.stderr)
+        return prompt_exclusions(targets)
     host_counts = Counter(t.hostname.lower() for t in targets)
     kept = []
     for i, t in enumerate(targets, 1):

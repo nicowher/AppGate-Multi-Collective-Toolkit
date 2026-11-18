@@ -210,7 +210,7 @@ def _slots_to_parents(
 
 
 def _fmt(entries: List[Dict[str, Any]]) -> str:
-    """One-line list: 10.0.0.0/8 on eth0."""
+    """One-line list so the operator can see address, prefix, and NIC together."""
     if not entries:
         return "(none)"
     parts = []

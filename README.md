@@ -25,7 +25,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 
 - **`credentials.json`** (gitignored): global defaults plus `collectives[]`. Required per collective: `fqdn` (`agip` recommended). API user/pass for every tool that talks to the Controller. SSH user/pass for 1, 2, 4, 5 (not walk). SNMP only for 1 and 3; `ssh_password_new` only for 4; `ntp_servers` only for 5; `mibs` never required. Old `admin_*` keys still load as `api_*`.
 - **Credential entry:** if **every** collective already has a field (including a single collective with per-row secrets and empty top-level keys), that field is **not** prompted globally. Gaps only: 1 collective fills that row; 2+ collectives then offer **1) global**, **2) per collective**, **3) global then override**. Short file secrets are discarded; typed replacements are kept. Missing or short `snmp_priv` is prompted. It is not copied from `snmp_auth`.
-- **Exclude collectives** (number, range `1-3`, or FQDN) then **exclude appliances** (`1,3` / `1-10,12-20` / `1.hostname`). `1-10,12-20` leaves row 11.
+- **Exclude collectives** (number, range `1-3`, or FQDN) then **exclude appliances** (`1,3` / `1-10,12-20` / `1.hostname`). `1-10,12-20` leaves row 11. `1-` and `-3` are rejected and asked again. A range whose last number is more than 10000 past the first is rejected. `1-10001` is still accepted.
 - **FQDN first**, then IP (pinned working IP first after a successful SSH). Gateways never use the Controller IP.
 - **`LAB_MODE`** (bottom of `app/config.py`) drives TLS verify, SSH host-key policy, ESXi Kul printing, SNMP min passphrase (8 lab / 15 off-lab), and STIG cz-password check. **Defaults off.** **`DEBUG` and `DRY_RUN` are separate.**
 - **Controller CA:** copy the AppGate CA export into `certs/`. `AppGate_SDP_<host>_CA.cer` is accepted, as are `<host>.cer` and `<host>.pem`. The file name is the host you dial. FQDN and IP may share one file. If the FQDN `.cer` is present, the IP fallback uses it. Several collectives means several files. Current and next CA can be in the same PEM. Login uses that file as `verify` and does not download a CA. A missing file skips that host. A file that is not a CA certificate (`CA:TRUE`), a PEM or `certs/` directory that is group/world writable on Unix, or a PEM, `certs/`, or the parent of `certs/` writable by Everyone, Users, or Authenticated Users on Windows (in-process DACL, allow-ACEs and object allow-ACEs, matched by SID; an unparsed ACE type stops login), or a host-name collision stops login and does not send a password. If `cryptography` is missing, login stops with that reason instead of a traceback. `INSECURE_API=True` prints a warning at startup. `INSECURE_API=True` skips the file (`verify` off) and does not change SSH or STIG. `LAB_MODE` does not control this. A release zip ignores `INSECURE_API`.
@@ -51,7 +51,7 @@ Configures **authPriv** SNMPv3 USM on selected appliances so a scanner (e.g. ESX
 2. **Inventory** `GET /admin/appliances` + status, then the exclude table (Enter = all). The run **previews first** (no pin/push/purge/walk/snmpd restart). Apply is offered after the preview unless `DRY_RUN=True`.
 3. **Pin** `engineIDType 3` via appliance PUT (dry-run prints only). PUT is the full GET document: only `snmpd.conf` / `enabled` may change; `site` object becomes the same UUID (never stripped); `tcpPort` is never added. Any other field diff aborts (`DEBUG` dumps redacted GET/PUT).
 4. **SSH** (host keys primed on the main thread, then up to `SSH_CONCURRENCY` in parallel). **DEBUG off:** `SSH n/N` and failure lines only. **DEBUG on:** every try. Read `oldEngineID` from persistent snmpd.conf and check it against `eth0` MAC (RFC 3411 type 3). **Live** restarts snmpd so type 3 applies; **preview does not**.
-5. **Localize** auth/priv in-process (RFC 3414 SHA-512) per engine ID. Uses that collective’s `snmp_*` if set. Prints ESXi `user/Kul/Kul/priv` when `PRINT_ESXI_KEYS` (follows `LAB_MODE`).
+5. **Localize** auth/priv in-process (RFC 3414) per engine ID. The privacy key is cut to 32 bytes for AES-256. Uses that collective’s `snmp_*` if set. A shared engine ID fails both appliances before the PUT. Prints ESXi `user/Kul/Kul/priv` when `PRINT_ESXI_KEYS` (follows `LAB_MODE`).
 6. **Push** via Controller: **1) Add** keeps other USM users and add/updates this username; **2) Replace** drops other `createUser`, `rouser`, and `rwuser` lines (backup under `reports/replaced/`). Then `createUser` (localized `-l 0x…`), optional `rouser`, `engineIDType 3`. No `exactEngineID`. `rocommunity`, `rwcommunity`, `com2sec`, `authcommunity`, and `authuser` lines are stripped.
 7. **SSH purge:** stop snmpd, delete leftover persistent `usmUser`, start snmpd so `createUser` recreates the user.
 8. **Walk** in parallel (`WALK_CONCURRENCY`): the SSH-working address only (`ssh_ok_host`). `WALK_*_ATTEMPTS` on that one host. `SKIP_CREDENTIAL_WALK` skips this step on dry-run and live (menu 3 unchanged). Engine ID hex is console/report only when `DEBUG=True`.
@@ -128,7 +128,7 @@ PUT only that field, and only if `allowSources` already exists on the parent. Do
 
 ## C) Configure
 
-Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, `SKIP_CREDENTIAL_WALK`, `ALLOW_SOURCES_LOCKOUT_SSH`, `ALLOW_SOURCES_LOCKOUT_HTTPS`, SSH/walk timeouts, concurrency, retries. Enter keeps the current value; **S** writes the file atomically and **exits the toolkit** (relaunch so imports see the new values); **Q** cancels and returns to the menu. Flipping `LAB_MODE` off→on requires confirm (STIG deviation). `TLS_VERIFY` / `SSH_STRICT_HOST_KEY` follow `LAB_MODE`.
+Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `INSECURE_API`, `DRY_RUN`, `SKIP_CREDENTIAL_WALK`, lockout flags, SSH/walk timeouts, concurrency, retries. Enter keeps the current value; **S** writes the file atomically and **exits the toolkit** (relaunch so imports see the new values); **Q** cancels and returns to the menu. Flipping `LAB_MODE` off→on requires confirm. That flag changes SSH host-key checks and STIG floors. It does not skip the Controller CA. Saving `INSECURE_API=True` requires `y` then `YES`.
 
 ## D / U) Dependencies
 
@@ -161,7 +161,7 @@ Double-click the launcher for the menu, or pass a tool: `MultiCollectiveToolkit-
 | View | Site | Menus 1, 5, and 6 (PUT re-checks `site`) |
 | View | Client Profile | Menus 1, 5, and 6 on **portal** appliances (`portal.profiles[]` are client profile names; missing View → HTTP 422) |
 
-Optional walk backend: Linux `snmp` / `net-snmp-utils` or macOS `brew install net-snmp`. Passphrases are not put on the `snmpwalk` command line. SnmpSoft is not used. Otherwise walks use `pysnmp`. The Windows release zip uses pysnmp.
+Optional walk backend: Linux `snmp` / `net-snmp-utils` or macOS `brew install net-snmp`. Passphrases go in a mode `0600` `snmp.conf`, not on the command line. The walk passes `-e` when an engine ID is known and stops at `SNMP_WALK_OID`. SnmpSoft is not used. Otherwise walks use `pysnmp`. The Windows release zip uses pysnmp.
 
 ```bash
 python -m unittest tests.test_snmp_hashgen
@@ -216,7 +216,7 @@ A one-controller file (no `collectives[]`, just top-level `fqdn`/`agip`) still w
   ],
   "allowed_sources": {
     "all": {
-      "ssh": [ { "address": "10.0.0.0", "netmask": 8 } ],
+      "ssh": [ { "address": "192.0.2.0", "netmask": 24 } ],
       "spa": [],
       "ping": [],
       "snmp": []
@@ -227,13 +227,13 @@ A one-controller file (no `collectives[]`, just top-level `fqdn`/`agip`) still w
   "collectives": [
     {
       "fqdn": "ctrl-a.example.com",
-      "agip": "192.168.1.10",
+      "agip": "192.0.2.10",
       "api_username": "api-a",
       "api_password": "...",
       "ssh_password_new": "",
       "mibs": []
     },
-    { "fqdn": "ctrl-b.example.com", "agip": "10.0.0.10" }
+    { "fqdn": "ctrl-b.example.com", "agip": "192.0.2.11" }
   ]
 }
 ```
@@ -324,7 +324,7 @@ Per-box errors skip that appliance and continue. The console line is a sentence 
 | **E13** | cz password login verify failed | Hash may still be set; SSH with `ssh_password_new` or retry menu 4 |
 | **E14** | ACAS SSH overlay failed | Confirm selected hostname. `getaddrinfo` = FQDN DNS fail — SSH uses IP next, not a new password |
 | **E15** | pip / vendor wheels | Menu **D** on matching OS/Python; copy `app/vendor/` |
-| **E16** | No snmpwalk/pysnmp | Install Net-SNMP or `pip install pysnmp` (menu D). Workers cannot install. |
+| **E16** | No snmpwalk/pysnmp | Install Net-SNMP or use menu D for the pinned `pysnmp`. Workers cannot install. |
 | **E17** | NTP chronyc / cz-customization failed | Wait `NTP_VERIFY_DELAY`; `chronyc ntpdata` must show the configured hostname |
 | Allowed sources missing | Before login: “Allowed sources for this Controller are missing.” Add `allowed_sources` (`all` or on that `collectives[]` row). |
 | **E20** | This computer (x.x.x.x) would no longer be allowed to SSH/HTTPS to \<host\> | Add this computer’s IP, use Add, or turn off lockout in Configure |
@@ -345,7 +345,7 @@ Per-box errors skip that appliance and continue. The console line is a sentence 
 | SSH hang while priming keys | Overlay IPs: prime stops after first working address (`SSH_PRIME_TIMEOUT`) |
 | Gateway getaddrinfo / wrong NIC | FQDN skipped if DNS fails; SSH tries this box's private IPv4 first, then public, then IPv6 |
 | Connector SSH'd a Controller | `peerInterface.hostname` is the peer, not this appliance — ignored for FQDN |
-| Both Controllers same engine ID | `agip` is only used on the login Controller |
+| Both appliances same engine ID | Localization fails both boxes before the PUT. Fix the appliance engine ID, not `agip`. |
 | ACAS banner still hangs **interactive** SSH | Intended. Test: `ssh -T user@host` |
 | ACAS visudo shows no NOPASSWD | Check `cz-config get users/0/nopasswd` and the drop-in |
 | Menu U fails on air-gap | Use **D**, copy `app/vendor/` |

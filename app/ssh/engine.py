@@ -238,6 +238,8 @@ class SNMPEngineFetcher(SSHSession):
             self._sudo(client, "killall -q snmpd || true", check=False)
             time.sleep(SNMPD_STOP_POLL_SEC)
             status = (self._sudo(client, "systemctl is-active snmpd || true") or "").strip()
+            if status == "timeout":
+                return False
             if status != "active":
                 return True
         print("      snmpd still active after stop attempts.", file=sys.stderr)

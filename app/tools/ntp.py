@@ -154,7 +154,10 @@ def _apply(
             continue
         try:
             merged = client.update_ntp_servers(
-                target.appliance_id, servers, overwrite=overwrite
+                target.appliance_id,
+                servers,
+                overwrite=overwrite,
+                snapshot_label=target.label(),
             )
             target.status = "ok"
             print_result(target, f"NTP {mode} ({len(merged)} server(s))")
