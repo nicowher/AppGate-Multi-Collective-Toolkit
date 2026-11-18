@@ -3,8 +3,8 @@
 Password auth first; keyboard-interactive is the fallback some AppGate
 boxes require (allowed_types has keyboard-interactive but not password).
 kbd-int uses Transport, so host keys are checked with the same policy.
-Timeouts come from config (SSH_TIMEOUT / SSH_AUTH_TIMEOUT)
-so a dead host cannot hang the toolkit. SSH_STRICT_HOST_KEY follows
+Connect and channel reads use SSH_TIMEOUT / SSH_AUTH_TIMEOUT.
+recv_exit_status() is not bounded. SSH_STRICT_HOST_KEY follows
 LAB_MODE: lab uses WarningPolicy; production rejects unknown keys and
 requires SSH_KNOWN_HOSTS or ssh_host_keys. Never input() from a worker.
 """

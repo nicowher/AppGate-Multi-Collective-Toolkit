@@ -401,10 +401,16 @@ def _prompt_cred_scope(count: int) -> str:
 
 
 def _require_new_password(bucket: dict, label: str) -> str:
+    """A reused password would look like a rotation. Checked even in lab mode."""
     while True:
         value = _require(
             bucket, "ssh_password_new", f"{label} New SSH Password", sensitive=True
         )
+        current = str(bucket.get("ssh_password") or "")
+        if current and value == current:
+            print("      New SSH password must differ from the current one.", file=sys.stderr)
+            bucket["ssh_password_new"] = ""
+            continue
         if LAB_MODE:
             return value
         errs = stig_password_errors(value)
@@ -449,7 +455,9 @@ def _col_secrets_ready(
         return False
     if need_new_password:
         pw = (col.get("ssh_password_new") or "").strip()
-        if not pw or (not LAB_MODE and stig_password_errors(pw)):
+        if not pw or pw == (col.get("ssh_password") or "").strip():
+            return False
+        if not LAB_MODE and stig_password_errors(pw):
             return False
     return True
 

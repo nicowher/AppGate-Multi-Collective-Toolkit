@@ -8,7 +8,7 @@
 JSON is per appliance type, then slot (ssh, spa, admin, https, ping, snmp).
 Each slot is address/netmask/nic. Multi-function boxes merge per slot.
 Host routes /32 and /128 matching this box's own IPs are dropped.
-Replace: E20 if this workstation would miss new SSH/Admin/SPA HTTPS CIDRs
+Replace: E20 if this workstation or ALLOW_SOURCES_PROTECTED would miss new SSH/Admin/SPA HTTPS CIDRs
 (any prefix length); then two-step confirm (y, then YES) — confirm is not optional.
 """
 import ipaddress
@@ -27,6 +27,7 @@ from api.appgate import AppliancePutError
 from config import (
     ALLOW_SOURCES_LOCKOUT_HTTPS,
     ALLOW_SOURCES_LOCKOUT_SSH,
+    ALLOW_SOURCES_PROTECTED,
     ALLOW_SOURCES_PARENT_LABEL,
     ALLOW_SOURCES_SLOT_PARENT,
     DEBUG,
@@ -245,6 +246,42 @@ def _outbound_ip(peer: str) -> str:
     return ""
 
 
+def _protected_items():
+    """Configured admin, SIEM, or bastion addresses. Empty means only this host is checked."""
+    out = []
+    for raw in ALLOW_SOURCES_PROTECTED:
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            if "/" in text:
+                out.append(ipaddress.ip_network(text, strict=False))
+            else:
+                out.append(ipaddress.ip_address(text.split("%")[0]))
+        except ValueError:
+            halt("E20", f"ALLOW_SOURCES_PROTECTED entry is not an IP or CIDR: {text}")
+    return out
+
+
+def _rows_cover(item, rows: List[Dict[str, Any]]) -> bool:
+    """A nic-specific row cannot prove coverage from this host."""
+    if isinstance(item, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
+        return _rule_allows(str(item), rows)
+    for row in rows:
+        if str(row.get("nic") or "").strip():
+            continue
+        try:
+            net = ipaddress.ip_network(
+                f"{row.get('address')}/{int(row.get('netmask'))}",
+                strict=False,
+            )
+        except (TypeError, ValueError):
+            continue
+        if item.version == net.version and item.subnet_of(net):
+            return True
+    return False
+
+
 def _rule_allows(local_ip: str, rows: List[Dict[str, Any]]) -> bool:
     """True if local_ip is inside any row's CIDR (any prefix length)."""
     if not local_ip or not rows:
@@ -327,6 +364,11 @@ def _ssh_peer(target: Target) -> str:
     return target.ssh_ip or target.ssh_fqdn or (target.self_ips[0] if target.self_ips else "")
 
 
+def _plan_key(target: Target) -> str:
+    """Label can collide. The appliance id cannot, so the plan stays with that box."""
+    return f"{target.collective}:{target.appliance_id}"
+
+
 def _check_lockout(
     selected: List[Target],
     plans: Dict[str, Dict[str, List[Dict[str, Any]]]],
@@ -344,7 +386,7 @@ def _check_lockout(
     for target in selected:
         if target.status == "failed":
             continue
-        desired = plans.get(target.label()) or {}
+        desired = plans.get(_plan_key(target)) or {}
         peer = _ssh_peer(target)
         local_ip = _outbound_ip(peer)
         if DEBUG:
@@ -371,6 +413,11 @@ def _check_lockout(
                 blocked.append(
                     f"This computer ({local_ip}) would no longer be allowed to {verb} {host}."
                 )
+            for item in _protected_items():
+                if not _rows_cover(item, rows):
+                    blocked.append(
+                        f"Protected {item} would no longer be allowed to {verb} {host}."
+                    )
     if blocked:
         halt(
             "E20",
@@ -414,7 +461,7 @@ def _apply(
         if not desired:
             _fail(target, "no allowed_sources left after slot merge / exclude-self")
             continue
-        plans[target.label()] = desired
+        plans[_plan_key(target)] = desired
         if dry_run:
             mode = "replace" if overwrite else "add"
             target.status = "preview"
@@ -453,7 +500,7 @@ def _apply(
     for target in selected:
         if target.status == "failed":
             continue
-        desired = plans.get(target.label())
+        desired = plans.get(_plan_key(target))
         if not desired:
             continue
         client = clients.get(int(target.collective))

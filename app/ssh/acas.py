@@ -9,15 +9,18 @@ Unharden (SSH, FQDN first):
   1. drop-in + cz-config nopasswd true; rewrite /etc/sudoers to **one**
      ACAS NOPASSWD block (re-runs do not append duplicates)
   2. wrap ``ACAS_BANNER_FILE`` (ssh_confirm.sh) with ``if [ -t 0 ]``
-  3. mkdir ``ACAS_SCAP_HOME`` (/home/svc-acas) for SCAP
+   3. mkdir ``ACAS_SCAP_HOME`` (/home/svc-acas) for SCAP. Harden removes it.
   4. iptables/ip6tables -F SSHBRUTE; -A ACCEPT **last**
      (cz-config set can rebuild the firewall if we flush first)
 
 Harden:
-  1. cz-config nopasswd false
-  2. restore banner / sudoers ``*.pre-acas``
-  3. rm drop-in
-  4. ``nohup systemctl restart cz-configd`` (foreground restart drops SSH)
+  1. cz-config nopasswd false. A failure exits. It is not masked.
+  2. restore banner / sudoers ``*.pre-acas``. A rewrite is mode 440.
+     ``visudo`` failure exits. It does not report success.
+  3. rm drop-in and ``ACAS_SCAP_HOME`` (unharden still creates that directory)
+  4. restore the saved SSHBRUTE chain. A missing rules file deletes the
+     unharden ACCEPT and fails. Harden does not report success with that rule left in.
+  5. ``nohup systemctl restart cz-configd`` (foreground restart drops SSH)
 """
 import re
 import shlex
@@ -57,8 +60,20 @@ class AcasPrep(SSHSession):
         return self._run_script(host, self._unharden_script())
 
     def harden(self, host: Union[str, Sequence[str]]) -> str:
+        """A background restart can fail after the script exits. Recheck on a new session."""
         # print(f"DEBUG acas: harden hosts={host!r}")
-        return self._run_script(host, self._harden_script())
+        text = self._run_script(host, self._harden_script())
+        unit = shlex.quote(ACAS_CZCONFIGD_UNIT)
+        status = self._with_ssh_endpoints(
+            host,
+            lambda c: self._sudo(c, f"systemctl is-active {unit}", check=False),
+            error="could not recheck cz-configd",
+        )
+        if (status or "").strip() != "active":
+            raise ValueError(
+                f"cz-configd is not active after harden: {(status or '').strip()!r}"
+            )
+        return text
 
     def _unharden_script(self) -> str:
         user = (self.ssh_user or "").strip()
@@ -106,6 +121,7 @@ awk -v b={mark_b} -v e={mark_e} -v line={user_q} '
 printf '\\n%s\\n%s\\n%s\\n' {mark_b} {user_q} {mark_e} >> "$tmp"
 if visudo -cf "$tmp" >/dev/null 2>&1; then
   mv "$tmp" "$SUDOERS"
+  chmod 440 "$SUDOERS"
   echo STEP_SUDOERS_OK
 else
   rm -f "$tmp"
@@ -170,6 +186,7 @@ echo STEP_UNHARDEN_DONE
         mark_e = shlex.quote(ACAS_SUDOERS_MARK_END)
         user_q = shlex.quote(f"{user} ALL=(ALL) NOPASSWD: ALL")
         chain = shlex.quote(ACAS_IPTABLES_CHAIN)
+        scap = shlex.quote(ACAS_SCAP_HOME)
         return f"""
 if command -v cz-config >/dev/null 2>&1; then
   if cz-config set -j users/0/nopasswd false; then
@@ -184,7 +201,9 @@ for bin in iptables ip6tables; do
   rules="/var/tmp/mct-${{bin}}-sshbrute.rules"
   chain={chain}
   if [ ! -f "$rules" ]; then
-    continue
+    "$bin" -D "$chain" -j ACCEPT 2>/dev/null || true
+    echo STEP_IPTABLES_RESTORE_FAIL "$bin" missing-rules
+    exit 1
   fi
   "$bin" -F "$chain" || exit 1
   while IFS= read -r line; do
@@ -211,6 +230,7 @@ rm -f {drop}
 SUDOERS={sudoers}
 if [ -f "${{SUDOERS}}.pre-acas" ]; then
   mv "${{SUDOERS}}.pre-acas" "$SUDOERS"
+  chmod 440 "$SUDOERS"
   echo STEP_SUDOERS_RESTORED
 else
   tmp="${{SUDOERS}}.acas.$$"
@@ -223,10 +243,16 @@ else
   ' "$SUDOERS" > "$tmp"
   if visudo -cf "$tmp" >/dev/null 2>&1; then
     mv "$tmp" "$SUDOERS"
+    chmod 440 "$SUDOERS"
+    echo STEP_SUDOERS_OK
   else
     rm -f "$tmp"
+    echo STEP_SUDOERS_FAIL visudo
+    exit 1
   fi
 fi
+echo STEP_SCAP_DIR_REMOVE
+rm -rf {scap} || {{ echo STEP_SCAP_DIR_REMOVE_FAIL; exit 1; }}
 echo STEP_CZCONFIGD_RESTART
 nohup systemctl restart {unit} >/dev/null 2>&1 &
 echo STEP_HARDEN_DONE

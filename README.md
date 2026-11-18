@@ -18,7 +18,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 | **6** | Allowed sources — per type/slot (`ssh`/`spa`/`admin`/`https`/`ping`/`snmp`), exclude-self /32|/128 |
 | **C** | Configure — edit `DEBUG`, `LAB_MODE`, SSH/walk timeouts in `config.py` |
 | **D** | Download deps — `pip download` into `app/vendor/wheels` (source tree only; hidden in the GitHub zip) |
-| **U** | Update deps — `pip install --upgrade` (source tree only; hidden in the GitHub zip) |
+| **U** | Reinstall the pinned vendor set into `vendor/site` (source tree only; hidden in the GitHub zip) |
 | **Q** | Quit |
 
 ## Shared behavior (all mutating / inventory tools)
@@ -39,7 +39,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **TLS:** the CA file is required unless `INSECURE_API=True`. That switch is not lab mode.
 - **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then RFC1918 IPv4, public IPv4, IPv6. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime connects until the first working address (`SSH_PRIME_TIMEOUT`). Auth failure stops the IP walk (SSHBRUTE). Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. **DEBUG off:** `SSH n/N` and failures only. **DEBUG on:** every try, uncolored. Production does not prompt to trust a new host key.
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
-- **Dependencies:** unpacked wheels in `app/vendor/site` are on `sys.path` (no pip). Release zips include a Windows amd64 / **Python 3.14** `vendor/site`. Current pins need Python 3.10+; this zip is 3.14 only. Empty site is filled by extracting `vendor/wheels`. Git clones without vendor may still pip.
+- **Dependencies:** unpacked wheels in `app/vendor/site` are appended to `sys.path`, not put in front. Installs use `app/vendor/requirements.txt` hashes and `--target vendor/site`. Menu U reinstalls that pin. It does not take a newer PyPI release. The pin needs Python 3.11.5+. Release zips include a Windows amd64 / **Python 3.14** `vendor/site`.
 
 ## 1) SNMP Credential Tool
 
@@ -47,12 +47,12 @@ Configures **authPriv** SNMPv3 USM on selected appliances so a scanner (e.g. ESX
 
 **CLI (`[1/8]` … `[8/8]`):**
 
-1. **Authenticate** to each Controller (`POST /admin/login`). Production pins the CA first (no password until the fingerprint is accepted or already stored). Before the password is sent, `GET /admin/version` sets `Accept` to `peerVersion`. Peer 24 sends `machineId`; peer 25 sends `deviceId` (same UUID). FQDN first; IP if connect/HTTP fails (not on 401/403). `Proceed anyway?` is lab mode only.
+1. **Authenticate** to each Controller (`POST /admin/login`). Production requires a hand-placed Controller CA before the password is sent. There is no proceed-anyway prompt. `INSECURE_API` is the only skip. `LAB_MODE` does not skip it. Before the password is sent, `GET /admin/version` sets `Accept` to `peerVersion`. Peer 24 sends `machineId`; peer 25 sends `deviceId` (same UUID). Login does not follow redirects. FQDN first; IP if connect/HTTP fails (not on 401/403).
 2. **Inventory** `GET /admin/appliances` + status, then the exclude table (Enter = all). The run **previews first** (no pin/push/purge/walk/snmpd restart). Apply is offered after the preview unless `DRY_RUN=True`.
 3. **Pin** `engineIDType 3` via appliance PUT (dry-run prints only). PUT is the full GET document: only `snmpd.conf` / `enabled` may change; `site` object becomes the same UUID (never stripped); `tcpPort` is never added. Any other field diff aborts (`DEBUG` dumps redacted GET/PUT).
 4. **SSH** (host keys primed on the main thread, then up to `SSH_CONCURRENCY` in parallel). **DEBUG off:** `SSH n/N` and failure lines only. **DEBUG on:** every try. Read `oldEngineID` from persistent snmpd.conf and check it against `eth0` MAC (RFC 3411 type 3). **Live** restarts snmpd so type 3 applies; **preview does not**.
 5. **Localize** auth/priv in-process (RFC 3414 SHA-512) per engine ID. Uses that collective’s `snmp_*` if set. Prints ESXi `user/Kul/Kul/priv` when `PRINT_ESXI_KEYS` (follows `LAB_MODE`).
-6. **Push** via Controller: **1) Add** keeps other USM users and add/updates this username; **2) Replace** drops other `createUser`/`rouser` lines (backup under `reports/replaced/`). Then `createUser` (localized `-l 0x…`), optional `rouser`, `engineIDType 3`. No `exactEngineID`. SNMPv1/v2c community lines are stripped.
+6. **Push** via Controller: **1) Add** keeps other USM users and add/updates this username; **2) Replace** drops other `createUser`, `rouser`, and `rwuser` lines (backup under `reports/replaced/`). Then `createUser` (localized `-l 0x…`), optional `rouser`, `engineIDType 3`. No `exactEngineID`. `rocommunity`, `rwcommunity`, `com2sec`, `authcommunity`, and `authuser` lines are stripped.
 7. **SSH purge:** stop snmpd, delete leftover persistent `usmUser`, start snmpd so `createUser` recreates the user.
 8. **Walk** in parallel (`WALK_CONCURRENCY`): the SSH-working address only (`ssh_ok_host`). `WALK_*_ATTEMPTS` on that one host. `SKIP_CREDENTIAL_WALK` skips this step on dry-run and live (menu 3 unchanged). Engine ID hex is console/report only when `DEBUG=True`.
 
@@ -69,7 +69,7 @@ Submenu: **1) Unharden** or **2) Harden**. Then `[1/3]` login, `[2/3]` inventory
 1. `cz-config set -j users/0/nopasswd true` and write `/etc/sudoers.d/cz-acas-scan`. `/etc/sudoers` is rewritten to a **single** `# BEGIN ACAS-SCAN` block (safe to re-run; old duplicate NOPASSWD lines are stripped). `visudo -cf` before replace.
 2. Patch `/etc/profile.d/ssh_confirm.sh`: wrap the `read -p` / y/N loop in `if [ -t 0 ]`. **Interactive SSH still prompts.** Scanners (no TTY) skip it. Missing file (typical gateway) is a **skip**, not a fail. Backup `*.pre-acas` + `bash -n` before replace.
 3. `mkdir -p /home/svc-acas` (SCAP).
-4. **Last:** `iptables` / `ip6tables` `-w -F SSHBRUTE; -A ACCEPT` (`cz-config set` rebuilds the chain if you flush first). Hardened chain is SET/LOG/DROP/ACCEPT; unharden should be ACCEPT only. Check: `sudo iptables -S SSHBRUTE`.
+4. **Last:** `iptables` / `ip6tables` `-w -F SSHBRUTE; -A ACCEPT`. The pre-flush rules are saved. Harden restores that file. If the file is missing, harden deletes the ACCEPT and fails instead of leaving the chain open. Check: `sudo iptables -S SSHBRUTE`.
 
 **Harden:** `nopasswd false`, restore `*.pre-acas`, remove drop-in, `nohup systemctl restart cz-configd` (foreground restart drops SSH). Re-harden as soon as the scan finishes.
 
@@ -124,7 +124,7 @@ Every type has `ssh`, `spa`, `ping`, `snmp`. **`admin` only on `controller` and 
 
 Blank `nic` (or omit it) means **Any NIC**. The PUT omits `nic`; `"nic": ""` is HTTP 422. `allowed_sources` may be global or on a `collectives[]` row.
 
-PUT only that field, and only if `allowSources` already exists on the parent. Does not create `sshServer` / etc. **/32 and /128** matching **this** box’s IPs are dropped. **1) Add** per slot (**OK already set** if those rows are already there). **2) Replace** per slot (empty replace refused; backup `reports/replaced/`). Preview first. Replace always shows the full plan, then **y** then type **YES** (cannot be disabled). Before PUT, **E20** if this computer’s outbound IP would not match new **SSH** (`ALLOW_SOURCES_LOCKOUT_SSH`) or **Admin/API / SPA/HTTPS** (`ALLOW_SOURCES_LOCKOUT_HTTPS`) — both default on. Unexpected PUT diffs abort. Client Profile View still required on portals.
+PUT only that field, and only if `allowSources` already exists on the parent. Does not create `sshServer` / etc. **/32 and /128** matching **this** box’s IPs are dropped. **1) Add** per slot (**OK already set** if those rows are already there). **2) Replace** per slot (empty replace refused; backup `reports/replaced/`). Preview first. Replace always shows the full plan, then **y** then type **YES** (cannot be disabled). Before PUT, **E20** if this computer’s outbound IP or an `ALLOW_SOURCES_PROTECTED` address would not match new **SSH** (`ALLOW_SOURCES_LOCKOUT_SSH`) or **Admin/API / SPA/HTTPS** (`ALLOW_SOURCES_LOCKOUT_HTTPS`) — both default on. Unexpected PUT diffs abort. Client Profile View still required on portals.
 
 ## C) Configure
 
@@ -133,7 +133,7 @@ Interactive editor for `app/config.py`. Lists `DEBUG`, `LAB_MODE`, `DRY_RUN`, `S
 ## D / U) Dependencies
 
 - **D:** `pip download` into `app/vendor/wheels` on a **networked machine with the same OS and Python**, then unpack into `app/vendor/site`. Copy `app/vendor/` to the air-gap host.  
-- **U:** `pip install --upgrade` into this interpreter (needs network).  
+- **U:** reinstall `app/vendor/requirements.txt` into `vendor/site` (needs network). A newer release is refused until that file changes.  
 - A GitHub **release zip** includes `app/vendor/RELEASE` (gitignored) so **D** and **U** are omitted. Source clones have no that file, so D/U stay on the menu. The Windows zip also omits the Linux and macOS launchers.
 
 ## Launchers
@@ -148,7 +148,7 @@ Double-click the launcher for the menu, or pass a tool: `MultiCollectiveToolkit-
 
 ## Prerequisites
 
-- Python 3.10+ (Windows release zips are built for **Python 3.14**)
+- Python 3.11.5+ (Windows release zips are built for **Python 3.14**)
 - SSH to the appliance with sudo
 - AppGate admin API (MFA-exempt local user recommended)
 
@@ -270,6 +270,7 @@ Switches:
 | `SKIP_CREDENTIAL_WALK` | `False` | **Skip step 8 walk** on menu 1 dry-run and live push. Menu 3 is unchanged. |
 | `ALLOW_SOURCES_LOCKOUT_SSH` | `True` | Menu 6 replace: **E20** if this host would miss new SSH rules. |
 | `ALLOW_SOURCES_LOCKOUT_HTTPS` | `True` | Menu 6 replace: **E20** if this host would miss new Admin/API or SPA/HTTPS rules. |
+| `ALLOW_SOURCES_PROTECTED` | `()` | Extra IPs or CIDRs that must still match those rules. Empty checks only this host. |
 
 Other knobs:
 
@@ -290,13 +291,15 @@ Other knobs:
 
 ## Security notes
 
-- `DEBUG` and `LAB_MODE` default off. `INSECURE_API` defaults off and is the only switch that skips the Controller CA. `LAB_MODE` does not.
+- `DEBUG` and `LAB_MODE` default off. `INSECURE_API` defaults off and is the only switch that skips the Controller CA. Menu C requires `y` then `YES` before saving that on. `LAB_MODE` does not skip the CA.
 - Tokens and passphrases are not printed. New cz password is not on the remote argv.
-- Login probes `GET /admin/version` and sets `Accept` to `peerVersion`. Peer 24 sends `machineId`. Peer 25 sends `deviceId`. A login retry happens only if the Controller names `peer-vN` in the error. The device UUID is per install in `certs/.machine-id`, not a shared constant.
+- Login probes `GET /admin/version` and sets `Accept` to `peerVersion`. Peer 24 sends `machineId`. Peer 25 sends `deviceId`. Login does not follow redirects. A retry happens only if the Controller names `peer-vN` in the error. The device UUID is per install in `certs/.machine-id`, not a shared constant.
+- Unharden creates `/home/svc-acas`. Harden removes it. A sudoers rewrite is mode `440`. A `visudo` failure fails the harden.
+- A new SSH password must differ from the current one. Two appliances with the same engine ID are not localized. Allow-source plans are keyed by appliance id.
 - SSH refuses SHA-1, CBC, and `diffie-hellman-group14-sha1`. A status read failure does not treat the box as healthy. Prefix `0` allow-sources are refused. Menu C caps concurrency at 8.
 - Reports store hash *lengths*, not hex. Engine ID hex only if `DEBUG=True`. `PRINT_ESXI_KEYS` follows `LAB_MODE`.
 - Replace/overwrite writes a secret-free GET to `reports/replaced/<UTC>/` before PUT. Markers are `<redacted:field>`. That file can restore `allowSources`. It cannot restore SNMP config or NTP keys. Use the Admin UI or a snapshot for those.
-- `credentials.json` is gitignored. Reports are `0600` where the OS honors it.
+- `credentials.json` is gitignored. New report files are created mode `0600`. A reports directory that already exists is not chmod'd.
 - ACAS unharden weakens STIG until you harden again.
 - Identical `snmp_auth` / `snmp_priv` prints a DISA warning.
 
@@ -307,10 +310,10 @@ Per-box errors skip that appliance and continue. The console line is a sentence 
 | Code | When | What to do |
 | --- | --- | --- |
 | **E01** | No collectives | Add `collectives[].fqdn` (and `agip`) or enter when prompted |
-| **E02** | Controller login failed | API user/password, MFA exemption, port **8443** `/admin`. Lab only: `Proceed anyway?` |
+| **E02** | Controller login failed | API user/password, admin role, MFA exemption, port **8443** `/admin`. A v25 403 after a matched Accept is rights, not the header. |
 | **E03** | No appliances with SSH | Activated boxes with hostname/SSH IP; Appliance **View** on tags |
 | **E04** | Nothing left after appliance exclude | Enter to keep all, or exclude fewer |
-| **E05** | All collectives excluded | Enter to keep all Controllers |
+| **E05** | No Controller left, or a duplicate FQDN | Enter to keep all, or use a different FQDN |
 | **E06** | CA file missing, not a CA, or ACL too open | Place the Controller CA in `certs/`. Restrict the file, `certs/`, and its parent. `INSECURE_API=True` skips the file. `LAB_MODE` does not. |
 | **E07** | SSH host key rejected | Production does not prompt. Add the appliance host key to `SSH_KNOWN_HOSTS` or `ssh_host_keys`. Lab accepts any key |
 | **E08** | Appliance PUT refused / HTTP 422 | Unexpected field diff, missing `site`, or **View** on **Client Profile** (`portal.profiles[]`). Not SSH. |

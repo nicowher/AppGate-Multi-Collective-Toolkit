@@ -13,9 +13,9 @@ the parent of this package (``app/``), not ``app/core/``.
       collectives[] is kept as a list of objects (not stringified).
 
   vendor site / wheels / ensure_package
-      Unpacked wheels in app/vendor/site go on sys.path (no pip). Empty site
-      is filled by extracting vendor/wheels/*.whl. Online pip only if there is
-      no vendor/site (git clone). Menu U still upgrades via pip.
+      Unpacked wheels in app/vendor/site are appended to sys.path. Installs
+      use vendor/requirements.txt hashes and --target vendor/site. Menu U
+      reinstalls that pin. It does not take a newer PyPI release.
 """
 import importlib.util
 import ipaddress
@@ -128,6 +128,7 @@ REPO_ROOT = os.path.dirname(APP_DIR)
 VENDOR_DIR = os.path.join(APP_DIR, "vendor")
 VENDOR_WHEELS = os.path.join(VENDOR_DIR, "wheels")
 VENDOR_SITE = os.path.join(VENDOR_DIR, "site")
+VENDOR_REQUIREMENTS = os.path.join(VENDOR_DIR, "requirements.txt")
 
 
 def install_machine_id() -> str:
@@ -155,6 +156,21 @@ def install_machine_id() -> str:
     return value
 
 
+def _extract_wheel(wheel_path: str, dest: str) -> None:
+    """A .. member can write outside vendor/site. Refuse the wheel before any extract."""
+    root = os.path.realpath(dest)
+    os.makedirs(root, exist_ok=True)
+    with zipfile.ZipFile(wheel_path) as zf:
+        for info in zf.infolist():
+            name = info.filename.replace("\\", "/")
+            if name.startswith("/") or re.match(r"^[A-Za-z]:", name):
+                raise ValueError(f"Refusing absolute wheel member: {info.filename}")
+            target = os.path.realpath(os.path.join(root, info.filename))
+            if target != root and not target.startswith(root + os.sep):
+                raise ValueError(f"Refusing wheel member outside {dest}: {info.filename}")
+        zf.extractall(root)
+
+
 def ensure_vendor_site() -> None:
     """Put unpacked wheels on sys.path before imports. Extract only if site is empty so a bad wheel is not re-read every start."""
     if os.path.isdir(VENDOR_WHEELS) and (
@@ -163,10 +179,9 @@ def ensure_vendor_site() -> None:
         os.makedirs(VENDOR_SITE, exist_ok=True)
         for name in os.listdir(VENDOR_WHEELS):
             if name.endswith(".whl"):
-                with zipfile.ZipFile(os.path.join(VENDOR_WHEELS, name)) as zf:
-                    zf.extractall(VENDOR_SITE)
+                _extract_wheel(os.path.join(VENDOR_WHEELS, name), VENDOR_SITE)
     if os.path.isdir(VENDOR_SITE) and VENDOR_SITE not in sys.path:
-        sys.path.insert(0, VENDOR_SITE)
+        sys.path.append(VENDOR_SITE)
 
 
 ensure_vendor_site()
@@ -179,26 +194,40 @@ def vendor_has_wheels() -> bool:
     )
 
 
+def _pip_pinned(extra: list, timeout: int) -> None:
+    """Install only the saved hashes, into vendor/site, not the system interpreter."""
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--require-hashes",
+            "--no-deps",
+            "-r",
+            VENDOR_REQUIREMENTS,
+            "--target",
+            VENDOR_SITE,
+            *extra,
+        ],
+        check=True,
+        timeout=timeout,
+    )
+
+
 def install_from_vendor(package: str) -> bool:
-    """Install a pip package from vendor/wheels with no network."""
+    """Install the pinned set from vendor/wheels. A bare name is not accepted."""
     if not vendor_has_wheels():
         return False
-    print(f"      Installing {package} from vendor/wheels ...", file=sys.stderr)
+    print(f"      Installing pinned deps for {package} from vendor/wheels ...", file=sys.stderr)
     try:
-        subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "--no-index",
-                "--find-links",
-                VENDOR_WHEELS,
-                package,
-            ],
-            check=True,
-            timeout=PIP_INSTALL_TIMEOUT,
+        os.makedirs(VENDOR_SITE, exist_ok=True)
+        _pip_pinned(
+            ["--no-index", "--find-links", VENDOR_WHEELS],
+            PIP_INSTALL_TIMEOUT,
         )
+        if VENDOR_SITE not in sys.path:
+            sys.path.append(VENDOR_SITE)
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(f"      vendor install of {package} failed: {exc}", file=sys.stderr)
@@ -208,16 +237,18 @@ def install_from_vendor(package: str) -> bool:
 def download_vendor_wheels() -> None:
     """Fetch wheels for VENDOR_PACKAGES into vendor/wheels (needs network), then unpack to site."""
     os.makedirs(VENDOR_WHEELS, exist_ok=True)
-    print(f"Downloading {', '.join(VENDOR_PACKAGES)} into {VENDOR_WHEELS} ...", file=sys.stderr)
+    print(f"Downloading pinned deps into {VENDOR_WHEELS} ...", file=sys.stderr)
     subprocess.run(
         [
             sys.executable,
             "-m",
             "pip",
             "download",
+            "--require-hashes",
+            "-r",
+            VENDOR_REQUIREMENTS,
             "-d",
             VENDOR_WHEELS,
-            *VENDOR_PACKAGES,
         ],
         check=True,
         timeout=VENDOR_DOWNLOAD_TIMEOUT,
@@ -225,30 +256,16 @@ def download_vendor_wheels() -> None:
     os.makedirs(VENDOR_SITE, exist_ok=True)
     for name in os.listdir(VENDOR_WHEELS):
         if name.endswith(".whl"):
-            with zipfile.ZipFile(os.path.join(VENDOR_WHEELS, name)) as zf:
-                zf.extractall(VENDOR_SITE)
+            _extract_wheel(os.path.join(VENDOR_WHEELS, name), VENDOR_SITE)
     ensure_vendor_site()
     print(f"Unpacked wheels into {VENDOR_SITE}", file=sys.stderr)
 
 
 def upgrade_vendor_packages() -> None:
-    """pip install --upgrade the same packages menu D downloads (not wheels)."""
-    print(
-        f"Upgrading {', '.join(VENDOR_PACKAGES)} via pip ...",
-        file=sys.stderr,
-    )
-    subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--upgrade",
-            *VENDOR_PACKAGES,
-        ],
-        check=True,
-        timeout=PIP_UPGRADE_TIMEOUT,
-    )
+    """Reinstall the pinned set into vendor/site. A newer PyPI release is refused."""
+    print("Reinstalling the pinned vendor set into vendor/site ...", file=sys.stderr)
+    os.makedirs(VENDOR_SITE, exist_ok=True)
+    _pip_pinned([], PIP_UPGRADE_TIMEOUT)
 
 
 def ensure_package(package: str, import_name: str) -> None:
@@ -267,13 +284,12 @@ def ensure_package(package: str, import_name: str) -> None:
         sys.exit(1)
     if install_from_vendor(package) and importlib.util.find_spec(import_name) is not None:
         return
-    answer = input(f"Install {package} now via pip (needs network)? [Y/n]: ").strip().lower()
-    if is_yes(answer, default_yes=True):
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", package],
-            check=True,
-            timeout=PIP_INSTALL_TIMEOUT,
-        )
+    answer = input(f"Install pinned {package} into vendor/site (needs network)? [y/N]: ").strip().lower()
+    if is_yes(answer, default_yes=False):
+        os.makedirs(VENDOR_SITE, exist_ok=True)
+        _pip_pinned([], PIP_INSTALL_TIMEOUT)
+        if VENDOR_SITE not in sys.path:
+            sys.path.append(VENDOR_SITE)
         return
     print_error(
         "E15",
@@ -391,13 +407,27 @@ def is_yes(answer: str, *, default_yes: bool = False) -> bool:
     return text in YES_ANSWERS
 
 
+def _utc_stamp() -> str:
+    """Microseconds stop two runs in the same second from sharing a filename."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+
+
+def _write_private(path: str, text: str) -> None:
+    """Create the file at mode 600 in one call. A later chmod races a local reader."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, REPORT_FILE_MODE)
+    try:
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
 def write_json_report(prefix: str, payload: Dict[str, Any]) -> None:
     """Write reports/<prefix>-<utc>.json (mode 600). Console dump only if DEBUG.
 
     Callers must omit passwords, tokens, and Kul hex. This function dumps payload as-is.
     """
-    from datetime import datetime, timezone
-
     text = json.dumps(payload, indent=2)
     if DEBUG:
         print("\n----- BEGIN RUN REPORT -----")
@@ -407,16 +437,9 @@ def write_json_report(prefix: str, payload: Dict[str, Any]) -> None:
         return
     reports_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME)
     try:
-        os.makedirs(reports_dir, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        path = os.path.join(reports_dir, f"{prefix}-{stamp}.json")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(text)
-            fh.write("\n")
-        try:
-            os.chmod(path, REPORT_FILE_MODE)
-        except OSError:
-            pass
+        os.makedirs(reports_dir, mode=0o700, exist_ok=True)
+        path = os.path.join(reports_dir, f"{prefix}-{_utc_stamp()}.json")
+        _write_private(path, text + "\n")
         print(f"      Report written: {path}", file=sys.stderr)
     except OSError as exc:
         print(f"      Could not write report file: {exc}", file=sys.stderr)
@@ -468,11 +491,9 @@ def redact_for_backup(obj: Any) -> Any:
 def begin_replaced_run() -> str:
     """One folder per live replace/overwrite run: reports/replaced/<UTC>/."""
     global _replaced_run_dir
-    from datetime import datetime, timezone
-
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = _utc_stamp()
     _replaced_run_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME, "replaced", stamp)
-    os.makedirs(_replaced_run_dir, exist_ok=True)
+    os.makedirs(_replaced_run_dir, mode=0o700, exist_ok=True)
     return _replaced_run_dir
 
 
@@ -482,13 +503,8 @@ def write_replaced_snapshot(kind: str, label: str, body: Dict[str, Any]) -> None
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", label)[:80] or "appliance"
     path = os.path.join(folder, f"{kind}-{safe}.json")
     try:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(redact_for_backup(body), fh, indent=2)
-            fh.write("\n")
-        try:
-            os.chmod(path, REPORT_FILE_MODE)
-        except OSError:
-            pass
+        payload = json.dumps(redact_for_backup(body), indent=2) + "\n"
+        _write_private(path, payload)
         print(f"      Backup: {path}", file=sys.stderr)
     except OSError as exc:
         print(f"      Could not write replace backup: {exc}", file=sys.stderr)

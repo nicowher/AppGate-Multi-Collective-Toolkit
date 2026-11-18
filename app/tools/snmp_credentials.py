@@ -337,6 +337,17 @@ def _run_phases_3_to_8(
             print(f"      {target.label()}: engine ID read")
 
     run_ssh_batch(_ok(selected), _ssh_engine, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
+    seen_engine: Dict[str, Target] = {}
+    for target in list(_ok(selected)):
+        eid = (target.engine_id or "").lower()
+        if not eid:
+            continue
+        prior = seen_engine.get(eid)
+        if prior is not None:
+            _fail(target, f"engine ID matches {prior.label()}")
+            _fail(prior, f"engine ID matches {target.label()}")
+        else:
+            seen_engine[eid] = target
     if not _ok(selected):
         print_error(
             "E09",

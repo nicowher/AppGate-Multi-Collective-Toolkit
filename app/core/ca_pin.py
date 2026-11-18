@@ -322,7 +322,7 @@ def _parse_pem(path: str, text: str) -> None:
 
 
 def _as_verify_pem(path: str, raw: bytes) -> str:
-    """requests verify= needs PEM. AppGate .cer is often DER, so a temp PEM is the trust file."""
+    """requests verify= needs PEM. A DER .cer is converted under certs/.converted, not the default temp directory."""
     # print(f"DEBUG ca: verify path={path!r} der={b'BEGIN CERTIFICATE' not in raw}")
     if b"BEGIN CERTIFICATE" in raw:
         text = raw.decode("utf-8", errors="replace")

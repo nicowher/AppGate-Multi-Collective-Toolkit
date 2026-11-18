@@ -1,7 +1,6 @@
-"""Menu D: pip download into app/vendor/wheels (air-gap copy, no install).
+"""Menu D: pip download the pinned hashes into app/vendor/wheels.
 
-Menu U: pip install --upgrade into the current interpreter (needs network,
-does not refresh wheels). Same package list: VENDOR_PACKAGES.
+Menu U: reinstall that pin into vendor/site. It does not take a newer PyPI release.
 
 Not part of the configure 8-step flow. Run D on a networked machine that
 matches the target OS and Python, then copy the project (including
@@ -55,7 +54,7 @@ def upgrade_main() -> None:
             "Menu U needs network. On air-gap use menu D wheels instead.",
         )
         sys.exit(1)
-    print("Packages upgraded.", file=sys.stderr)
+    print("Pinned vendor set reinstalled into vendor/site.", file=sys.stderr)
 
 
 if __name__ == "__main__":

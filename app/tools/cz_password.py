@@ -75,6 +75,9 @@ def _apply(
     def _one(target: Target) -> None:
         col = collective_for_target(target, collectives)
         # print(f"DEBUG czpw: {target.label()} user={col.get('ssh_username')}")
+        if (col.get("ssh_password_new") or "") == ssh_password_for(target, col):
+            _fail(target, "new SSH password matches the current one")
+            return
         out = CzPassword(col["ssh_username"], ssh_password_for(target, col)).set_password(
             target, col["ssh_password_new"]
         )

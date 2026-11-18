@@ -149,6 +149,8 @@ CA_DIRNAME = "certs"
 ALLOW_SOURCES_LOCKOUT_SSH = True
 # Menu 6 replace: abort (E20) if this workstation would not match new Admin/API or SPA/HTTPS rules.
 ALLOW_SOURCES_LOCKOUT_HTTPS = True
+# Extra IPs or CIDRs that must still match those same rules. This host cannot see them.
+ALLOW_SOURCES_PROTECTED = ()
 # Directory for run-*.json / dryrun-*.json / walk-*.json (under repo root).
 REPORTS_DIRNAME = "reports"
 SNMPD_STOP_RETRIES = 5

@@ -334,13 +334,9 @@ class SNMPValidator:
         if install_from_vendor("pysnmp"):
             return self._detect_snmpwalk()[0] is not None
         try:
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "pysnmp"],
-                check=True,
-                timeout=PIP_INSTALL_TIMEOUT,
-                capture_output=True,
-                text=True,
-            )
+            from core.utils import upgrade_vendor_packages
+
+            upgrade_vendor_packages()
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()[:WALK_ERROR_PREVIEW]
             print(f"      pip install pysnmp failed (rc={exc.returncode}): {stderr}", file=sys.stderr)

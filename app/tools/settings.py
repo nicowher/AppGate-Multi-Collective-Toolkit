@@ -128,9 +128,18 @@ def main() -> bool:
             print("      No changes written.")
             return False
         if raw in ("s", "save"):
+            if values.get("INSECURE_API") and not config.INSECURE_API:
+                first = input(
+                    "      INSECURE_API=True skips the Controller CA. Continue? [y/N]: "
+                ).strip().lower()
+                second = input("      Type YES to skip Controller certificate checks: ").strip()
+                if first not in YES_ANSWERS or second != "YES":
+                    print("      Save cancelled.")
+                    continue
             if values.get("LAB_MODE") and not config.LAB_MODE:
                 confirm = input(
-                    "      LAB_MODE=True disables TLS/SSH verify and STIG floors. Continue? [y/N]: "
+                    "      LAB_MODE=True disables SSH host-key checks and STIG floors. "
+                    "It does not skip the Controller CA. Continue? [y/N]: "
                 ).strip().lower()
                 if confirm not in YES_ANSWERS:
                     print("      Save cancelled.")

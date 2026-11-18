@@ -81,6 +81,15 @@ from .errors import AppliancePutError
 from .ntp import NtpMixin
 from .snmp import SnmpMixin
 
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]|\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _strip_controls(text: str) -> str:
+    """A Controller error must not rewrite the operator terminal."""
+    # print(f"DEBUG strip: n={len(text or '')}")
+    return _CTRL.sub("", text or "")
+
+
 def _disable_tls_verify() -> None:
     """INSECURE_API only. Hides urllib3 noise when verify is off."""
     from requests.packages.urllib3.exceptions import InsecureRequestWarning
@@ -344,6 +353,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 headers=self.headers,
                 verify=self._verify(),
                 timeout=API_TIMEOUT,
+                allow_redirects=False,
             )
         except requests.exceptions.RequestException as exc:
             if DEBUG:
@@ -439,6 +449,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     json=payload,
                     verify=self._verify(),
                     timeout=API_TIMEOUT,
+                    allow_redirects=False,
                 )
                 if DEBUG:
                     print(
@@ -476,6 +487,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     json=payload,
                     verify=self._verify(),
                     timeout=API_TIMEOUT,
+                    allow_redirects=False,
                 )
                 if DEBUG:
                     print(
@@ -499,7 +511,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             except ValueError:
                 raise RuntimeError(
                     f"Login returned non-JSON (HTTP {response.status_code}): "
-                    f"{(response.text or '')[:LOGIN_BODY_PREVIEW]}"
+                    f"{_strip_controls((response.text or '')[:LOGIN_BODY_PREVIEW])}"
                 )
             if not isinstance(data, dict):
                 raise RuntimeError("Login JSON was not an object")
@@ -521,11 +533,11 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         """Provide actionable guidance for common 401/403 responses."""
         try:
             body = response.json()
-            msg = redact_preview(str(body.get("message", response.text)), LOGIN_BODY_PREVIEW)
+            msg = _strip_controls(redact_preview(str(body.get("message", response.text)), LOGIN_BODY_PREVIEW))
             err_id = body.get("id", "")
             failure = body.get("failureType", "")
         except (ValueError, TypeError, requests.JSONDecodeError):
-            msg = redact_preview(response.text or f"HTTP {response.status_code}", LOGIN_BODY_PREVIEW)
+            msg = _strip_controls(redact_preview(response.text or f"HTTP {response.status_code}", LOGIN_BODY_PREVIEW))
             err_id = ""
             failure = ""
 
@@ -805,8 +817,8 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             if DEBUG:
                 print(f"      DEBUG {what} PUT HTTP {put_response.status_code}", file=sys.stderr)
                 print(json.dumps(_redact_appliance_for_debug(body), indent=2, default=str), file=sys.stderr)
-                print((put_response.text or "")[:API_ERROR_BODY_PREVIEW], file=sys.stderr)
-            body_preview = redact_preview(put_response.text or "", API_ERROR_BODY_PREVIEW)
+                print(_strip_controls((put_response.text or "")[:API_ERROR_BODY_PREVIEW]), file=sys.stderr)
+            body_preview = _strip_controls(redact_preview(put_response.text or "", API_ERROR_BODY_PREVIEW))
             hint = ""
             text_l = (put_response.text or "").lower()
             if put_response.status_code == 422 and "portal.profiles" in text_l:

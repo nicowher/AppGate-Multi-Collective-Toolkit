@@ -31,6 +31,7 @@ class SnmpMixin:
         drop = (
             rf"^createUser\s+{re.escape(user)}\b",
             rf"^rouser\s+{re.escape(user)}\b",
+            rf"^rwuser\s+{re.escape(user)}\b",
             rf"^deleteUser\s+{re.escape(user)}\b",
             *SnmpMixin._engine_pin_patterns(),
             *SnmpMixin._community_patterns(),
@@ -39,12 +40,13 @@ class SnmpMixin:
 
     @staticmethod
     def _snmpd_lines_without_all_users(appliance: Dict[str, Any]) -> list:
-        """Replace mode: drop every createUser/rouser/deleteUser, keep the rest."""
+        """Replace mode: drop every USM user line. rwuser is write access and must not survive."""
         existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
         lines = existing_conf.splitlines() if existing_conf else []
         drop = (
             r"^createUser\s+",
             r"^rouser\s+",
+            r"^rwuser\s+",
             r"^deleteUser\s+",
             *SnmpMixin._engine_pin_patterns(),
             *SnmpMixin._community_patterns(),
@@ -66,6 +68,10 @@ class SnmpMixin:
         return (
             r"(?i)^rocommunity6?\b",
             r"(?i)^rwcommunity6?\b",
+            r"(?i)^com2sec6?\b",
+            r"(?i)^com2sec6?unix\b",
+            r"(?i)^authcommunity\b",
+            r"(?i)^authuser\b",
         )
 
     @staticmethod

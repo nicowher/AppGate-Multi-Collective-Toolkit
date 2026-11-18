@@ -17,7 +17,7 @@ from typing import List, Optional
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 _VENDOR_SITE = os.path.join(_APP_DIR, "vendor", "site")
 if os.path.isdir(_VENDOR_SITE):
-    sys.path.insert(0, _VENDOR_SITE)
+    sys.path.append(_VENDOR_SITE)
 # Pack script drops this file into the GitHub zip only (gitignored). Hides D/U.
 IS_RELEASE = os.path.isfile(os.path.join(_APP_DIR, "vendor", "RELEASE"))
 
@@ -106,7 +106,7 @@ def _prompt_menu_choice() -> str:
     print(f"  {step('C)')} Configure             {dim('(DEBUG, LAB_MODE, timeouts)')}")
     if not IS_RELEASE:
         print(f"  {step('D)')} Download deps         {dim('(prefetch vendor wheels)')}")
-        print(f"  {step('U)')} Update deps           {dim('(pip install --upgrade)')}")
+        print(f"  {step('U)')} Update deps           {dim('(reinstall pinned set)')}")
     print(f"  {step('Q)')} Quit")
     print()
     while True:
