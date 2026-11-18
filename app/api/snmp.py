@@ -55,6 +55,7 @@ class SnmpMixin:
 
     @staticmethod
     def _engine_pin_patterns() -> tuple:
+        """cz-configd truncates exactEngineID. Leaving a pin in the file fights the type-3 PUT."""
         return (
             r"(?i)^exactEngineID\s+",
             r"(?i)^engineIDType\s+",
@@ -63,6 +64,7 @@ class SnmpMixin:
 
     @staticmethod
     def _community_patterns() -> tuple:
+        """Column 0 only. A leading space is not a match, so that directive is kept."""
         if not STRIP_V1V2_COMMUNITIES:
             return ()
         return (

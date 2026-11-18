@@ -148,6 +148,7 @@ def _parse_ntp_servers(value: Any) -> List[Dict[str, str]]:
 
 
 def resolve_allowed_sources(col: dict, creds: dict) -> Dict[str, list]:
+    """An empty row inherits the global map. A missing map stays empty so the tool halts before login."""
     local = col.get("allowed_sources")
     if isinstance(local, dict) and local:
         return local
@@ -187,6 +188,8 @@ def ensure_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
         key_no = input("      keyNo (empty if none): ").strip()
         key = ""
         if key_type:
+            if not sys.stdin.isatty():
+                raise RuntimeError("Password prompt requires a terminal")
             key = getpass("      key: ").strip()
             confirm = getpass("      key (confirm): ").strip()
             if key != confirm:
@@ -354,17 +357,18 @@ def _exclude_collectives(cols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Same idea as appliance exclude: Enter keeps all. Tokens: index, range, FQDN/IP."""
     if len(cols) < 2:
         return cols
-    raw = input(
-        "      Exclude collectives (e.g. 1,3 or 1-3 or FQDN; Enter for all): "
-    ).strip()
-    if not raw:
-        return cols
-    # print(f"DEBUG collectives: exclude raw={raw!r}")
-    try:
-        tokens = expand_exclude_tokens(raw)
-    except ValueError as exc:
-        print(f"      {exc}", file=sys.stderr)
-        return _exclude_collectives(cols)
+    while True:
+        raw = input(
+            "      Exclude collectives (e.g. 1,3 or 1-3 or FQDN; Enter for all): "
+        ).strip()
+        if not raw:
+            return cols
+        # print(f"DEBUG collectives: exclude raw={raw!r}")
+        try:
+            tokens = expand_exclude_tokens(raw)
+            break
+        except ValueError as exc:
+            print(f"      {exc}", file=sys.stderr)
     kept: List[Dict[str, Any]] = []
     for col in cols:
         keys = {
@@ -448,6 +452,7 @@ def _secret_keys(*, need_ssh: bool, need_snmp: bool, need_new_password: bool) ->
 def _col_secrets_ready(
     col: dict, *, need_ssh: bool, need_snmp: bool, need_new_password: bool
 ) -> bool:
+    """Ready means the prompt can be skipped. Priv is not part of this check, so a missing priv is not asked when user and auth are already set."""
     if need_ssh and not (
         _field_filled(col, "ssh_username") and _field_filled(col, "ssh_password")
     ):
@@ -538,6 +543,7 @@ def _copy_secret_fields(
     need_new_password: bool,
     skip: Optional[set] = None,
 ) -> None:
+    """Copy a prompted global secret onto every row. Skip is only the fields every row already had."""
     skip = skip or set()
     for key in _secret_keys(
         need_ssh=need_ssh, need_snmp=need_snmp, need_new_password=need_new_password
@@ -580,8 +586,8 @@ def prepare_collectives(
 ) -> List[Dict[str, Any]]:
     """SSH/SNMP/new-password: skip prompts when every collective already has the field.
 
-    File values win first (per-collective, else top-level). Scope prompt only
-    if 2+ collectives still have gaps. One collective fills that row, not Global.
+    A global fill is skipped for a field only when every row already has it.
+    If one row is empty, the typed global value is copied onto every row, including rows that already had their own value.
     """
     had_local_new = any((c.get("ssh_password_new") or "").strip() for c in collectives)
     global_new = (creds.get("ssh_password_new") or "").strip()

@@ -2,14 +2,13 @@
 
 Reached via ``python app/main.py 4`` or launcher menu option 4.
 
-Uses current ssh_password to log in. Sets users/0/encrypted-password
-(openssl passwd -6 / SHA-512 crypt — AppGate GUI/cz-configd default)
-and users/0/nopasswd false, then SSH-verifies the new password.
-Does not rewrite credentials.json so other tools keep using ssh_password
-until the operator updates the file.
+Uses current ssh_password to log in. Turns off passwordless sudo, then sets
+the new hash. credentials.json is updated only when every selected box accepts it.
 """
+import json
 import os
 import sys
+import tempfile
 import time
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -143,6 +142,71 @@ def _emit_report(
     write_json_report("cz-password", report)
 
 
+def _save_passwords(creds: dict, collectives: list, selected: List[Target]) -> None:
+    """Write only after every selected box accepts. The file match is the index field, so a row without one is left unchanged."""
+    applied = [t for t in selected if t.status == "ok"]
+    if not applied or any(t.status == "failed" for t in selected):
+        print(
+            "      credentials.json left unchanged. Not every box took the new password.",
+            file=sys.stderr,
+        )
+        return
+    try:
+        with open(CREDENTIALS_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"      Could not update credentials.json: {exc}", file=sys.stderr)
+        return
+    if not isinstance(data, dict):
+        return
+    by_index = {int(c["index"]): c for c in collectives}
+    touched = {int(t.collective) for t in applied}
+    rows = data.get("collectives")
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                idx = int(row.get("index") or 0)
+            except (TypeError, ValueError):
+                continue
+            col = by_index.get(idx)
+            if col is None or idx not in touched:
+                continue
+            row["ssh_password"] = col.get("ssh_password_new") or ""
+            row["ssh_password_new"] = ""
+    news = {
+        (by_index[i].get("ssh_password_new") or "")
+        for i in touched
+        if i in by_index
+    }
+    if len(news) == 1 and not any(
+        isinstance(r, dict) and r.get("ssh_password") and int(r.get("index") or 0) not in touched
+        for r in (rows or [])
+    ):
+        data["ssh_password"] = next(iter(news))
+        data["ssh_password_new"] = ""
+    text = json.dumps(data, indent=2) + "\n"
+    try:
+        mode = os.stat(CREDENTIALS_PATH).st_mode & 0o777
+    except OSError:
+        mode = 0o600
+    fd, tmp = tempfile.mkstemp(prefix="credentials.", suffix=".tmp", dir=os.path.dirname(CREDENTIALS_PATH))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, CREDENTIALS_PATH)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        print("      Could not update credentials.json.", file=sys.stderr)
+        return
+    print("      credentials.json updated with the new SSH password.", file=sys.stderr)
+
+
 def main() -> None:
     warn_insecure_transport()
     creds = load_credentials(CREDENTIALS_PATH)
@@ -175,16 +239,15 @@ def main() -> None:
                     target.status = "pending"
                     target.error = ""
             live_started = datetime.now(timezone.utc).isoformat()
-            _apply(selected, collectives, dry_run=False)
-            _emit_report(
-                collectives, selected, dry_run=False, started_at=live_started
-            )
+            try:
+                _apply(selected, collectives, dry_run=False)
+            finally:
+                _emit_report(
+                    collectives, selected, dry_run=False, started_at=live_started
+                )
 
-    print(
-        "      Note: credentials.json was not updated. "
-        "Set ssh_password to the new value before other tools.",
-        file=sys.stderr,
-    )
+    if any(t.status == "ok" for t in selected):
+        _save_passwords(creds, collectives, selected)
     if any(t.status == "failed" for t in selected):
         sys.exit(1)
 

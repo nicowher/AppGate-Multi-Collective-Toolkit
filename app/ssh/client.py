@@ -52,6 +52,14 @@ _SSH_DISABLED = {
 }
 
 
+def _close_channel(stdout) -> None:
+    """The session stays open. Each command still needs its channel released."""
+    try:
+        stdout.channel.close()
+    except Exception:
+        pass
+
+
 def _exit_status(stdout, wait: int) -> int:
     """recv_exit_status() waits forever. Bound it to the same SSH timeout."""
     if not stdout.channel.status_event.wait(wait):
@@ -62,6 +70,7 @@ def _exit_status(stdout, wait: int) -> int:
 from config import (
     DEBUG,
     LAB_MODE,
+    SSH_AUTH_FAIL_CAP,
     SSH_AUTH_TIMEOUT,
     SSH_KNOWN_HOSTS,
     SSH_KNOWN_HOSTS_MODE,
@@ -403,6 +412,8 @@ class SSHSession:
                 return result
             self._log(f"{self._tag(addr)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
             if self._ssh_fail_kind in ("auth", "keyonly", "hostkey"):
+                if self._ssh_fail_kind == "auth":
+                    _note_auth_fail()
                 auth_hit = addr
                 self._pin(target, addr)
                 break
@@ -410,6 +421,7 @@ class SSHSession:
         if (
             prompt_password
             and self._ssh_fail_kind == "auth"
+            and _auth_retry_allowed()
             and threading.current_thread() is threading.main_thread()
         ):
             new_pw = prompt_retry_ssh_password(label or last)
@@ -429,11 +441,15 @@ class SSHSession:
         try:
             _stdin, stdout, _stderr = client.exec_command("sudo -n true", timeout=10)
             stdout.channel.settimeout(10)
-            return _exit_status(stdout, 10) == 0
+            try:
+                return _exit_status(stdout, 10) == 0
+            finally:
+                _close_channel(stdout)
         except (OSError, TimeoutError, socket.timeout):
             return False
 
     def _sudo(self, client: paramiko.SSHClient, command: str, check: bool = True) -> str:
+        """Always writes the SSH password. The script path probes sudo -n first so a NOPASSWD window does not leave the password on stdin."""
         return self._run(client, f"sudo -S {command}", sudo=True, check=check)
 
     def _sudo_script(
@@ -474,6 +490,8 @@ class SSHSession:
                 file=sys.stderr,
             )
             return (-1, f"timeout:{type(exc).__name__}")
+        finally:
+            _close_channel(stdout)
         # if DEBUG:
         #     print(f"DEBUG sudo_script rc={exit_status} out={(output or '')[:80]!r}", file=sys.stderr)
         if DEBUG:
@@ -493,6 +511,7 @@ class SSHSession:
         check: bool = True,
         timeout: Optional[int] = None,
     ) -> str:
+        """Exit 1 is not a failure: some appliance helpers use it for a skipped step. Timeout is a sentinel so an empty read is not success."""
         wait = SSH_TIMEOUT if timeout is None else timeout
         stdin, stdout, stderr = client.exec_command(command, timeout=wait)
         stdout.channel.settimeout(wait)
@@ -507,6 +526,8 @@ class SSHSession:
         except (socket.timeout, TimeoutError, OSError) as exc:
             print(f"      SSH command timed out or failed ({type(exc).__name__}): {exc}", file=sys.stderr)
             return "timeout"
+        finally:
+            _close_channel(stdout)
         if check and exit_status not in (0, 1):
             print(
                 f"      SSH command failed (exit {exit_status}): "
@@ -573,7 +594,11 @@ def install_oob_host_keys(collectives) -> None:
         _oob_known_hosts = path
     parent = os.path.dirname(path)
     if parent:
-        os.makedirs(parent, exist_ok=True)
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+            try:
+                os.chmod(parent, 0o700)
+            except OSError:
+                pass
     existing = ""
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as fh:
@@ -617,6 +642,19 @@ def ssh_password_for(target, col: dict) -> str:
     return col.get("ssh_password") or ""
 
 
+_auth_failures = 0
+
+
+def _auth_retry_allowed() -> bool:
+    """A wrong password must fail before SSHBRUTE drops this host."""
+    return _auth_failures < SSH_AUTH_FAIL_CAP
+
+
+def _note_auth_fail() -> None:
+    global _auth_failures
+    _auth_failures += 1
+
+
 def prompt_retry_ssh_password(label: str) -> str:
     """Wrong password on a reachable box. Main thread only. Empty = skip host."""
     # print(f"DEBUG ssh: password retry prompt for {label}")
@@ -626,6 +664,8 @@ def prompt_retry_ssh_password(label: str) -> str:
     if ans not in YES_ANSWERS:
         return ""
     while True:
+        if not sys.stdin.isatty():
+            raise RuntimeError("Password prompt requires a terminal")
         pw = getpass(f"      SSH Password ({label}): ").strip()
         if not pw:
             skip = input("      Empty password. Skip this host? [y/N]: ").strip().lower()
@@ -671,6 +711,7 @@ def run_ssh_batch(
         sshish = "(auth)" in msg and "(keyonly)" not in msg
         if (
             sshish
+            and _auth_retry_allowed()
             and threading.current_thread() is threading.main_thread()
         ):
             new_pw = prompt_retry_ssh_password(label)

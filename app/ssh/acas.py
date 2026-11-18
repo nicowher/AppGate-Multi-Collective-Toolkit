@@ -177,6 +177,7 @@ echo STEP_UNHARDEN_DONE
 """
 
     def _harden_script(self) -> str:
+        """Iptables restore runs before the sudoers drop-in is removed. A restore failure exits first, so NOPASSWD can remain."""
         user = (self.ssh_user or "").strip() or "cz"
         drop = shlex.quote(ACAS_SUDOERS_DROPIN)
         banner = shlex.quote(ACAS_BANNER_FILE)

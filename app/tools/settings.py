@@ -1,12 +1,14 @@
 """Menu C: edit common knobs in config.py (DEBUG, LAB_MODE, SSH timeouts).
 
 Why a dedicated editor: operators on air-gap hosts should not hand-edit
-Python. LAB_MODE derived knobs (SSH_STRICT_HOST_KEY, Kul print,
-SNMP min passphrase) are recomputed on save so they cannot drift.
+Python. LAB_MODE derived knobs (SSH host-key check and SNMP min passphrase)
+are recomputed on save so they cannot drift. The Kul flag is still set, but
+the summary does not print those keys.
 """
 import os
 import re
 import sys
+import tempfile
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _APP_DIR not in sys.path:
@@ -148,10 +150,24 @@ def main() -> bool:
                 text = fh.read()
             for name, _t, _h in EDITABLE:
                 text = _write_assignment(text, name, values[name])
-            tmp_path = CONFIG_PATH + ".tmp"
-            with open(tmp_path, "w", encoding="utf-8", newline="\n") as fh:
-                fh.write(text)
-            os.replace(tmp_path, CONFIG_PATH)
+            try:
+                mode = os.stat(CONFIG_PATH).st_mode & 0o777
+            except OSError:
+                mode = 0o644
+            fd, tmp_path = tempfile.mkstemp(
+                prefix="config.py.", suffix=".tmp", dir=os.path.dirname(CONFIG_PATH)
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                    fh.write(text)
+                os.chmod(tmp_path, mode)
+                os.replace(tmp_path, CONFIG_PATH)
+            except Exception:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+                raise
             # print(f"DEBUG settings: wrote {CONFIG_PATH}")
             for name, _t, _h in EDITABLE:
                 _apply_runtime(name, values[name])

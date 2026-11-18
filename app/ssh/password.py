@@ -43,6 +43,7 @@ class CzPassword(SSHSession):
         return self._run_script(host, new_password)
 
     def _script(self) -> str:
+        """Turn off passwordless sudo before the new hash. A later failure then keeps the old password."""
         return r"""
 IFS= read -r PW || exit 1
 echo STEP_HASH_START
@@ -51,14 +52,14 @@ HASH=$(printf '%s\n' "$PW" | openssl passwd -6 -stdin) || {
   exit 1
 }
 echo STEP_HASH_OK
-echo STEP_CZCONFIG_PASSWORD
-cz-config set users/0/encrypted-password "$HASH" || {
-  echo STEP_CZCONFIG_PASSWORD_FAIL
-  exit 1
-}
 echo STEP_CZCONFIG_NOPASSWD
 cz-config set -j users/0/nopasswd false || {
   echo STEP_CZCONFIG_NOPASSWD_FAIL
+  exit 1
+}
+echo STEP_CZCONFIG_PASSWORD
+cz-config set users/0/encrypted-password "$HASH" || {
+  echo STEP_CZCONFIG_PASSWORD_FAIL
   exit 1
 }
 echo STEP_PASSWORD_OK

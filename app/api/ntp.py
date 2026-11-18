@@ -91,6 +91,27 @@ class NtpMixin:
             )
         return [h for h in (self._ntp_hostname(x) for x in servers) if h]
 
+    def peek_ntp_state(self, appliance_id: str) -> List[Dict[str, Any]]:
+        """Hostname plus key slot, not the key. Dry run must see a key change."""
+        appliance = self._get_appliance(appliance_id)
+        out = []
+        for row in self._ntp_list_from_appliance(appliance):
+            if not isinstance(row, dict):
+                continue
+            host = self._ntp_hostname(row)
+            if not host:
+                continue
+            key_no = row.get("keyNo")
+            out.append(
+                {
+                    "hostname": host.lower(),
+                    "keyType": str(row.get("keyType") or ""),
+                    "keyNo": "" if key_no in ("", None) else str(key_no),
+                    "has_key": bool(row.get("key")),
+                }
+            )
+        return out
+
     def update_ntp_servers(
         self,
         appliance_id: str,
@@ -120,10 +141,21 @@ class NtpMixin:
             for item in desired:
                 host = item["hostname"].lower()
                 if host in by_host and isinstance(by_host[host], dict):
+                    # A hostname-only row means the old key is no longer wanted.
+                    if not any(k in item for k in ("key", "keyType", "keyNo")):
+                        for k in ("key", "keyType", "keyNo"):
+                            by_host[host].pop(k, None)
                     by_host[host].update(item)
                 else:
                     by_host[host] = item
             merged = list(by_host.values())
+        for row in merged:
+            if not isinstance(row, dict):
+                continue
+            raw = str(row.get("keyType") or "").strip()
+            compact = raw.replace("-", "").upper()
+            if compact in NTP_WEAK_KEY_TYPES:
+                raise ValueError(f"NTP keyType {raw} is not allowed")
         appliance.pop("ntpServers", None)
         appliance.pop("ntpServer", None)
         ntp_obj = appliance.get("ntp")

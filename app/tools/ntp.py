@@ -95,18 +95,31 @@ def _host_list(servers: list) -> str:
 
 
 def _ntpdata_ok(output: str, servers: list) -> bool:
-    """PASS if chronyc output contains a configured hostname or IP."""
-    text = (output or "").lower()
-    if not text.strip() or "cannot talk" in text or "not authorised" in text:
+    """A hostname echo is not sync. Require a normal leap and a real stratum."""
+    text = output or ""
+    low = text.lower()
+    if not low.strip() or "cannot talk" in low or "not authorised" in low:
+        return False
+    if "leap status" not in low or "normal" not in low:
+        return False
+    stratum = None
+    for line in text.splitlines():
+        if "stratum" not in line.lower():
+            continue
+        digits = "".join(ch if ch.isdigit() else " " for ch in line).split()
+        if digits:
+            stratum = int(digits[0])
+            break
+    if stratum is None or not 1 <= stratum <= 15:
         return False
     names = []
     for s in servers:
         host = str((s or {}).get("hostname") or "").strip()
         if host:
             names.append(host.lower())
-    if not names:
-        return "remote address" in text or "leap status" in text
-    return any(n in text for n in names)
+    if names and not any(n in low for n in names):
+        return False
+    return True
 
 
 def _apply(
@@ -127,18 +140,31 @@ def _apply(
         servers = col.get("ntp_servers") or []
         if dry_run:
             client = clients.get(int(target.collective))
-            current: List[str] = []
+            current_rows = []
             if client is not None:
                 try:
-                    current = client.peek_ntp(target.appliance_id)
+                    current_rows = client.peek_ntp_state(target.appliance_id)
                 except Exception:
-                    current = []
-            desired_hosts = [s.get("hostname") for s in servers if s.get("hostname")]
-            # peek_ntp is hostnames only — overwrite may still change keys, so always preview it.
+                    current_rows = []
+            by_host = {r["hostname"]: r for r in current_rows}
+            desired_rows = []
+            for s in servers:
+                host = str(s.get("hostname") or "").strip().lower()
+                if not host:
+                    continue
+                key_no = s.get("keyNo")
+                desired_rows.append(
+                    {
+                        "hostname": host,
+                        "keyType": str(s.get("keyType") or ""),
+                        "keyNo": "" if key_no in ("", None) else str(key_no),
+                        "has_key": bool(s.get("key")),
+                    }
+                )
             unchanged = (
                 not overwrite
-                and bool(desired_hosts)
-                and all(h in current for h in desired_hosts)
+                and bool(desired_rows)
+                and all(by_host.get(r["hostname"]) == r for r in desired_rows)
             )
             if unchanged:
                 target.status = "unchanged"
@@ -308,16 +334,18 @@ def main() -> None:
                     target.status = "pending"
                     target.error = ""
             live_started = datetime.now(timezone.utc).isoformat()
-            _apply(
-                selected, clients, collectives, overwrite=overwrite, dry_run=False
-            )
-            _emit_report(
-                collectives,
-                selected,
-                overwrite=overwrite,
-                dry_run=False,
-                started_at=live_started,
-            )
+            try:
+                _apply(
+                    selected, clients, collectives, overwrite=overwrite, dry_run=False
+                )
+            finally:
+                _emit_report(
+                    collectives,
+                    selected,
+                    overwrite=overwrite,
+                    dry_run=False,
+                    started_at=live_started,
+                )
 
     if any(t.status == "failed" for t in selected):
         sys.exit(1)

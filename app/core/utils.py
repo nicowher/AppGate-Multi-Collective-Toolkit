@@ -78,9 +78,9 @@ def halt(code: str, message: str, *hints: str) -> None:
 def expand_exclude_tokens(raw: str) -> set:
     """Comma-separated exclude tokens. ``1-10,12-20`` expands to those row numbers.
 
-    Only digit-digit ranges expand so a UUID or hostname with hyphens stays a
-    single token. The width check is last minus first, so a span of
-    APPLIANCE_LIST_MAX is still accepted.
+    A token with a digit on only one side of a hyphen is rejected, so a name
+    like that cannot be excluded. Both sides numeric expands. The width check
+    is last minus first, so a span of APPLIANCE_LIST_MAX is still accepted.
     """
     tokens = set()
     for part in raw.split(","):
@@ -175,7 +175,7 @@ def _extract_wheel(wheel_path: str, dest: str) -> None:
 
 
 def ensure_vendor_site() -> None:
-    """Put unpacked wheels on sys.path before imports. Extract only if site is empty so a bad wheel is not re-read every start."""
+    """Put unpacked wheels on sys.path before imports. An empty site extracts every wheel here with no hash check. Menu U is the path that uses the pin."""
     if os.path.isdir(VENDOR_WHEELS) and (
         not os.path.isdir(VENDOR_SITE) or not any(os.scandir(VENDOR_SITE))
     ):
@@ -352,6 +352,8 @@ def prompt_until_valid(
         if not required:
             return ""
         if sensitive:
+            if not sys.stdin.isatty():
+                raise RuntimeError("Password prompt requires a terminal")
             value = getpass(f"{prompt}: ").strip()
             if value:
                 confirm = getpass(f"{prompt} (confirm): ").strip()
@@ -433,14 +435,18 @@ def write_json_report(prefix: str, payload: Dict[str, Any]) -> None:
     """
     text = json.dumps(payload, indent=2)
     if DEBUG:
-        print("\n----- BEGIN RUN REPORT -----")
-        print(text)
-        print("----- END RUN REPORT -----")
+        print("\n----- BEGIN RUN REPORT -----", file=sys.stderr)
+        print(text, file=sys.stderr)
+        print("----- END RUN REPORT -----", file=sys.stderr)
     if not WRITE_RUN_REPORT:
         return
     reports_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME)
     try:
         os.makedirs(reports_dir, mode=0o700, exist_ok=True)
+        try:
+            os.chmod(reports_dir, 0o700)
+        except OSError:
+            pass
         path = os.path.join(reports_dir, f"{prefix}-{_utc_stamp()}.json")
         _write_private(path, text + "\n")
         print(f"      Report written: {path}", file=sys.stderr)
@@ -497,6 +503,11 @@ def begin_replaced_run() -> str:
     stamp = _utc_stamp()
     _replaced_run_dir = os.path.join(REPO_ROOT, REPORTS_DIRNAME, "replaced", stamp)
     os.makedirs(_replaced_run_dir, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(os.path.dirname(_replaced_run_dir), 0o700)
+        os.chmod(_replaced_run_dir, 0o700)
+    except OSError:
+        pass
     return _replaced_run_dir
 
 

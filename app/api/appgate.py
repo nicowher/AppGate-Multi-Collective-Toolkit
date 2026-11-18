@@ -106,6 +106,7 @@ ALLOW_SOURCES_PARENTS = tuple(sorted(set(ALLOW_SOURCES_SLOT_PARENT.values())))
 
 
 def _merge_self_ips(nic_ips: List[str], status: Dict[str, Any]) -> List[str]:
+    """Status addresses are not always on the NIC list. Exclude-self misses them if they are dropped."""
     out: List[str] = []
     for ip in list(nic_ips) + status_self_ips(status):
         text = str(ip or "").strip()
@@ -177,6 +178,7 @@ def _redact_appliance_for_debug(obj: Any) -> Any:
 
 
 def _site_uuid_reshape(before: Any, after: Any) -> bool:
+    """PUT must keep the same site UUID. Dropping the object is a different edit and is refused."""
     if not isinstance(before, dict):
         return False
     site_id = before.get("id") or before.get("siteId")
@@ -207,6 +209,7 @@ def _changed_paths(before: Any, after: Any, prefix: str = "") -> List[str]:
 
 
 def _path_allowed(item: str, allowed: tuple) -> bool:
+    """A nested edit has to stay inside the allowed slice or a portal field can ride along."""
     path = item.lstrip("+-")
     for rule in allowed:
         if path == rule or path.startswith(rule + "."):
@@ -305,6 +308,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     headers={"Accept": accept},
                     verify=self._verify(),
                     timeout=API_TIMEOUT,
+                    allow_redirects=False,
                 )
             except requests.exceptions.RequestException as exc:
                 last = str(exc)
@@ -490,6 +494,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     allow_redirects=False,
                 )
                 if DEBUG:
+                    # print(f"DEBUG login retry status={response.status_code}")
                     print(
                         f"      DEBUG login retry status={response.status_code} "
                         f"accept={self.headers.get('Accept')!r} "
@@ -588,6 +593,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 params={"range": f"{start}-{end}"},
                 verify=self._verify(),
                 timeout=API_TIMEOUT,
+                allow_redirects=False,
             )
             if response.status_code not in (200, 206):
                 response.raise_for_status()
@@ -638,6 +644,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             headers=self.headers,
             verify=self._verify(),
             timeout=API_TIMEOUT,
+            allow_redirects=False,
         )
         response.raise_for_status()
         try:
@@ -747,6 +754,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             headers=self.headers,
             verify=self._verify(),
             timeout=API_TIMEOUT,
+            allow_redirects=False,
         )
         response.raise_for_status()
         payload = response.json()
@@ -811,7 +819,12 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             raise AppliancePutError(f"Refusing {what} PUT; appliance id missing")
         url = f"{self.base_url}/appliances/{aid}"
         put_response = requests.put(
-            url, headers=self.headers, json=body, verify=self._verify(), timeout=API_TIMEOUT
+            url,
+            headers=self.headers,
+            json=body,
+            verify=self._verify(),
+            timeout=API_TIMEOUT,
+            allow_redirects=False,
         )
         if put_response.status_code != 200:
             if DEBUG:

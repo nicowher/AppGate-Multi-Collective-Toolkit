@@ -49,11 +49,13 @@ class AllowSourcesMixin:
         return out
 
     def peek_allow_sources(self, appliance_id: str) -> List[Dict[str, Any]]:
+        """Preview must see every parent. A hostname-only peek would hide a key or nic change."""
         appliance = self._get_appliance(appliance_id)
         return self._collect_allow_sources(appliance)
 
     @staticmethod
     def _collect_allow_sources(appliance: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Exclude-self has to see every slot, or a /32 on one parent is left in place."""
         found: List[Dict[str, Any]] = []
         seen = set()
         for parent in ALLOW_SOURCES_PARENTS:

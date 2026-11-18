@@ -251,8 +251,9 @@ def _block_ips(block: Dict[str, Any]) -> List[str]:
 def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, List[str]]:
     """Return (this appliance's FQDN, its interface/NIC IPs).
 
-    Hostname order: appliance hostname, admin, client. Peer hostname is the
-    other box and is not used. IPs: RFC1918 IPv4, public IPv4, then IPv6.
+    Hostname order: appliance hostname, admin, client. The peer hostname is the
+    other box and is not used. Addresses on that same peer interface are still
+    added, so SSH can try the other box. IPs: RFC1918 IPv4, public IPv4, then IPv6.
     """
     names: List[str] = []
     ips: List[str] = []
@@ -294,6 +295,7 @@ def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, List[str]]:
 
 
 def is_selectable(health: str, skip_status: tuple) -> bool:
+    """Skip list is exact. A suffix match would treat a down box as selectable."""
     return health.strip().lower() not in skip_status
 
 
@@ -336,16 +338,18 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
         print(
             f"     {i:2d}  {t.collective:<10}  {t.hostname[:INVENTORY_NAME_WIDTH]:<{INVENTORY_NAME_WIDTH}}  {host:<22}  {funcs:<22}  {health}"
         )
-    raw = input(
-        "\n      Exclude (e.g. 1,3 or 1-10,12-20 or 1.hostname; Enter for all): "
-    ).strip()
-    if not raw:
-        return list(targets)
-    try:
-        tokens = expand_exclude_tokens(raw)
-    except ValueError as exc:
-        print(f"      {exc}", file=sys.stderr)
-        return prompt_exclusions(targets)
+    while True:
+        raw = input(
+            "\n      Exclude (e.g. 1,3 or 1-10,12-20 or 1.hostname; Enter for all): "
+        ).strip()
+        if not raw:
+            return list(targets)
+        try:
+            tokens = expand_exclude_tokens(raw)
+            break
+        except ValueError as exc:
+            # print("DEBUG exclude: incomplete range")
+            print(f"      {exc}", file=sys.stderr)
     host_counts = Counter(t.hostname.lower() for t in targets)
     kept = []
     for i, t in enumerate(targets, 1):

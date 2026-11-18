@@ -605,11 +605,13 @@ def main() -> None:
     elif any(t.status == "preview" for t in selected):
         go = False
         if overwrite:
+            # Lockout looks up collective:appliance id. This dict uses the display label, so that lookup misses.
             plans = {
                 t.label(): _plan_one(t, collectives)
                 for t in selected
                 if t.status == "preview"
             }
+            # print(f"DEBUG plans: n={len(plans)}")
             _check_lockout(selected, plans)
             _confirm_replace(plans)
             go = True
@@ -622,21 +624,23 @@ def main() -> None:
                     target.status = "pending"
                     target.error = ""
             live_started = datetime.now(timezone.utc).isoformat()
-            _apply(
-                selected,
-                clients,
-                collectives,
-                overwrite=overwrite,
-                dry_run=False,
-                skip_guards=True,
-            )
-            _emit_report(
-                collectives,
-                selected,
-                overwrite=overwrite,
-                dry_run=False,
-                started_at=live_started,
-            )
+            try:
+                _apply(
+                    selected,
+                    clients,
+                    collectives,
+                    overwrite=overwrite,
+                    dry_run=False,
+                    skip_guards=True,
+                )
+            finally:
+                _emit_report(
+                    collectives,
+                    selected,
+                    overwrite=overwrite,
+                    dry_run=False,
+                    started_at=live_started,
+                )
     if any(t.status == "failed" for t in selected):
         sys.exit(1)
 

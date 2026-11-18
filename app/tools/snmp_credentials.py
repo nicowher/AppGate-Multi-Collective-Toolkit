@@ -45,7 +45,6 @@ from config import (
     DEBUG,
     DRY_RUN,
     SKIP_CREDENTIAL_WALK,
-    PRINT_ESXI_KEYS,
     ENGINE_ID_TYPE,
     ETH_IFACE,
     SNMP_AUTH_PROTOCOL,
@@ -486,8 +485,6 @@ def _print_summary(
         host = target.ssh_fqdn or target.ssh_ip
         tail = f" {extra}" if extra else ""
         print(f"  [{state:<7}] {target.label():<32} {host:<22}{tail}")
-        if PRINT_ESXI_KEYS and target.auth_hash and target.status in ("ok", "preview"):
-            print(f"           ESXi: {user}/{target.auth_hash}/{target.priv_hash}/priv")
     print("=" * SUMMARY_WIDTH)
 
 
@@ -511,12 +508,7 @@ def _build_run_report(
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "collectives": [
-            {
-                "index": int(c["index"]),
-                "fqdn": c.get("fqdn", ""),
-                "agip": c.get("agip", ""),
-                "api_username": c["api_username"],
-            }
+            {"index": int(c["index"]), "api_username": c["api_username"]}
             for c in collectives
         ],
         "api_version": APPGATE_API_VERSION,
@@ -542,13 +534,7 @@ def _build_run_report(
     for t in selected:
         entry: Dict[str, Any] = {
             "collective": t.collective,
-            "label": t.label(),
             "appliance_id": t.appliance_id,
-            "hostname": t.hostname,
-            "ssh_fqdn": t.ssh_fqdn,
-            "ssh_ip": t.ssh_ip,
-            "walk_endpoints": t.walk_endpoints(),
-            "ssh_endpoints": t.ssh_endpoints(),
             "functions": t.functions,
             "health": t.health,
             "engine_id": t.engine_id if DEBUG else "",

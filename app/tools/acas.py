@@ -233,10 +233,12 @@ def main() -> None:
                     target.status = "pending"
                     target.error = ""
             live_started = datetime.now(timezone.utc).isoformat()
-            _apply(selected, collectives, mode, dry_run=False)
-            _emit_report(
-                mode, collectives, selected, dry_run=False, started_at=live_started
-            )
+            try:
+                _apply(selected, collectives, mode, dry_run=False)
+            finally:
+                _emit_report(
+                    mode, collectives, selected, dry_run=False, started_at=live_started
+                )
 
     if any(t.status == "failed" for t in selected):
         sys.exit(1)

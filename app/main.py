@@ -61,6 +61,11 @@ def _in_stdin_wait(frame) -> bool:
     return False
 
 
+def _signal_exit(_signum, _frame) -> None:
+    """Leave the handler without calling input(). The tool runner still catches this and asks, so a kill can wait on that prompt."""
+    raise KeyboardInterrupt
+
+
 def _sigint_confirm_cancel(signum, frame) -> None:
     """Ask before cancelling. Never nest input() — readline cannot re-enter."""
     global _sigint_asking
@@ -125,8 +130,15 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
     """
     old_argv = sys.argv[:]
     prev_sigint = signal.getsignal(signal.SIGINT)
+    exit_sigs = []
+    for name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            exit_sigs.append((sig, signal.getsignal(sig)))
     try:
         signal.signal(signal.SIGINT, _sigint_confirm_cancel)
+        for sig, _prev in exit_sigs:
+            signal.signal(sig, _signal_exit)
         sys.argv = [old_argv[0]] + rest
         # print(f"DEBUG cli: choice={choice} argv={sys.argv!r}")
         if DEBUG:
@@ -188,6 +200,8 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
         return 1
     finally:
         signal.signal(signal.SIGINT, prev_sigint)
+        for sig, prev in exit_sigs:
+            signal.signal(sig, prev)
         sys.argv = old_argv
 
 

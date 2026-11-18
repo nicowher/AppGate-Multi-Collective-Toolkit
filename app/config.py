@@ -126,6 +126,8 @@ SSH_KNOWN_HOSTS = ""
 SSH_KNOWN_HOSTS_MODE = 0o600
 # Parallel SSH sessions (engine-ID pass and later USM purge pass).
 SSH_CONCURRENCY = 5
+# Stay under the appliance SSHBRUTE hit count (10 / 300s) so a wrong password fails before lockout.
+SSH_AUTH_FAIL_CAP = 8
 # Parallel SNMP walks (menu 3 inventory + credentials step 8). One validator per worker.
 WALK_CONCURRENCY = 5
 # Lab troubleshooting: full JSON dump to the console at end of run (no passwords/tokens).
@@ -362,10 +364,10 @@ VENDOR_PACKAGES = ("requests", "paramiko", "pysnmp")
 # Lab / production transport switch (keep at the bottom)
 # ============================================================================
 # LAB_MODE only (DEBUG stays independent).
-# True: skip TLS verify, accept any SSH host key, print ESXi Kul, SNMP pw min 8, skip STIG cz pw.
-# False: pin Controller CA, reject unknown SSH host keys, SNMP pw min 15, STIG cz pw.
+# True: accept any SSH host key, SNMP pw min 8, skip STIG cz pw. Does not skip the Controller CA.
+# False: reject unknown SSH host keys, SNMP pw min 15, STIG cz pw.
 def insecure_api_enabled() -> bool:
-    """True only in a git clone with INSECURE_API set. Release zips cannot skip the CA file."""
+    """True when INSECURE_API is set and app/vendor/RELEASE is absent. A release zip has that file and cannot skip the CA."""
     marker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor", "RELEASE")
     if os.path.isfile(marker):
         return False

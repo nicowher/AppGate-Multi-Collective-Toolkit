@@ -54,6 +54,7 @@ def paint(text: str, *codes: str, stream=None) -> str:
 
 
 def ok(text: str = "OK", stream=None) -> str:
+    """Color only the status word so a log scrape can still match it."""
     return paint(text, BOLD, GREEN, stream=stream)
 
 
