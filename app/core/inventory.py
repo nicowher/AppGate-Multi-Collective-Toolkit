@@ -6,8 +6,9 @@ shared by SNMP credentials and walk.
 
 
   Target.label()          → 1.hostname so two sites can share a hostname safely
-  Target.ssh_endpoints()  → pinned working IP first (ssh_ok_host), then FQDN,
-                            public IPv4, IPv6). Credentials agip only if this box
+    Target.ssh_endpoints()  → pinned working IP first (ssh_ok_host), then FQDN,
+                            then private IPv4 and IPv6 unique-local, then public
+                            addresses of either family. Credentials agip only if this box
                             is the login Controller. Never peer-interface hostname
                             (that is another appliance).
   Target.walk_endpoints() → ssh_ok_host only after SSH; else same as ssh_endpoints().
@@ -16,10 +17,12 @@ Health from GET /appliances/status (6.7 labels). error is still configurable;
 offline/not active/warning are skipped so we do not push to unreachable boxes.
 """
 import ipaddress
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.utils import format_scoped_ip
 from config import (
     APPLIANCE_FUNCTION_NAMES,
     HEALTH_STATUS_KEYS,
@@ -64,7 +67,7 @@ class Target:
         )
 
     def ssh_endpoints(self) -> List[str]:
-        """This appliance's FQDN, then its IPs (private v4, public v4, v6).
+        """This appliance's FQDN, then private addresses, then public addresses.
 
         Credentials agip is only appended when this box is the login Controller.
         Trying every Controller's shared agip used to SSH the wrong appliance.
@@ -160,7 +163,7 @@ def appliance_health(appliance: Dict[str, Any], stats: Dict[str, Any]) -> str:
 
 
 def _normalize_health_label(raw: str) -> str:
-    """Normalize API strings to short lowercase labels for the table."""
+    """Only the full label matches. A prefix of ok would leave a down box in the apply set."""
     text = raw.strip().lower().replace("_", " ")
     aliases = {
         "healthy": "healthy",
@@ -182,34 +185,39 @@ def _normalize_health_label(raw: str) -> str:
     }
     if text in aliases:
         return aliases[text]
-    for key, label in aliases.items():
-        if key == text or text.startswith(key + " ") or text.endswith(" " + key):
-            return label
+    # print(f"DEBUG health: raw={raw!r} label={text!r}")
     return text[:24]
 
 
+def _canon_ip(raw: str) -> str:
+    """Compare peer and NIC addresses as the same IP. A link-local zone stays, or two scopes look like one address."""
+    return format_scoped_ip(raw)
+
+
 def _is_ip(value: str) -> bool:
-    text = value.strip()
-    if text.startswith("[") and text.endswith("]"):
-        text = text[1:-1]
+    text = format_scoped_ip(value)
+    host = text.split("%", 1)[0]
     try:
-        ipaddress.ip_address(text)
+        ipaddress.ip_address(host)
         return True
     except ValueError:
         return False
 
 
 def _ip_rank(ip: str) -> int:
+    """Private IPv4 and IPv6 unique-local before public addresses. Link-local is last so a scoped address is not preferred."""
     text = ip.strip()
     if text.startswith("[") and text.endswith("]"):
         text = text[1:-1]
     try:
-        addr = ipaddress.ip_address(text)
+        addr = ipaddress.ip_address(text.split("%", 1)[0])
     except ValueError:
         return 9
-    if addr.version == 4:
-        return 0 if addr.is_private else 1
-    return 2
+    if addr.is_link_local:
+        return 2
+    if addr.is_private:
+        return 0
+    return 1
 
 
 def _nic_addresses(nic: Dict[str, Any]) -> List[str]:
@@ -252,14 +260,16 @@ def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, List[str]]:
     """Return (this appliance's FQDN, its interface/NIC IPs).
 
     Hostname order: appliance hostname, admin, client. The peer hostname is the
-    other box and is not used. Addresses on that same peer interface are still
-    added, so SSH can try the other box. IPs: RFC1918 IPv4, public IPv4, then IPv6.
+    other box and is not used. A peer address is kept only when this box already
+    has that address on an admin, client, or NIC entry. Private IPv4 and IPv6
+    unique-local are tried before public addresses of either family. Link-local
+    is last. A link-local zone is kept.
     """
     names: List[str] = []
     ips: List[str] = []
 
     def add_ip(raw: str) -> None:
-        ip = (raw or "").strip()
+        ip = format_scoped_ip(raw)
         if ip and _is_ip(ip) and ip not in ips:
             ips.append(ip)
 
@@ -275,19 +285,23 @@ def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, List[str]]:
 
     for key in ("hostname", "applianceHostname"):
         add_name(appliance.get(key) or "")
+    own = set()
     for block_name in ("adminInterface", "clientInterface"):
         block = appliance.get(block_name) or {}
         if isinstance(block, dict):
             add_name(block.get("hostname") or "")
             for ip in _block_ips(block):
                 add_ip(ip)
-    peer = appliance.get("peerInterface") or {}
-    if isinstance(peer, dict):
-        for ip in _block_ips(peer):
-            add_ip(ip)
+                own.add(_canon_ip(ip))
     for nic in appliance.get("networking", {}).get("nics", []) or []:
         if isinstance(nic, dict):
             for ip in _nic_addresses(nic):
+                add_ip(ip)
+                own.add(_canon_ip(ip))
+    peer = appliance.get("peerInterface") or {}
+    if isinstance(peer, dict):
+        for ip in _block_ips(peer):
+            if _canon_ip(ip) in own:
                 add_ip(ip)
     fqdn = next((h for h in names if "." in h), "")
     ips.sort(key=_ip_rank)

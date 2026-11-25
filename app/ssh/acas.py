@@ -76,6 +76,7 @@ class AcasPrep(SSHSession):
         return text
 
     def _unharden_script(self) -> str:
+        """Later steps can fail after sudoers is replaced. The exit trap restores that file. Rules go under /run so a local user cannot swap the file."""
         user = (self.ssh_user or "").strip()
         if not USER_RE.fullmatch(user):
             raise ValueError(f"Unsafe SSH username for sudoers: {user!r}")
@@ -90,6 +91,17 @@ class AcasPrep(SSHSession):
         guard = ACAS_BANNER_TTY_GUARD
         scap = shlex.quote(ACAS_SCAP_HOME)
         return f"""
+set -e
+sudoers_committed=0
+rollback_sudoers() {{
+  [ "$sudoers_committed" = 1 ] || return 0
+  if [ -f "${{SUDOERS}}.pre-acas" ]; then
+    cp -a "${{SUDOERS}}.pre-acas" "$SUDOERS" || true
+    chmod 440 "$SUDOERS" || true
+  fi
+  rm -f "$DROP" || true
+}}
+trap rollback_sudoers EXIT
 echo STEP_SUDOERS_START
 DROP={drop}
 SUDOERS={sudoers}
@@ -122,6 +134,7 @@ printf '\\n%s\\n%s\\n%s\\n' {mark_b} {user_q} {mark_e} >> "$tmp"
 if visudo -cf "$tmp" >/dev/null 2>&1; then
   mv "$tmp" "$SUDOERS"
   chmod 440 "$SUDOERS"
+  sudoers_committed=1
   echo STEP_SUDOERS_OK
 else
   rm -f "$tmp"
@@ -162,9 +175,27 @@ fi
 echo STEP_IPTABLES_START
 for bin in {bins}; do
   if "$bin" -w -n -L {chain} >/dev/null 2>&1; then
-    rules="/var/tmp/mct-${{bin}}-sshbrute.rules"
-    "$bin" -S {chain} > "$rules" || exit 1
-    chmod 600 "$rules" 2>/dev/null || true
+    ruledir=/run/mct-sshbrute
+    if [ -L "$ruledir" ]; then
+      echo STEP_IPTABLES_FAIL symlink
+      exit 1
+    fi
+    mkdir -p "$ruledir"
+    chmod 700 "$ruledir"
+    if [ -L "$ruledir" ]; then
+      echo STEP_IPTABLES_FAIL symlink
+      exit 1
+    fi
+    tmp=$(mktemp "$ruledir/${{bin}}.XXXXXX") || exit 1
+    "$bin" -S {chain} > "$tmp" || {{ rm -f "$tmp"; exit 1; }}
+    chmod 600 "$tmp" || true
+    rules="$ruledir/${{bin}}.rules"
+    if [ -L "$rules" ]; then
+      rm -f "$tmp"
+      echo STEP_IPTABLES_FAIL symlink
+      exit 1
+    fi
+    mv -f "$tmp" "$rules"
     "$bin" -w -F {chain}
     "$bin" -w -A {chain} -j ACCEPT
     echo STEP_IPTABLES_OK "$bin"
@@ -173,11 +204,13 @@ for bin in {bins}; do
     echo STEP_IPTABLES_SKIP "$bin" no {chain} chain
   fi
 done
+sudoers_committed=0
+trap - EXIT
 echo STEP_UNHARDEN_DONE
 """
 
     def _harden_script(self) -> str:
-        """Iptables restore runs before the sudoers drop-in is removed. A restore failure exits first, so NOPASSWD can remain."""
+        """The drop-in is removed before any exit. Compare the saved rules before deleting the file, or the check fails and later steps never run."""
         user = (self.ssh_user or "").strip() or "cz"
         drop = shlex.quote(ACAS_SUDOERS_DROPIN)
         banner = shlex.quote(ACAS_BANNER_FILE)
@@ -189,6 +222,8 @@ echo STEP_UNHARDEN_DONE
         chain = shlex.quote(ACAS_IPTABLES_CHAIN)
         scap = shlex.quote(ACAS_SCAP_HOME)
         return f"""
+echo STEP_SUDOERS_REMOVE
+rm -f {drop}
 if command -v cz-config >/dev/null 2>&1; then
   if cz-config set -j users/0/nopasswd false; then
     echo STEP_CZCONFIG_NOPASSWD_FALSE
@@ -199,25 +234,32 @@ if command -v cz-config >/dev/null 2>&1; then
 fi
 echo STEP_IPTABLES_RESTORE
 for bin in iptables ip6tables; do
-  rules="/var/tmp/mct-${{bin}}-sshbrute.rules"
+  ruledir=/run/mct-sshbrute
+  rules="$ruledir/${{bin}}.rules"
   chain={chain}
-  if [ ! -f "$rules" ]; then
+  if [ -L "$ruledir" ] || [ -L "$rules" ] || [ ! -f "$rules" ]; then
     "$bin" -D "$chain" -j ACCEPT 2>/dev/null || true
     echo STEP_IPTABLES_RESTORE_FAIL "$bin" missing-rules
     exit 1
   fi
   "$bin" -F "$chain" || exit 1
-  while IFS= read -r line; do
+  set -f
+  while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
-      -A*) "$bin" $line || exit 1 ;;
+      -A*)
+        read -r -a args <<< "$line"
+        "$bin" -w "${{args[@]}}" || exit 1
+        ;;
     esac
   done < "$rules"
+  set +f
   saved=$(grep '^-A' "$rules" | sort)
   live=$("$bin" -S "$chain" | grep '^-A' | sort)
   if [ "$saved" != "$live" ]; then
     echo STEP_IPTABLES_RESTORE_FAIL "$bin"
     exit 1
   fi
+  rm -f "$rules"
   echo STEP_IPTABLES_RESTORED "$bin"
 done
 echo STEP_BANNER_RESTORE
@@ -226,8 +268,6 @@ if [ -f "${{f}}.pre-acas" ]; then
   mv "${{f}}.pre-acas" "$f"
   echo "STEP_BANNER_RESTORED $f"
 fi
-echo STEP_SUDOERS_REMOVE
-rm -f {drop}
 SUDOERS={sudoers}
 if [ -f "${{SUDOERS}}.pre-acas" ]; then
   mv "${{SUDOERS}}.pre-acas" "$SUDOERS"

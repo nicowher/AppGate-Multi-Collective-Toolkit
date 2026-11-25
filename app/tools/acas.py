@@ -45,8 +45,6 @@ from ssh.acas import AcasPrep
 from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 
 
-
-
 def _fail(target: Target, message: str) -> None:
     """Fail-soft. Console is human; DEBUG prints the SSH/API detail."""
     target.status = "failed"

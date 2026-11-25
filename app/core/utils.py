@@ -14,9 +14,12 @@ the parent of this package (``app/``), not ``app/core/``.
 
   vendor site / wheels / ensure_package
       Unpacked wheels in app/vendor/site are appended to sys.path. Installs
-      use vendor/requirements.txt hashes and --target vendor/site. Menu U
+      use vendor/requirements.txt hashes and --target vendor/site. An empty
+      site extracts a wheel only when its hash is in that pin. Menu U
       reinstalls that pin. It does not take a newer PyPI release.
 """
+import hashlib
+import unicodedata
 import importlib.util
 import ipaddress
 import json
@@ -78,23 +81,26 @@ def halt(code: str, message: str, *hints: str) -> None:
 def expand_exclude_tokens(raw: str) -> set:
     """Comma-separated exclude tokens. ``1-10,12-20`` expands to those row numbers.
 
-    A token with a digit on only one side of a hyphen is rejected, so a name
-    like that cannot be excluded. Both sides numeric expands. The width check
-    is last minus first, so a span of APPLIANCE_LIST_MAX is still accepted.
+    A control character or a format character is rejected so a wrapped or reversed line cannot look like a range and stay one token. Both sides numeric expands. A name with a digit on only one side stays one
+    token so it can be excluded. An empty side is still a bad range. The width
+    check is last minus first, so a span of APPLIANCE_LIST_MAX is still accepted.
     """
     tokens = set()
     for part in raw.split(","):
         part = part.strip().lower()
         if not part:
             continue
+        if any(ord(ch) < 32 or ord(ch) == 127 or unicodedata.category(ch) == "Cf" for ch in part):
+            raise ValueError("Exclude token contains a control or format character.")
+        # print(f"DEBUG exclude: part={part!r}")
         if "-" in part:
             left, _, right = part.partition("-")
             left, right = left.strip(), right.strip()
-            if left.isdigit() or right.isdigit():
-                if not (left.isdigit() and right.isdigit()):
-                    raise ValueError(
-                        f"Exclude range {part!r} is incomplete. Use 1-3 or a single number."
-                    )
+            if (left.isdigit() and not right) or (right.isdigit() and not left):
+                raise ValueError(
+                    f"Exclude range {part!r} is incomplete. Use 1-3 or a single number."
+                )
+            if left.isdigit() and right.isdigit():
                 start, end = int(left), int(right)
                 if start > end:
                     start, end = end, start
@@ -108,6 +114,52 @@ def expand_exclude_tokens(raw: str) -> set:
         tokens.add(part)
     # print(f"DEBUG exclude: raw={raw!r} tokens={sorted(tokens)[:20]!r} n={len(tokens)}")
     return tokens
+
+
+def normalize_allow_source(entry: Any) -> Dict[str, Any]:
+    """One check for the preview merge and the PUT. A bad nic must fail here so it is not sent."""
+    if not isinstance(entry, dict):
+        raise ValueError("allowSources row must be an object")
+    try:
+        mask = int(entry.get("netmask"))
+    except (TypeError, ValueError):
+        raise ValueError("allowSources address or netmask is invalid") from None
+    address = format_scoped_ip(str(entry.get("address") or ""))
+    host = address.split("%", 1)[0]
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        raise ValueError("allowSources address or netmask is invalid") from None
+    ceiling = 32 if parsed.version == 4 else 128
+    if mask < 1 or mask > ceiling:
+        raise ValueError(f"allowSources prefix {mask} is not allowed")
+    out = {
+        "address": address if parsed.is_link_local and "%" in address else str(parsed),
+        "netmask": mask,
+    }
+    nic = str(entry.get("nic") or "").strip()
+    if nic:
+        # print(f"DEBUG allow: nic len={len(nic)}")
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", nic):
+            raise ValueError("allowSources nic is not an interface name")
+        out["nic"] = nic
+    return out
+
+
+def format_scoped_ip(raw: str) -> str:
+    """Keep a zone only on a link-local address. A global address must not carry one."""
+    text = (raw or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    host, sep, zone = text.partition("%")
+    host, zone = host.strip(), zone.strip()
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return text
+    if ip.is_link_local and sep and zone:
+        return f"{ip}%{zone}"
+    return str(ip)
 
 
 def is_valid_host(value: str) -> bool:
@@ -159,6 +211,48 @@ def install_machine_id() -> str:
     return value
 
 
+def _norm_dist(name: str) -> str:
+    """Wheel names and pin names use different separators for the same package."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _wheel_name_version(filename: str) -> tuple:
+    base = filename[:-4] if filename.lower().endswith(".whl") else filename
+    parts = base.split("-")
+    for i, part in enumerate(parts):
+        if i and part[:1].isdigit():
+            return _norm_dist("-".join(parts[:i])), part
+    return "", ""
+
+
+def _pinned_wheels() -> Dict[tuple, set]:
+    """Refuse extract when the pin file is missing. A swapped wheel must not become importable."""
+    if not os.path.isfile(VENDOR_REQUIREMENTS):
+        raise ValueError("Refusing wheel extract; pin file is missing")
+    pins: Dict[tuple, set] = {}
+    current = None
+    with open(VENDOR_REQUIREMENTS, encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.split("#", 1)[0].strip().rstrip("\\").strip()
+            if not line:
+                continue
+            if "==" in line and not line.startswith("--"):
+                name, _, ver = line.partition("==")
+                current = (_norm_dist(name), ver.strip())
+                pins.setdefault(current, set())
+            elif line.startswith("--hash=sha256:") and current:
+                pins[current].add(line.split("sha256:", 1)[1].strip().lower())
+    return pins
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _extract_wheel(wheel_path: str, dest: str) -> None:
     """A .. member can write outside vendor/site. Refuse the wheel before any extract."""
     root = os.path.realpath(dest)
@@ -175,14 +269,22 @@ def _extract_wheel(wheel_path: str, dest: str) -> None:
 
 
 def ensure_vendor_site() -> None:
-    """Put unpacked wheels on sys.path before imports. An empty site extracts every wheel here with no hash check. Menu U is the path that uses the pin."""
+    """Put unpacked wheels on sys.path before imports. An empty site extracts a wheel only after its hash matches the pin."""
     if os.path.isdir(VENDOR_WHEELS) and (
         not os.path.isdir(VENDOR_SITE) or not any(os.scandir(VENDOR_SITE))
     ):
         os.makedirs(VENDOR_SITE, exist_ok=True)
+        pins = _pinned_wheels()
         for name in os.listdir(VENDOR_WHEELS):
-            if name.endswith(".whl"):
-                _extract_wheel(os.path.join(VENDOR_WHEELS, name), VENDOR_SITE)
+            if not name.endswith(".whl"):
+                continue
+            ident = _wheel_name_version(name)
+            allowed = pins.get(ident) or set()
+            path = os.path.join(VENDOR_WHEELS, name)
+            # print(f"DEBUG wheel: name={name!r} pinned={bool(allowed)}")
+            if not allowed or _file_sha256(path) not in allowed:
+                raise ValueError(f"Refusing wheel not in the pin: {name}")
+            _extract_wheel(path, VENDOR_SITE)
     if os.path.isdir(VENDOR_SITE) and VENDOR_SITE not in sys.path:
         sys.path.append(VENDOR_SITE)
 

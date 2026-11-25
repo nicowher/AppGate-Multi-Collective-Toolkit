@@ -123,6 +123,7 @@ class NtpMixin:
         """PUT appliance.ntp so cz-configd applies (survives reboot)."""
         appliance = self._get_appliance(appliance_id)
         original = copy.deepcopy(appliance)
+        self.note_rollback(appliance_id, original, NTP_PUT_ALLOWED, "NTP servers")
         existing_list = self._ntp_list_from_appliance(appliance)
         desired = [self._ntp_key_for_api(s) for s in servers if self._ntp_hostname(s)]
         if overwrite:
@@ -186,4 +187,24 @@ class NtpMixin:
         )
         self._put_appliance_body(body, what="NTP servers")
         return merged
+
+    def strip_ntp_keys(self, appliance_id: str) -> None:
+        """Chrony already has the key. A later GET must not return it."""
+        appliance = self._get_appliance(appliance_id)
+        original = copy.deepcopy(appliance)
+        servers = self._ntp_list_from_appliance(appliance)
+        removed = False
+        for row in servers:
+            if isinstance(row, dict) and row.pop("key", None) not in (None, ""):
+                removed = True
+        if not removed:
+            return
+        ntp_obj = appliance.get("ntp")
+        if not isinstance(ntp_obj, dict):
+            ntp_obj = {}
+        ntp_obj["servers"] = servers
+        appliance["ntp"] = ntp_obj
+        body = self._sanitize_appliance_for_put(appliance)
+        self._assert_put_safe(original, body, allowed=NTP_PUT_ALLOWED, what="NTP keys")
+        self._put_appliance_body(body, what="NTP keys")
 

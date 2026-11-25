@@ -48,6 +48,7 @@ from core.utils import (
 from core.run import (
     ClientMap,
     login_collectives,
+    rollback_prior,
     print_result,
     prompt_add_or_replace,
     select_appliances,
@@ -135,6 +136,7 @@ def _apply(
     print(f"\n[3/4] Push NTP via API ({mode})...")
     if overwrite and not dry_run:
         begin_replaced_run()
+    done = []
     for target in selected:
         col = collective_for_target(target, collectives)
         servers = col.get("ntp_servers") or []
@@ -186,14 +188,19 @@ def _apply(
                 snapshot_label=target.label(),
             )
             target.status = "ok"
+            done.append((target, client))
             print_result(target, f"NTP {mode} ({len(merged)} server(s))")
             if DEBUG:
                 print(f"      DEBUG ntp hosts={[s.get('hostname') for s in merged if isinstance(s, dict)]}", file=sys.stderr)
         except AppliancePutError as exc:
             # print(f"DEBUG ntp: E11 put {target.label()!r} {exc!r}")
             _fail(target, str(exc), code="E11")
+            rollback_prior(done)
+            break
         except Exception as exc:
             _fail(target, str(exc), code="E11")
+            rollback_prior(done)
+            break
 
     if dry_run and not changing:
         print("\n      No NTP changes to apply.")
@@ -238,6 +245,13 @@ def _apply(
                 )
             if _ntpdata_ok(out, servers):
                 print_result(target, "NTP verify")
+                try:
+                    client = clients.get(int(target.collective))
+                    if client is not None:
+                        client.strip_ntp_keys(target.appliance_id)
+                        print(f"      {target.label()}: NTP key removed from the appliance document")
+                except Exception as exc:
+                    _fail(target, f"NTP verified but the key is still on the appliance: {exc}", code="E11")
             else:
                 preview = " | ".join(
                     ln.strip() for ln in (out or "").splitlines() if ln.strip()

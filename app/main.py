@@ -62,8 +62,8 @@ def _in_stdin_wait(frame) -> bool:
 
 
 def _signal_exit(_signum, _frame) -> None:
-    """Leave the handler without calling input(). The tool runner still catches this and asks, so a kill can wait on that prompt."""
-    raise KeyboardInterrupt
+    """A kill must not ask. KeyboardInterrupt is the cancel prompt, so this uses SystemExit."""
+    raise SystemExit(143)
 
 
 def _sigint_confirm_cancel(signum, frame) -> None:

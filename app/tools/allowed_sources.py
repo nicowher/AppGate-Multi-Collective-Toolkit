@@ -15,6 +15,8 @@ import ipaddress
 import os
 import socket
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _APP_DIR not in sys.path:
@@ -48,6 +50,7 @@ from core.prompts import (
 from core.run import (
     ClientMap,
     login_collectives,
+    rollback_prior,
     print_result,
     prompt_add_or_replace,
     select_appliances,
@@ -55,6 +58,8 @@ from core.run import (
 from core.utils import (
     HaltError,
     begin_replaced_run,
+    format_scoped_ip,
+    normalize_allow_source,
     halt,
     load_credentials,
     print_error,
@@ -94,28 +99,8 @@ def _fail(target: Target, message: str) -> None:
 
 
 def _normalize_source(entry: Any) -> Dict[str, Any]:
-    """Validate address/netmask; omit nic when blank (GUI Any)."""
-    if not isinstance(entry, dict):
-        return {}
-    address = str(entry.get("address") or "").strip()
-    nic = str(entry.get("nic") or "").strip()
-    try:
-        netmask = int(entry.get("netmask"))
-    except (TypeError, ValueError):
-        return {}
-    if not address:
-        return {}
-    try:
-        ip = ipaddress.ip_address(address.split("%")[0])
-        vmax = 32 if isinstance(ip, ipaddress.IPv4Address) else 128
-    except ValueError:
-        return {}
-    if netmask < 1 or netmask > vmax:
-        raise ValueError(f"allowSources prefix {netmask} is not allowed")
-    out: Dict[str, Any] = {"address": str(ip), "netmask": netmask}
-    if nic:
-        out["nic"] = nic
-    return out
+    """Use the shared check. The planner catches a bad row on that appliance instead of exiting."""
+    return normalize_allow_source(entry)
 
 
 def _source_key(entry: Dict[str, Any]) -> Tuple[str, int, str]:
@@ -139,7 +124,7 @@ def _is_host_route(address: str, netmask: int) -> bool:
 def _ip_canon(addr: str) -> str:
     """Canonical IP string so fe80::1 and FE80:0:0:0:0:0:0:1 compare equal."""
     try:
-        return str(ipaddress.ip_address((addr or "").split("%")[0]))
+        return format_scoped_ip(addr)
     except ValueError:
         return (addr or "").strip()
 
@@ -192,6 +177,7 @@ def _desired_slots(target: Target, col: dict) -> Dict[str, List[Dict[str, Any]]]
             name = str(slot).strip().lower()
             if name not in ALLOW_SOURCES_SLOT_PARENT:
                 continue
+            # print(f"DEBUG allow: slot={name!r} rows={len(rows) if isinstance(rows, list) else 'bad'}")
             _merge_entries(by_slot.setdefault(name, []), rows)
     return by_slot
 
@@ -227,22 +213,53 @@ def _parent_label(parent: str) -> str:
     return ALLOW_SOURCES_PARENT_LABEL.get(parent, parent)
 
 
+def _resolve_peer(host: str) -> list:
+    """getaddrinfo has no timeout of its own. A hung lookup must not block the lockout check."""
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = pool.submit(socket.getaddrinfo, host, None, socket.AF_UNSPEC, socket.SOCK_DGRAM)
+        return fut.result(timeout=SSH_PRIME_TIMEOUT)
+    except (OSError, FuturesTimeout):
+        return []
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def _outbound_ip(peer: str) -> str:
-    """Local address this host would use to reach peer (UDP connect, no packets)."""
-    peer = (peer or "").split("%")[0].strip()
-    if not peer:
+    """Local address this host would use to reach peer. Name lookup is bounded so a dead resolver cannot stall the lockout check."""
+    text = (peer or "").strip()
+    if not text:
         return ""
-    family = socket.AF_INET6 if ":" in peer else socket.AF_INET
-    for port in (22, 443, 8443):
+    host = text
+    if host.startswith("[") and "]" in host:
+        host = host[1:host.index("]")]
+    targets = []
+    try:
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
+        family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+        targets.append((family, host if ip.is_link_local else str(ip)))
+    except ValueError:
+        # print(f"DEBUG lockout: resolve {host!r}")
+        infos = _resolve_peer(host)
+        seen = set()
+        for family, _socktype, _proto, _canon, sockaddr in infos:
+            addr = sockaddr[0].split("%", 1)[0]
+            if (family, addr) in seen:
+                continue
+            seen.add((family, addr))
+            targets.append((family, addr))
+    for family, addr in targets:
+        sock = None
         try:
             sock = socket.socket(family, socket.SOCK_DGRAM)
             sock.settimeout(SSH_PRIME_TIMEOUT)
-            sock.connect((peer, port))
-            ip = sock.getsockname()[0]
-            sock.close()
-            return ip
+            sock.connect((addr, 443))
+            return sock.getsockname()[0]
         except OSError:
             continue
+        finally:
+            if sock is not None:
+                sock.close()
     return ""
 
 
@@ -257,7 +274,9 @@ def _protected_items():
             if "/" in text:
                 out.append(ipaddress.ip_network(text, strict=False))
             else:
-                out.append(ipaddress.ip_address(text.split("%")[0]))
+                scoped = format_scoped_ip(text)
+                ipaddress.ip_address(scoped.split("%", 1)[0])
+                out.append(scoped)
         except ValueError:
             halt("E20", f"ALLOW_SOURCES_PROTECTED entry is not an IP or CIDR: {text}")
     return out
@@ -265,6 +284,8 @@ def _protected_items():
 
 def _rows_cover(item, rows: List[Dict[str, Any]]) -> bool:
     """A nic-specific row cannot prove coverage from this host."""
+    if isinstance(item, str):
+        return _rule_allows(item, rows)
     if isinstance(item, (ipaddress.IPv4Address, ipaddress.IPv6Address)):
         return _rule_allows(str(item), rows)
     for row in rows:
@@ -287,7 +308,8 @@ def _rule_allows(local_ip: str, rows: List[Dict[str, Any]]) -> bool:
     if not local_ip or not rows:
         return False
     try:
-        addr = ipaddress.ip_address(local_ip.split("%")[0])
+        scoped = format_scoped_ip(local_ip)
+        addr = ipaddress.ip_address(scoped.split("%", 1)[0])
     except ValueError:
         return False
     for row in rows:
@@ -302,6 +324,14 @@ def _rule_allows(local_ip: str, rows: List[Dict[str, Any]]) -> bool:
         if nic:
             # Egress NIC on the appliance is unknown from this host. Fail closed.
             # print(f"DEBUG lockout: nic set, skip {row.get('address')}")
+            continue
+        row_scoped = format_scoped_ip(str(row.get("address") or ""))
+        if (
+            addr.is_link_local
+            and "%" in scoped
+            and "%" in row_scoped
+            and row_scoped != scoped
+        ):
             continue
         if addr in net:
             # print(f"DEBUG lockout: {local_ip} in {net}")
@@ -343,7 +373,18 @@ def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
 def _plan_one(
     target: Target, collectives: list
 ) -> Dict[str, List[Dict[str, Any]]]:
-    """Build parent→rows for one box (all + functions, exclude-self)."""
+    """Build parent→rows for one box. A bad row fails this box only, so the rest of the fleet is still planned."""
+    try:
+        return _plan_one_checked(target, collectives)
+    except ValueError as exc:
+        _fail(target, str(exc))
+        return {}
+
+
+def _plan_one_checked(
+    target: Target, collectives: list
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Raise on a bad row so the wrapper can fail this box without leaving the plan half-built."""
     col = collective_for_target(target, collectives)
     by_slot = _desired_slots(target, col)
     dropped_all: List[Dict[str, Any]] = []
@@ -427,11 +468,16 @@ def _check_lockout(
         )
 
 
-def _confirm_replace(plans: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> None:
+def _confirm_replace(
+    selected: List[Target],
+    plans: Dict[str, Dict[str, List[Dict[str, Any]]]],
+) -> None:
     """Always-on two-step confirm: y, then type YES. Not configurable."""
     print("\n      Replace plan (all changes):")
-    for label, desired in plans.items():
-        _print_plan(label, "replace", desired)
+    for target in selected:
+        desired = plans.get(_plan_key(target))
+        if desired:
+            _print_plan(target.label(), "replace", desired)
     first = input("\n      Proceed with replace? [y/N]: ").strip().lower()
     if first not in YES_ANSWERS:
         print("      Cancelled.")
@@ -458,6 +504,8 @@ def _apply(
         if target.status == "failed":
             continue
         desired = _plan_one(target, collectives)
+        if target.status == "failed":
+            continue
         if not desired:
             _fail(target, "no allowed_sources left after slot merge / exclude-self")
             continue
@@ -494,9 +542,10 @@ def _apply(
         return
     if overwrite and plans and not skip_guards:
         _check_lockout(selected, plans)
-        _confirm_replace(plans)
+        _confirm_replace(selected, plans)
     if overwrite and plans and not dry_run:
         begin_replaced_run()
+    done = []
     for target in selected:
         if target.status == "failed":
             continue
@@ -515,6 +564,7 @@ def _apply(
                 snapshot_label=target.label(),
             )
             target.status = "ok"
+            done.append((target, client))
             print_result(target, _counts_line(counts))
             if DEBUG:
                 print(
@@ -523,8 +573,12 @@ def _apply(
                 )
         except AppliancePutError as exc:
             _fail(target, str(exc))
+            rollback_prior(done)
+            break
         except Exception as exc:
             _fail(target, str(exc))
+            rollback_prior(done)
+            break
 
 
 def _emit_report(
@@ -605,15 +659,14 @@ def main() -> None:
     elif any(t.status == "preview" for t in selected):
         go = False
         if overwrite:
-            # Lockout looks up collective:appliance id. This dict uses the display label, so that lookup misses.
             plans = {
-                t.label(): _plan_one(t, collectives)
+                _plan_key(t): _plan_one(t, collectives)
                 for t in selected
                 if t.status == "preview"
             }
             # print(f"DEBUG plans: n={len(plans)}")
             _check_lockout(selected, plans)
-            _confirm_replace(plans)
+            _confirm_replace(selected, plans)
             go = True
         else:
             apply = input("\n      Apply these changes now? [y/N]: ").strip().lower()

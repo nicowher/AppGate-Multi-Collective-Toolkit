@@ -143,7 +143,7 @@ def _emit_report(
 
 
 def _save_passwords(creds: dict, collectives: list, selected: List[Target]) -> None:
-    """Write only after every selected box accepts. The file match is the index field, so a row without one is left unchanged."""
+    """Write only after every selected box accepts. Match the file row by FQDN. A row with no FQDN is left unchanged."""
     applied = [t for t in selected if t.status == "ok"]
     if not applied or any(t.status == "failed" for t in selected):
         print(
@@ -160,32 +160,50 @@ def _save_passwords(creds: dict, collectives: list, selected: List[Target]) -> N
     if not isinstance(data, dict):
         return
     by_index = {int(c["index"]): c for c in collectives}
-    touched = {int(t.collective) for t in applied}
+    by_fqdn = {
+        str(c.get("fqdn") or "").strip().lower(): c
+        for c in collectives
+        if str(c.get("fqdn") or "").strip()
+    }
+    touched = set()
+    for target in applied:
+        col = by_index.get(int(target.collective))
+        fqdn = str((col or {}).get("fqdn") or "").strip().lower()
+        if fqdn:
+            touched.add(fqdn)
+    changed = False
     rows = data.get("collectives")
     if isinstance(rows, list):
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            try:
-                idx = int(row.get("index") or 0)
-            except (TypeError, ValueError):
-                continue
-            col = by_index.get(idx)
-            if col is None or idx not in touched:
+            fqdn = str(row.get("fqdn") or "").strip().lower()
+            col = by_fqdn.get(fqdn)
+            if not fqdn or col is None or fqdn not in touched:
                 continue
             row["ssh_password"] = col.get("ssh_password_new") or ""
             row["ssh_password_new"] = ""
+            changed = True
     news = {
-        (by_index[i].get("ssh_password_new") or "")
-        for i in touched
-        if i in by_index
+        (by_fqdn[name].get("ssh_password_new") or "")
+        for name in touched
+        if name in by_fqdn
     }
     if len(news) == 1 and not any(
-        isinstance(r, dict) and r.get("ssh_password") and int(r.get("index") or 0) not in touched
+        isinstance(r, dict)
+        and r.get("ssh_password")
+        and str(r.get("fqdn") or "").strip().lower() not in touched
         for r in (rows or [])
     ):
         data["ssh_password"] = next(iter(news))
         data["ssh_password_new"] = ""
+        changed = True
+    if not changed:
+        print(
+            "      credentials.json left unchanged. No row matched by FQDN.",
+            file=sys.stderr,
+        )
+        return
     text = json.dumps(data, indent=2) + "\n"
     try:
         mode = os.stat(CREDENTIALS_PATH).st_mode & 0o777

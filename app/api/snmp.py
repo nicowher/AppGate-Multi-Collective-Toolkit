@@ -36,7 +36,7 @@ class SnmpMixin:
             *SnmpMixin._engine_pin_patterns(),
             *SnmpMixin._community_patterns(),
         )
-        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
+        return [line for line in lines if not SnmpMixin._line_dropped(line, drop)]
 
     @staticmethod
     def _snmpd_lines_without_all_users(appliance: Dict[str, Any]) -> list:
@@ -51,7 +51,13 @@ class SnmpMixin:
             *SnmpMixin._engine_pin_patterns(),
             *SnmpMixin._community_patterns(),
         )
-        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
+        return [line for line in lines if not SnmpMixin._line_dropped(line, drop)]
+
+    @staticmethod
+    def _line_dropped(line: str, patterns: tuple) -> bool:
+        """Net-SNMP skips leading space. A column-0 match would leave that directive active."""
+        text = line.lstrip()
+        return any(re.match(pat, text) for pat in patterns)
 
     @staticmethod
     def _engine_pin_patterns() -> tuple:
@@ -64,7 +70,7 @@ class SnmpMixin:
 
     @staticmethod
     def _community_patterns() -> tuple:
-        """Column 0 only. A leading space is not a match, so that directive is kept."""
+        """These lines are v1/v2c credentials or write access. Match after leading space is stripped."""
         if not STRIP_V1V2_COMMUNITIES:
             return ()
         return (
@@ -81,7 +87,7 @@ class SnmpMixin:
         existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
         lines = existing_conf.splitlines() if existing_conf else []
         drop = SnmpMixin._engine_pin_patterns() + SnmpMixin._community_patterns()
-        return [line for line in lines if not any(re.match(pat, line) for pat in drop)]
+        return [line for line in lines if not SnmpMixin._line_dropped(line, drop)]
 
     def ensure_engine_id_type3(self, appliance_id: Optional[str] = None) -> None:
         """Pin engineIDType via API before SSH reads oldEngineID."""
@@ -162,9 +168,21 @@ class SnmpMixin:
         self._put_snmpd_conf(appliance, "\n".join(lines), enabled=enabled)
         return True
 
+    def strip_localized_key(self, user: str, appliance_id: Optional[str] = None) -> None:
+        """createUser has already been consumed. Leaving the hash in the API copy keeps the key on disk."""
+        self._require_snmp_line(user)
+        appliance = self._get_appliance(appliance_id)
+        existing = appliance.get("snmpServer", {}).get("snmpd.conf", "")
+        pat = re.compile(rf"^\s*createUser\s+{re.escape(user)}\b", re.I)
+        kept = [line for line in existing.splitlines() if not pat.match(line)]
+        self._put_snmpd_conf(appliance, "\n".join(kept), enabled=True)
+
     def _put_snmpd_conf(self, appliance: Dict[str, Any], new_conf: str, enabled: bool) -> None:
         """GET body + snmpd.conf only. Keep site/NICs/tcpPort exactly as retrieved."""
         original = copy.deepcopy(appliance)
+        aid = str(appliance.get("id") or "")
+        if aid:
+            self.note_rollback(aid, original, SNMP_PUT_ALLOWED, "SNMP")
         existing = appliance.get("snmpServer")
         if not isinstance(existing, dict):
             existing = {}

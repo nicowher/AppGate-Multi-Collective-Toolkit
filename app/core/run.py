@@ -17,6 +17,23 @@ from core.utils import debug_log, halt, print_error
 ClientMap = Dict[int, AppGateClient]
 
 
+def rollback_prior(done: list) -> None:
+    """A later PUT failed. Restore earlier boxes from the in-memory pre-PUT copy, then stop."""
+    for target, client in reversed(done):
+        try:
+            client.restore_noted(target.appliance_id)
+            target.status = "failed"
+            target.error = "rolled back after a later appliance failed"
+            print(f"      {target.label()}: rolled back", file=sys.stderr)
+        except Exception as exc:
+            target.status = "failed"
+            target.error = f"rollback failed; this box stayed changed: {exc}"
+            print(
+                f"      {target.label()}: rollback failed; left changed ({exc})",
+                file=sys.stderr,
+            )
+
+
 def login_collectives(collectives: list, *, step: str = "[1/N]") -> ClientMap:
     """POST /admin/login per collective. Fail-soft; halt if none succeed."""
     print(f"\n{heading(step)} Authenticating to Controller API(s)...")

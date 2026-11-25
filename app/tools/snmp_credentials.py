@@ -36,6 +36,7 @@ from api.appgate import AppGateClient, AppliancePutError
 from core.run import (
     ClientMap,
     login_collectives,
+    rollback_prior,
     print_result,
     prompt_add_or_replace,
     select_appliances,
@@ -128,6 +129,7 @@ def _api_by_collective(
     token to collective 1's appliance id.
     """
     by_col: Dict[int, List[Target]] = {}
+    applied = []
     for t in targets:
         by_col.setdefault(t.collective, []).append(t)
     for col in sorted(by_col):
@@ -139,10 +141,15 @@ def _api_by_collective(
         for target in by_col[col]:
             try:
                 worker(target, client)
+                applied.append((target, client))
             except AppliancePutError as exc:
                 _fail(target, str(exc), code="E08")
+                rollback_prior(applied)
+                return
             except Exception as exc:
                 _fail(target, str(exc))
+                rollback_prior(applied)
+                return
 
 
 def main() -> None:
@@ -258,8 +265,7 @@ def main() -> None:
                     snmp_priv=inputs["snmp_priv"],
                     rouser_line=rouser_line,
                     dry_run=False,
-                replace=replace,
-                snapshot_label=target.label(),
+                    replace=replace,
                 )
                 _print_summary(selected, user=user, rouser_line=rouser_line, dry_run=False)
                 live_report = _build_run_report(
@@ -397,6 +403,7 @@ def _run_phases_3_to_8(
                 rouser_line,
                 appliance_id=target.appliance_id,
                 replace=replace,
+                snapshot_label=target.label(),
             )
             target.status = "ok"
             print_result(target, f"SNMP {mode}")
@@ -418,6 +425,12 @@ def _run_phases_3_to_8(
                 keep_hash=target.auth_hash,
             )
             print(f"      {target.label()}: persistent USM purged")
+            client = clients.get(int(target.collective))
+            if client is not None:
+                client.strip_localized_key(
+                    col.get("snmp_user") or user,
+                    appliance_id=target.appliance_id,
+                )
 
         run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 

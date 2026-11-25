@@ -19,10 +19,11 @@ except ImportError:
 import ipaddress
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import shlex
 import socket
 import sys
-import threading
 from getpass import getpass
 
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
@@ -77,6 +78,7 @@ from config import (
     SSH_LOG_PREVIEW,
     SSH_PORT,
     SSH_STRICT_HOST_KEY,
+    SSH_PRIME_BATCH,
     SSH_PRIME_TIMEOUT,
     SSH_TIMEOUT,
     YES_ANSWERS,
@@ -100,6 +102,19 @@ def _ssh_display_name(addrs: Sequence[str]) -> str:
         if addr and not _addr_is_ip(addr):
             return addr
     return addrs[0] if addrs else ""
+
+
+def _tcp_open(host: str) -> bool:
+    """Port open is not a login. A password probe of every open port would spend a lockout attempt on each."""
+    try:
+        sock = socket.create_connection((host, SSH_PORT), timeout=SSH_PRIME_TIMEOUT)
+    except OSError:
+        return False
+    try:
+        sock.close()
+    except OSError:
+        pass
+    return True
 
 
 def _host_resolves(host: str) -> bool:
@@ -126,6 +141,7 @@ class SSHSession:
         self._ssh_fail_kind = ""
         self._log_label = ""
         self._last_reason = ""
+        self._tls = threading.local()
 
     @staticmethod
     def _unwrap(host: Any) -> Tuple[Any, List[str]]:
@@ -151,6 +167,15 @@ class SSHSession:
         if self._log_label and addr:
             return f"{self._log_label} {addr}"
         return self._log_label or addr
+
+    def _mark_ssh(self, kind: str, reason: str) -> None:
+        """Record the connect result. A prime thread keeps its own copy so two probes do not overwrite each other."""
+        self._ssh_fail_kind = kind
+        self._last_reason = reason
+        box = getattr(self._tls, "box", None)
+        if isinstance(box, dict):
+            box["kind"] = kind
+            box["reason"] = reason
 
     def _log(self, msg: str, *, noise: bool = False) -> None:
         """DEBUG: every line, uncolored. Otherwise hide noise; color only the status word."""
@@ -206,7 +231,7 @@ class SSHSession:
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
     def prime_host_keys(self, hosts: Union[str, Sequence[str]]) -> bool:
-        """Try hosts until one SSH session works. Short timeout. True if any connected.
+        """Check a few addresses at once, then send the password to only the first one that accepts a connection.
 
         A name already in known_hosts still gets a connect attempt. Returning
         early on a cached FQDN used to skip this box's working private IP.
@@ -214,21 +239,43 @@ class SSHSession:
         """
         target, addrs = self._unwrap(hosts)
         self._set_log_label(target)
+        pending = []
         for host in addrs:
             if not _host_resolves(host):
                 self._log(f"{self._tag(host)} skip (no DNS)", noise=True)
                 continue
-            # print(f"DEBUG prime: try {host!r}")
-            if self._with_ssh(host, lambda _c: True, timeout=SSH_PRIME_TIMEOUT) is not None:
-                if DEBUG:
-                    self._log(f"{self._tag(host)} ok")
-                self._pin(target, host)
-                return True
-            self._log(f"{self._tag(host)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
-            if self._ssh_fail_kind in ("auth", "keyonly", "hostkey"):
-                self._pin(target, host)
-                return False
+            pending.append(host)
+        batch_size = max(1, SSH_PRIME_BATCH)
+        while pending:
+            batch = pending[:batch_size]
+            pending = pending[batch_size:]
+            # print(f"DEBUG prime: batch={batch!r}")
+            open_hosts = self._tcp_open_batch(batch)
+            for host in batch:
+                if host not in open_hosts:
+                    continue
+                if self._with_ssh(host, lambda _c: True, timeout=SSH_PRIME_TIMEOUT) is not None:
+                    if DEBUG:
+                        self._log(f"{self._tag(host)} ok")
+                    self._pin(target, host)
+                    return True
+                self._log(f"{self._tag(host)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
+                if self._ssh_fail_kind in ("auth", "keyonly", "hostkey"):
+                    self._pin(target, host)
+                    return False
         return False
+
+    def _tcp_open_batch(self, batch: list) -> set:
+        """See which addresses accept TCP. The password is not sent here."""
+        if len(batch) == 1:
+            return {batch[0]} if _tcp_open(batch[0]) else set()
+        open_hosts = set()
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futs = {pool.submit(_tcp_open, host): host for host in batch}
+            for fut in as_completed(futs):
+                if fut.result():
+                    open_hosts.add(futs[fut])
+        return open_hosts
 
     def _with_ssh(self, ip: str, fn, timeout: Optional[int] = None):
         """Open an SSH session, run *fn(client)*, then close.
@@ -251,8 +298,7 @@ class SSHSession:
                 auth_timeout=min(wait, SSH_AUTH_TIMEOUT),
                 disabled_algorithms=_SSH_DISABLED,
             )
-            self._ssh_fail_kind = ""
-            self._last_reason = "ok"
+            self._mark_ssh("", "ok")
             return fn(client)
         except paramiko.BadAuthenticationType as exc:
             allowed = [str(a).lower() for a in (exc.allowed_types or [])]
@@ -263,19 +309,15 @@ class SSHSession:
                 )
                 return self._with_ssh_keyboard_interactive(ip, fn)
             if "password" not in allowed:
-                self._ssh_fail_kind = "keyonly"
-                self._last_reason = "key-only"
+                self._mark_ssh("keyonly", "key-only")
                 return None
-            self._ssh_fail_kind = "auth"
-            self._last_reason = "auth failed"
+            self._mark_ssh("auth", "auth failed")
             return None
         except paramiko.AuthenticationException:
-            self._ssh_fail_kind = "auth"
-            self._last_reason = "auth failed"
+            self._mark_ssh("auth", "auth failed")
             return None
         except paramiko.BadHostKeyException:
-            self._ssh_fail_kind = "hostkey"
-            self._last_reason = "host key mismatch"
+            self._mark_ssh("hostkey", "host key mismatch")
             return None
         except (socket.gaierror, OSError, socket.timeout, TimeoutError) as exc:
             self._ssh_fail_kind = "network"
@@ -283,11 +325,9 @@ class SSHSession:
             self._log(f"{self._tag(ip)} {type(exc).__name__}: {exc}", noise=True)
         except paramiko.SSHException as exc:
             if "host key" in str(exc).lower():
-                self._ssh_fail_kind = "hostkey"
-                self._last_reason = "host key mismatch"
+                self._mark_ssh("hostkey", "host key mismatch")
             elif self._ssh_fail_kind != "hostkey":
-                self._ssh_fail_kind = "network"
-                self._last_reason = type(exc).__name__
+                self._mark_ssh("network", type(exc).__name__)
             self._log(
                 f"{self._tag(ip)} {type(exc).__name__}: {str(exc)[:SSH_LOG_PREVIEW]}",
                 noise=True,
@@ -338,8 +378,7 @@ class SSHSession:
             remote_key = transport.get_remote_server_key()
             self._verify_transport_host_key(client, ip, remote_key)
             transport.auth_interactive(self.ssh_user, handler)
-            self._ssh_fail_kind = ""
-            self._last_reason = "ok"
+            self._mark_ssh("", "ok")
             client._transport = transport
             return fn(client)
         except paramiko.AuthenticationException:
@@ -348,8 +387,7 @@ class SSHSession:
             # print(f"DEBUG ssh: kbd-int auth failed ip={ip!r}")
         except (paramiko.SSHException, OSError, socket.timeout, TimeoutError) as exc:
             if not self._ssh_fail_kind:
-                self._ssh_fail_kind = "network"
-            self._last_reason = self._net_reason(exc)
+            self._mark_ssh("network", self._net_reason(exc))
             self._log(
                 f"{self._tag(ip)} keyboard-interactive {type(exc).__name__}: {exc}",
                 noise=True,

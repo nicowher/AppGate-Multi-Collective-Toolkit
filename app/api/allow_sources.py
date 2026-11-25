@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import copy
-import ipaddress
 from typing import Any, Dict, List
 
 from config import ALLOW_SOURCES_PUT_ALLOWED, ALLOW_SOURCES_SLOT_PARENT
-from core.utils import debug_log, write_replaced_snapshot
+from core.utils import debug_log, normalize_allow_source, write_replaced_snapshot
 
 from .errors import AppliancePutError
 
@@ -16,26 +15,13 @@ ALLOW_SOURCES_PARENTS = tuple(sorted(set(ALLOW_SOURCES_SLOT_PARENT.values())))
 class AllowSourcesMixin:
     @staticmethod
     def _allow_source_key(entry: Any) -> tuple:
-        """Canonicalize the address so fe80::1 and the long form are one row."""
-        if not isinstance(entry, dict):
-            return ("", -1, "")
+        """Same rule as the preview merge. A second copy here used to accept a row the other path dropped."""
         try:
-            mask = int(entry.get("netmask"))
-        except (TypeError, ValueError):
+            row = normalize_allow_source(entry)
+        except ValueError:
+            # print("DEBUG allow: rejected row")
             return ("", -1, "")
-        if mask < 1:
-            return ("", -1, "")
-        address = str(entry.get("address") or "").strip()
-        if address:
-            try:
-                address = str(ipaddress.ip_address(address.split("%")[0]))
-            except ValueError:
-                pass
-        return (
-            address,
-            mask,
-            str(entry.get("nic") or "").strip(),
-        )
+        return (row["address"], int(row["netmask"]), row.get("nic") or "")
 
     @staticmethod
     def _allow_source_body(entry: Any) -> Dict[str, Any]:
@@ -89,6 +75,7 @@ class AllowSourcesMixin:
         """PUT each slot onto its parent.allowSources only if that array already exists."""
         appliance = self._get_appliance(appliance_id)
         original = copy.deepcopy(appliance)
+        self.note_rollback(appliance_id, original, ALLOW_SOURCES_PUT_ALLOWED, "allowSources")
         nonempty = {p: rows for p, rows in desired_by_parent.items() if rows}
         if overwrite and not nonempty:
             raise AppliancePutError(

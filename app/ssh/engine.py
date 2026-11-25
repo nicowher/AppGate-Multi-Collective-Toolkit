@@ -163,10 +163,10 @@ class SNMPEngineFetcher(SSHSession):
                     file=sys.stderr,
                 )
             print(
-                "      createUser has not written the new key yet; walk may fail.",
+                "      createUser has not written the new key yet; leaving the API line in place.",
                 file=sys.stderr,
             )
-            return True
+            return False
 
         ok = self._with_ssh_endpoints(
             host,

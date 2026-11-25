@@ -311,6 +311,8 @@ SSH_TIMEOUT = 8
 SSH_AUTH_TIMEOUT = 8
 # Host-key prime only (skip dead overlay IPs quickly).
 SSH_PRIME_TIMEOUT = 3
+# How many prime connects may run at once. More than this can trip SSHBRUTE.
+SSH_PRIME_BATCH = 2
 # cz-configd restart (ACAS harden) can outlast a normal SSH command.
 ACAS_SSH_TIMEOUT = 60
 # ACAS unharden is SSH overlay only (API would persist STIG-hostile state).

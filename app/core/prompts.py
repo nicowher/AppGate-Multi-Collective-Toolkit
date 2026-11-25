@@ -120,28 +120,52 @@ def resolve_mibs(col: dict, creds: dict) -> List[str]:
     return _parse_mibs(creds.get("mibs"))
 
 
+def _reject_controls(label: str, text: str) -> str:
+    """A newline in an NTP field can become a second chrony line."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise ValueError(f"NTP {label} contains a control character")
+    return text
+
+
 def _parse_ntp_servers(value: Any) -> List[Dict[str, str]]:
-    if not isinstance(value, list):
+    """A bad row must stop the load with a halt. A traceback hides the row the operator has to fix."""
+    try:
+        return _parse_ntp_servers_checked(value)
+    except ValueError as exc:
+        halt(
+            "E12",
+            str(exc),
+            "Each ntp_servers entry must be a hostname or an object with hostname.",
+        )
+
+
+def _parse_ntp_servers_checked(value: Any) -> List[Dict[str, str]]:
+    """Raise on a bad row or a non-array so the caller can halt. Ignoring an object would look like no servers were set."""
+    if value is None:
         return []
+    if not isinstance(value, list):
+        raise ValueError("ntp_servers must be an array")
     out: List[Dict[str, str]] = []
     for item in value:
-        if isinstance(item, str) and item.strip():
-            out.append(
-                {"hostname": item.strip(), "keyType": "", "keyNo": "", "key": ""}
-            )
+        if isinstance(item, str):
+            host = _reject_controls("hostname", item.strip())
+            if not host:
+                raise ValueError("NTP row is empty")
+            out.append({"hostname": host, "keyType": "", "keyNo": "", "key": ""})
             continue
         if not isinstance(item, dict):
-            continue
-        host = str(item.get("hostname") or "").strip()
+            raise ValueError("NTP row must be a hostname or an object")
+        host = _reject_controls("hostname", str(item.get("hostname") or "").strip())
         if not host:
-            continue
+            raise ValueError("NTP row is missing hostname")
         kn = item.get("keyNo")
+        key_no = "" if kn is None else _reject_controls("keyNo", str(kn).strip())
         out.append(
             {
                 "hostname": host,
-                "keyType": str(item.get("keyType") or "").strip(),
-                "keyNo": "" if kn is None else str(kn).strip(),
-                "key": str(item.get("key") or "").strip(),
+                "keyType": _reject_controls("keyType", str(item.get("keyType") or "").strip()),
+                "keyNo": key_no,
+                "key": _reject_controls("key", str(item.get("key") or "").strip()),
             }
         )
     return out
@@ -452,7 +476,7 @@ def _secret_keys(*, need_ssh: bool, need_snmp: bool, need_new_password: bool) ->
 def _col_secrets_ready(
     col: dict, *, need_ssh: bool, need_snmp: bool, need_new_password: bool
 ) -> bool:
-    """Ready means the prompt can be skipped. Priv is not part of this check, so a missing priv is not asked when user and auth are already set."""
+    """Ready means the prompt can be skipped. Priv is required with auth so a missing passphrase is asked here, not at hash time."""
     if need_ssh and not (
         _field_filled(col, "ssh_username") and _field_filled(col, "ssh_password")
     ):
@@ -460,6 +484,7 @@ def _col_secrets_ready(
     if need_snmp and not (
         _field_filled(col, "snmp_user")
         and _field_filled(col, "snmp_auth", min_len=SNMP_MIN_PASSPHRASE_LEN)
+        and _field_filled(col, "snmp_priv", min_len=SNMP_MIN_PASSPHRASE_LEN)
     ):
         return False
     if need_new_password:
@@ -543,12 +568,14 @@ def _copy_secret_fields(
     need_new_password: bool,
     skip: Optional[set] = None,
 ) -> None:
-    """Copy a prompted global secret onto every row. Skip is only the fields every row already had."""
+    """A global answer fills gaps only. A row that already has the field keeps its own value."""
     skip = skip or set()
     for key in _secret_keys(
         need_ssh=need_ssh, need_snmp=need_snmp, need_new_password=need_new_password
     ):
         if key in skip:
+            continue
+        if (dest.get(key) or "").strip():
             continue
         dest[key] = src.get(key) or ""
 
@@ -587,7 +614,7 @@ def prepare_collectives(
     """SSH/SNMP/new-password: skip prompts when every collective already has the field.
 
     A global fill is skipped for a field only when every row already has it.
-    If one row is empty, the typed global value is copied onto every row, including rows that already had their own value.
+    A typed global value is copied only into rows that do not already have that field.
     """
     had_local_new = any((c.get("ssh_password_new") or "").strip() for c in collectives)
     global_new = (creds.get("ssh_password_new") or "").strip()

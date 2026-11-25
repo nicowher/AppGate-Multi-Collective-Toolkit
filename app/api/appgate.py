@@ -59,6 +59,7 @@ from config import (
 )
 import copy
 import ipaddress
+import atexit
 import json
 import re
 import sys
@@ -103,6 +104,26 @@ if insecure_api_enabled():
 SNMP_PUT_ALLOWED = ("snmpServer.snmpd.conf", "snmpServer.enabled")
 NTP_PUT_ALLOWED = ("ntp", "ntpServers", "ntpServer")
 ALLOW_SOURCES_PARENTS = tuple(sorted(set(ALLOW_SOURCES_SLOT_PARENT.values())))
+
+
+def _copy_saved_path(src: Dict[str, Any], dest: Dict[str, Any], path: str) -> None:
+    """Copy one saved slice onto the fresh GET. A missing saved field is removed."""
+    parts = path.split(".")
+    cur_s: Any = src
+    cur_d: Any = dest
+    for part in parts[:-1]:
+        nxt = cur_s.get(part) if isinstance(cur_s, dict) else None
+        if not isinstance(nxt, dict):
+            return
+        if not isinstance(cur_d.get(part), dict):
+            cur_d[part] = {}
+        cur_s = nxt
+        cur_d = cur_d[part]
+    leaf = parts[-1]
+    if isinstance(cur_s, dict) and leaf in cur_s:
+        cur_d[leaf] = copy.deepcopy(cur_s[leaf])
+    elif isinstance(cur_d, dict):
+        cur_d.pop(leaf, None)
 
 
 def _merge_self_ips(nic_ips: List[str], status: Dict[str, Any]) -> List[str]:
@@ -239,6 +260,9 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         self.machine_id = install_machine_id()
         self._login_id_field = "machineId"
         self._version_learned = False
+        self._appliance_match: Dict[str, str] = {}
+        self._rollback: Dict[str, tuple] = {}
+        self._logout_registered = False
         self.headers: Dict[str, str] = {
             "Accept": f"application/vnd.appgate.peer-v{self.api_version}+json",
             "Content-Type": "application/json",
@@ -497,8 +521,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     # print(f"DEBUG login retry status={response.status_code}")
                     print(
                         f"      DEBUG login retry status={response.status_code} "
-                        f"accept={self.headers.get('Accept')!r} "
-                        f"body={(response.text or '')[:LOGIN_BODY_PREVIEW]!r}",
+                        f"accept={self.headers.get('Accept')!r}",
                         file=sys.stderr,
                     )
             if response.status_code != 200:
@@ -527,12 +550,31 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     f"HTTP {response.status_code}."
                 )
             self.headers["Authorization"] = f"Bearer {token}"
+            if not self._logout_registered:
+                atexit.register(self.logout)
+                self._logout_registered = True
             if host != self.fqdn and self.fqdn:
                 print(f"      Using IP fallback {host} (FQDN {self.fqdn} unreachable)", file=sys.stderr)
             return token
         raise RuntimeError(
             f"Could not reach Controller {self.fqdn or self.fallback_ip}: {last_connect_error}"
         )
+
+    def logout(self) -> None:
+        """Drop the bearer token on the Controller. A logout failure must not turn a finished job into a failure."""
+        token = self.headers.pop("Authorization", "")
+        if not token:
+            return
+        try:
+            requests.delete(
+                f"{self.base_url}/login",
+                headers={**self.headers, "Authorization": token},
+                verify=self._verify(),
+                timeout=API_TIMEOUT,
+                allow_redirects=False,
+            )
+        except Exception:
+            return
 
     def _handle_login_error(self, response: requests.Response, _username: str, provider: str) -> None:
         """Provide actionable guidance for common 401/403 responses."""
@@ -760,8 +802,38 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         payload = response.json()
         if not isinstance(payload, dict):
             raise RuntimeError(f"GET appliance {aid} returned non-object JSON")
+        self._remember_match(aid, response, payload)
         _log_unknown_appliance_keys(payload, f"GET /appliances/{aid}")
         return payload
+
+    def note_rollback(self, aid: str, original: Dict[str, Any], allowed: tuple, what: str) -> None:
+        """Keep the pre-PUT document in memory. The on-disk snapshot is redacted and cannot be PUT back."""
+        self._rollback[str(aid)] = (copy.deepcopy(original), tuple(allowed), what)
+
+    def restore_noted(self, aid: str) -> None:
+        """PUT the saved slice onto a fresh GET so If-Match is current."""
+        saved = self._rollback.get(str(aid))
+        if not saved:
+            raise AppliancePutError(f"No pre-PUT copy for {aid}")
+        original, allowed, what = saved
+        fresh = self._get_appliance(aid)
+        body_src = copy.deepcopy(fresh)
+        for path in allowed:
+            _copy_saved_path(original, body_src, path)
+        body = self._sanitize_appliance_for_put(body_src)
+        self._assert_put_safe(fresh, body, allowed=allowed, what=what)
+        self._put_appliance_body(body, what=what)
+
+    def _remember_match(self, aid: str, response: requests.Response, payload: Dict[str, Any]) -> None:
+        """A later PUT must send the GET version. Without it a parallel edit is overwritten."""
+        token = (response.headers.get("ETag") or "").strip()
+        if not token:
+            for key in ("version", "updated"):
+                val = payload.get(key)
+                if val not in (None, ""):
+                    token = str(val)
+                    break
+        self._appliance_match[str(aid)] = token
 
     @staticmethod
     def _sanitize_appliance_for_put(appliance: Dict[str, Any]) -> Dict[str, Any]:
@@ -817,10 +889,17 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         aid = body.get("id")
         if not aid:
             raise AppliancePutError(f"Refusing {what} PUT; appliance id missing")
+        token = self._appliance_match.get(str(aid), "")
+        if not token:
+            raise AppliancePutError(
+                f"Refusing {what} PUT; appliance GET did not include a version or ETag"
+            )
+        headers = dict(self.headers)
+        headers["If-Match"] = token if token.startswith('"') or token.startswith("W/") else f'"{token}"'
         url = f"{self.base_url}/appliances/{aid}"
         put_response = requests.put(
             url,
-            headers=self.headers,
+            headers=headers,
             json=body,
             verify=self._verify(),
             timeout=API_TIMEOUT,
@@ -834,7 +913,9 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             body_preview = _strip_controls(redact_preview(put_response.text or "", API_ERROR_BODY_PREVIEW))
             hint = ""
             text_l = (put_response.text or "").lower()
-            if put_response.status_code == 422 and "portal.profiles" in text_l:
+            if put_response.status_code in (409, 412):
+                hint = " Hint: the appliance changed after the GET. Run the tool again."
+            elif put_response.status_code == 422 and "portal.profiles" in text_l:
                 hint = (
                     " Hint: Admin Role needs View on Client Profile "
                     "(portal.profiles[] are client profile names)."
