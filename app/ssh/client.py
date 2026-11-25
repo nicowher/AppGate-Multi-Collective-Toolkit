@@ -387,7 +387,7 @@ class SSHSession:
             # print(f"DEBUG ssh: kbd-int auth failed ip={ip!r}")
         except (paramiko.SSHException, OSError, socket.timeout, TimeoutError) as exc:
             if not self._ssh_fail_kind:
-            self._mark_ssh("network", self._net_reason(exc))
+                self._mark_ssh("network", self._net_reason(exc))
             self._log(
                 f"{self._tag(ip)} keyboard-interactive {type(exc).__name__}: {exc}",
                 noise=True,
