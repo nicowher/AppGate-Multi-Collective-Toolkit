@@ -13,7 +13,9 @@ from .client import SSHSession
 
 
 class NtpSsh(SSHSession):
+    """SSH for menu 5. There is no Admin API for these steps."""
     def restart_customization(self, host: Union[str, Sequence[str]]) -> str:
+        """cz-customization applies the NTP PUT to chrony. It has no API trigger, so it is restarted over SSH."""
         # print(f"DEBUG ntp-ssh: restart {NTP_CUSTOMIZATION_UNIT} hosts={host!r}")
         def _run(client) -> str:
             return self._run(

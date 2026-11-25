@@ -5,7 +5,7 @@ Tools pass step banners ([1/4], [2/8], …). One AppGateClient per collective.
 from __future__ import annotations
 
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from api.appgate import AppGateClient
 from core.color import fail as color_fail
@@ -79,8 +79,14 @@ def login_collectives(collectives: list, *, step: str = "[1/N]") -> ClientMap:
     return clients
 
 
-def select_appliances(clients: ClientMap, *, step: str = "[2/N]") -> List[Target]:
-    """GET /appliances + status, exclude prompt. Halt if none left."""
+def select_appliances(
+    clients: ClientMap, *, step: str = "[2/N]", inventory_out: Optional[List[Target]] = None
+) -> List[Target]:
+    """GET /appliances + status, exclude prompt. Halt if none left.
+
+    inventory_out, when given, receives every selectable appliance, including the
+    ones the operator excluded, so a caller can tell a whole collective from part of one.
+    """
     print(f"\n{heading(step)} Pulling appliances from every Controller...")
     inventory: List[Target] = []
     for idx, client in sorted(clients.items()):
@@ -102,6 +108,8 @@ def select_appliances(clients: ClientMap, *, step: str = "[2/N]") -> List[Target
         )
     print(f"      Found {len(inventory)} selectable appliance(s)")
     debug_log(f"inventory: n={len(inventory)} collectives={list(clients)}")
+    if inventory_out is not None:
+        inventory_out.extend(inventory)
     selected = prompt_exclusions(inventory)
     if not selected:
         halt("E04", "Nothing left after exclusions", "Press Enter to keep all.")

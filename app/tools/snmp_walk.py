@@ -4,7 +4,8 @@ Reached via ``python app/main.py 3`` or launcher menu option 3.
 
   1) Single IP / FQDN — SNMP walk only (snmp_*). Never asks for SSH.
   2) Controller list — API login + inventory/exclude, then walk
-      (FQDN first, then this appliance's IPs). No SSH secrets.
+      (the address an earlier menu found this session, else admin hostname,
+      admin IP, then the other NIC IPs). No SSH secrets.
 
 If snmp_* / agip live only under collectives[], they are promoted so the
 global prompt is skipped when every collective already has the field.
@@ -38,6 +39,7 @@ from core.prompts import (
     collective_for_target,
     prepare_collectives,
     promote_shared_fields,
+    snmp_secret_ok,
 )
 from core.snmp_validate import SNMPValidator
 from core.utils import (
@@ -70,6 +72,7 @@ def _single_walk_hosts(creds: dict, typed: str) -> list:
 
 
 def _snmp_creds(creds: dict):
+    """SNMP user and passphrases only. Menu 3 never asks for SSH secrets."""
     promote_shared_fields(
         creds, ("snmp_user", "snmp_auth", "snmp_priv")
     )
@@ -78,18 +81,21 @@ def _snmp_creds(creds: dict):
         "snmp_user",
         "SNMP User",
         pattern=SNMP_NAME_RE,
-        pattern_msg="Use letters, digits, underscore, dot, or hyphen.",
+        pattern_msg="Use 1-32 letters, digits, underscore, dot, or hyphen.",
     )
     auth = _require(
-        creds, "snmp_auth", "SNMP Auth", sensitive=True, min_len=SNMP_MIN_PASSPHRASE_LEN
+        creds, "snmp_auth", "SNMP Auth", sensitive=True, min_len=SNMP_MIN_PASSPHRASE_LEN,
+        validator=snmp_secret_ok, validator_msg="No spaces or control characters in an SNMP passphrase.",
     )
     priv = _require(
-        creds, "snmp_priv", "SNMP Priv", sensitive=True, min_len=SNMP_MIN_PASSPHRASE_LEN
+        creds, "snmp_priv", "SNMP Priv", sensitive=True, min_len=SNMP_MIN_PASSPHRASE_LEN,
+        validator=snmp_secret_ok, validator_msg="No spaces or control characters in an SNMP passphrase.",
     )
     return user, auth, priv
 
 
 def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
+    """Walk addresses the operator types. Never defaults to the Controller agip, which would walk the Controller instead of the box."""
     validator = SNMPValidator()
     any_fail = False
     while True:
@@ -120,6 +126,7 @@ def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
 
 
 def _walk_inventory(creds: dict) -> int:
+    """Walk every selected appliance from the Controller inventory, in parallel, on the address SSH found this session if there is one."""
     collectives = _parse_collectives(creds)
     if not collectives:
         halt(
@@ -164,7 +171,7 @@ def _walk_inventory(creds: dict) -> int:
             "E10",
             f"{target.label()}: walk FAILED",
             "This host is skipped; others continue.",
-            "FQDN then IP: check UDP/161, SNMP user/auth/priv, and leftover usmUser.",
+            "Each address in turn (session address, admin name, admin IP, other IPs): check UDP/161, SNMP user/auth/priv, and leftover usmUser.",
             "Lab: pysnmp CFB warning is harmless. Air-gap: install vendor wheels (menu D).",
         )
 
@@ -204,6 +211,7 @@ def _walk_inventory(creds: dict) -> int:
 
 
 def main() -> None:
+    """Menu 3: single address or Controller inventory. Validation only; nothing is changed."""
     warn_insecure_transport()
     creds = load_credentials(CREDENTIALS_PATH)
     print("Walk mode:")

@@ -3,7 +3,6 @@
 Inventory *shape* (Target, health, exclude) lives in ``core/inventory.py``.
 This file only talks HTTP.
 
-
 One AppGateClient per collective (own bearer token) so a token from site A
 is never sent to site B (403 / wrong collective).
 
@@ -62,15 +61,20 @@ import ipaddress
 import atexit
 import json
 import re
+import ssl
 import sys
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 from core.ca_pin import CaPinError, require_ca_file
 from core.inventory import (
     Target,
+    _is_ip as _is_ip_text,
+    appliance_admin_ip,
     appliance_functions,
     appliance_health,
     appliance_hosts,
+    appliance_ssh_host,
     is_selectable,
     status_self_ips,
 )
@@ -82,13 +86,107 @@ from .errors import AppliancePutError
 from .ntp import NtpMixin
 from .snmp import SnmpMixin
 
-_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]|\x1b\[[0-?]*[ -/]*[@-~]")
+# Whole escape sequences first, then single control bytes. In the other order the
+# lone ESC matched first and "[2J" was left behind as text.
+_CTRL = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 def _strip_controls(text: str) -> str:
     """A Controller error must not rewrite the operator terminal."""
     # print(f"DEBUG strip: n={len(text or '')}")
     return _CTRL.sub("", text or "")
+
+
+_CNSA_TLS_CIPHERS = "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
+_cnsa_session = None
+
+
+_cnsa_contexts: Dict[Any, ssl.SSLContext] = {}
+
+
+def _cnsa_context_for(verify: Any) -> ssl.SSLContext:
+    """One CNSA context per CA file, so each Controller trusts only its own CA.
+
+    urllib3 loads the verify file into the context it is given. A single shared
+    context would collect every Controller's CA, and collective 1's CA would then
+    be trusted for collective 2. The pool key includes the context, so each CA
+    also gets its own connection pool.
+    """
+    key = verify if isinstance(verify, str) else bool(verify)
+    ctx = _cnsa_contexts.get(key)
+    if ctx is None:
+        ctx = _cnsa_context(verify_off=(key is False))
+        if isinstance(verify, str):
+            ctx.load_verify_locations(cafile=verify)
+        _cnsa_contexts[key] = ctx
+        # print(f"DEBUG cnsa: TLS context for {('CA file' if isinstance(verify, str) else verify)!r}")
+    return ctx
+
+
+def _cnsa_context(verify_off: bool = False) -> ssl.SSLContext:
+    """TLS 1.2 with ECDHE AES-256-GCM-SHA384 on P-384 only.
+
+    TLS 1.3 is turned off because Python cannot limit its cipher list, and
+    OpenSSL would also offer AES-128-GCM and ChaCha20 there. PROTOCOL_TLS_CLIENT
+    loads no system CAs: the hand-placed Controller CA is still the only trust.
+    """
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    # SECLEVEL=3 makes OpenSSL refuse an RSA server key under 3072 bits. A P-256
+    # server certificate still passes this check; the cipher and curve are P-384.
+    ctx.set_ciphers(_CNSA_TLS_CIPHERS + ":@SECLEVEL=3")
+    ctx.set_ecdh_curve("secp384r1")
+    # Same certificate checks as the normal (urllib3) path, so strict is never laxer.
+    ctx.verify_flags |= getattr(ssl, "VERIFY_X509_STRICT", 0) | getattr(ssl, "VERIFY_X509_PARTIAL_CHAIN", 0)
+    if verify_off:
+        # Only reached with verify=False, which _verify() returns only for INSECURE_API.
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+class _CnsaAdapter(requests.adapters.HTTPAdapter):
+    """Every HTTPS connection in this session uses the CNSA context for its own CA file."""
+
+    def build_connection_pool_key_attributes(self, request, verify, cert=None):
+        host_params, pool_kwargs = super().build_connection_pool_key_attributes(request, verify, cert)
+        pool_kwargs["ssl_context"] = _cnsa_context_for(verify)
+        return host_params, pool_kwargs
+
+
+def _cnsa_tls_refused(exc: BaseException) -> bool:
+    """True when CNSA_STRICT is on and the failure is a handshake mismatch, not a trust problem."""
+    import config as _config
+
+    text = str(exc).lower()
+    return bool(getattr(_config, "CNSA_STRICT", False)) and any(
+        word in text for word in ("handshake failure", "no shared cipher", "unsupported protocol",
+                                  "wrong version number", "no ciphers available", "sslv3 alert",
+                                  "key too small", "ca md too weak")
+    )
+
+
+def _http():
+    """requests itself, or a CNSA-only session when CNSA_STRICT is on. Read per call so menu C applies at once."""
+    global _cnsa_session
+    import config as _config
+
+    if not getattr(_config, "CNSA_STRICT", False):
+        return requests
+    if _cnsa_session is None:
+        session = requests.Session()
+        session.trust_env = False  # no proxy or CA bundle from the environment
+        session.mount("https://", _CnsaAdapter())
+        _cnsa_session = session
+        # print("DEBUG cnsa: TLS session created")
+    return _cnsa_session
+
+
+def _strip_display(text: str) -> str:
+    """Remove control, escape and format characters (bidi marks, zero-width) from a name shown to the operator."""
+    # print(f"DEBUG display: in={len(text or '')}")
+    return "".join(ch for ch in _strip_controls(text) if unicodedata.category(ch) != "Cf").strip()
 
 
 def _disable_tls_verify() -> None:
@@ -176,11 +274,20 @@ APPLIANCE_GET_KNOWN_TOP = frozenset(
         "extraHostnames",
         "dnsServers",
         "hosts",
+        # Seen on 6.x/7.x Controllers. Still sent back unchanged on PUT; listing them
+        # only stops DEBUG from reporting them as unknown on every GET.
+        "collectiveReplication",
+        "hostnameAliases",
+        "pendingCertificateRenewal",
+        "readOnly",
+        "siteName",
+        "telemetryAggregator",
     }
 )
 
 
 def _log_unknown_appliance_keys(appliance: Dict[str, Any], where: str) -> None:
+    """A new Controller field must be visible without stopping the run. Unknown keys are still sent back unchanged on PUT; DEBUG only lists them."""
     extra = sorted(str(k) for k in appliance if k not in APPLIANCE_GET_KNOWN_TOP)
     if extra:
         # print(f"DEBUG get-unknown: {where} extra={extra!r}")
@@ -239,6 +346,7 @@ def _path_allowed(item: str, allowed: tuple) -> bool:
 
 
 class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
+    """One Controller session. Each collective gets its own client so a bearer token is never sent to another collective's Controller."""
     def __init__(
         self,
         fqdn: str,
@@ -246,6 +354,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         api_version: Optional[str] = None,
         provider: str = APPGATE_PROVIDER,
     ) -> None:
+        """FQDN first, IP only as a connect fallback. The login id comes from certs/.machine-id so the Controller sees one stable device per install."""
         # Prefer FQDN (Controller admin hostname). IP is only a connect fallback.
         self.fqdn = (fqdn or "").strip()
         self.fallback_ip = (fallback_ip or "").strip()
@@ -279,6 +388,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         raise CaPinError("Controller CA file was not loaded. Refusing to call the API.")
 
     def _set_endpoint(self, host: str) -> None:
+        """Point base_url at one Controller address. A bare IPv6 address needs brackets in the URL."""
         self.agip = host
         h = host
         try:
@@ -327,7 +437,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 continue
             seen.append(accept)
             try:
-                response = requests.get(
+                response = _http().get(
                     f"{self.base_url}/version",
                     headers={"Accept": accept},
                     verify=self._verify(),
@@ -376,7 +486,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
     def _identity_provider_names(self) -> list:
         """Provider display names are public. A mismatch is a 403, not a bad password."""
         try:
-            response = requests.get(
+            response = _http().get(
                 f"{self.base_url}/identity-providers/names",
                 headers=self.headers,
                 verify=self._verify(),
@@ -471,7 +581,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             payload = self._login_payload(username, password, provider_name)
             self._login_retried = False
             try:
-                response = requests.post(
+                response = _http().post(
                     f"{self.base_url}/login",
                     headers=self.headers,
                     json=payload,
@@ -487,10 +597,17 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     )
             except requests.exceptions.SSLError as exc:
                 last_connect_error = exc
-                print(
-                    f"      TLS verify failed for {host} (self-signed or untrusted CA).",
-                    file=sys.stderr,
-                )
+                if _cnsa_tls_refused(exc):
+                    print(
+                        f"      {host} does not offer CNSA-grade TLS (TLS 1.2, ECDHE AES-256-GCM, P-384, "
+                        "RSA keys of 3072 bits or more). CNSA_STRICT is on.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"      TLS verify failed for {host} (self-signed or untrusted CA).",
+                        file=sys.stderr,
+                    )
                 continue
             except (requests.ConnectionError, requests.Timeout, OSError) as exc:
                 last_connect_error = exc
@@ -509,14 +626,27 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 print(f"      Accept rejected; retrying peer {named}", file=sys.stderr)
                 self._set_peer_version(named)
                 payload = self._login_payload(username, password, provider_name)
-                response = requests.post(
-                    f"{self.base_url}/login",
-                    headers=self.headers,
-                    json=payload,
-                    verify=self._verify(),
-                    timeout=API_TIMEOUT,
-                    allow_redirects=False,
-                )
+                # Same handling as the first POST: a network error here tries the IP fallback, not a traceback.
+                try:
+                    response = _http().post(
+                        f"{self.base_url}/login",
+                        headers=self.headers,
+                        json=payload,
+                        verify=self._verify(),
+                        timeout=API_TIMEOUT,
+                        allow_redirects=False,
+                    )
+                except requests.exceptions.SSLError as exc:
+                    last_connect_error = exc
+                    print(f"      TLS verify failed for {host} on the retry.", file=sys.stderr)
+                    continue
+                except (requests.ConnectionError, requests.Timeout, OSError) as exc:
+                    last_connect_error = exc
+                    print(
+                        f"      Cannot reach {host} on the retry ({type(exc).__name__}); trying fallback...",
+                        file=sys.stderr,
+                    )
+                    continue
                 if DEBUG:
                     # print(f"DEBUG login retry status={response.status_code}")
                     print(
@@ -566,7 +696,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         if not token:
             return
         try:
-            requests.delete(
+            _http().delete(
                 f"{self.base_url}/login",
                 headers={**self.headers, "Authorization": token},
                 verify=self._verify(),
@@ -629,7 +759,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         page = APPLIANCE_LIST_PAGE
         while True:
             end = start + page - 1
-            response = requests.get(
+            response = _http().get(
                 f"{self.base_url}{path}",
                 headers=self.headers,
                 params={"range": f"{start}-{end}"},
@@ -681,7 +811,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
 
     def get_appliances(self) -> list:
         """Every appliance this token can view. Paginate if JSON range says so."""
-        response = requests.get(
+        response = _http().get(
             f"{self.base_url}/appliances",
             headers=self.headers,
             verify=self._verify(),
@@ -748,50 +878,88 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         )
         targets: List[Target] = []
         for appliance in raw:
-            name = str(appliance.get("name") or appliance.get("id") or "?")
-            aid = appliance.get("id") or ""
-            if not aid:
+            if not isinstance(appliance, dict):
+                print("      skip one appliance: the Controller returned a non-object entry", file=sys.stderr)
                 continue
-            if appliance.get("activated") is False:
+            try:
+                target = self._appliance_target(
+                    appliance, status_by_id, collective, collective_fqdn, fallback_ip
+                )
+            except (AttributeError, TypeError, ValueError, KeyError) as exc:
+                # One odd appliance must not drop every box of this Controller.
+                label = _strip_controls(str(appliance.get("name") or appliance.get("id") or "?"))
+                # print(f"DEBUG list_targets: skip {label!r} {type(exc).__name__}: {exc}")
                 print(
-                    f"      skip {name}: not activated",
+                    f"      skip {label}: unexpected appliance data from the Controller ({type(exc).__name__})",
                     file=sys.stderr,
                 )
                 continue
-            health = appliance_health(appliance, status_by_id.get(aid, {}))
-            if not is_selectable(health, APPLIANCE_SKIP_STATUS):
-                print(
-                    f"      skip {name}: not healthy (status={health!r})",
-                    file=sys.stderr,
-                )
-                continue
-            ssh_fqdn, ssh_ips = appliance_hosts(appliance)
-            ssh_ip = ssh_ips[0] if ssh_ips else ""
-            if not ssh_fqdn and not ssh_ip:
-                print(f"      skip {name}: no FQDN or IP for SSH", file=sys.stderr)
-                continue
-            targets.append(
-                Target(
-                    appliance_id=aid,
-                    hostname=name,
-                    ssh_fqdn=ssh_fqdn,
-                    ssh_ip=ssh_ip,
-                    ssh_ips=ssh_ips,
-                    collective=collective,
-                    collective_fqdn=collective_fqdn or self.fqdn,
-                    collective_ip=fallback_ip or self.fallback_ip,
-                    functions=appliance_functions(appliance),
-                    health=health,
-                    self_ips=_merge_self_ips(ssh_ips, status_by_id.get(aid, {})),
-                )
-            )
+            if target is not None:
+                targets.append(target)
         return targets
 
+    def _appliance_target(
+        self,
+        appliance: Dict[str, Any],
+        status_by_id: Dict[str, Dict[str, Any]],
+        collective: int,
+        collective_fqdn: str,
+        fallback_ip: str,
+    ) -> Optional[Target]:
+        """One appliance row to a Target, or None when it is skipped (not activated, unhealthy, no address).
+
+        A field of an unexpected type raises, and list_targets skips only this box.
+        """
+        # The name is printed in the table, every result line and the reports, so
+        # control and bidi characters from the Controller are removed here once.
+        name = _strip_display(str(appliance.get("name") or appliance.get("id") or "?")) or "?"
+        aid = appliance.get("id") or ""
+        if not aid:
+            return None
+        if appliance.get("activated") is False:
+            print(
+                f"      skip {name}: not activated",
+                file=sys.stderr,
+            )
+            return None
+        health = appliance_health(appliance, status_by_id.get(aid, {}))
+        if not is_selectable(health, APPLIANCE_SKIP_STATUS):
+            print(
+                f"      skip {name}: not healthy (status={health!r})",
+                file=sys.stderr,
+            )
+            return None
+        ssh_fqdn, ssh_ips = appliance_hosts(appliance)
+        # Admin hostname first, then admin IP. The other NIC IPs stay in ssh_ips as fallbacks.
+        ssh_host = appliance_ssh_host(appliance)
+        admin_ip = appliance_admin_ip(appliance)
+        ssh_ip = admin_ip or (ssh_host if _is_ip_text(ssh_host) else (ssh_ips[0] if ssh_ips else ""))
+        if ssh_host and not _is_ip_text(ssh_host):
+            ssh_fqdn = ssh_host
+        # print(f"DEBUG list_targets: {name} admin={ssh_fqdn!r} admin_ip={admin_ip!r} ips={ssh_ips!r}")
+        if not ssh_fqdn and not ssh_ip:
+            print(f"      skip {name}: no FQDN or IP for SSH", file=sys.stderr)
+            return None
+        return Target(
+            appliance_id=aid,
+            hostname=name,
+            ssh_fqdn=ssh_fqdn,
+            ssh_ip=ssh_ip,
+            ssh_ips=ssh_ips,
+            collective=collective,
+            collective_fqdn=collective_fqdn or self.fqdn,
+            collective_ip=fallback_ip or self.fallback_ip,
+            functions=appliance_functions(appliance),
+            health=health,
+            self_ips=_merge_self_ips(ssh_ips, status_by_id.get(aid, {})),
+        )
+
     def _get_appliance(self, appliance_id: Optional[str] = None) -> Dict[str, Any]:
+        """GET one appliance and remember its ETag or version. The later PUT sends it as If-Match so a parallel edit is not overwritten."""
         aid = appliance_id
         if not aid:
             raise RuntimeError("Appliance ID is not set.")
-        response = requests.get(
+        response = _http().get(
             f"{self.base_url}/appliances/{aid}",
             headers=self.headers,
             verify=self._verify(),
@@ -886,6 +1054,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         )
 
     def _put_appliance_body(self, body: Dict[str, Any], *, what: str) -> None:
+        """PUT the whole appliance with If-Match. No version token means no PUT. Error bodies are redacted, and common HTTP codes get a hint the operator can act on."""
         aid = body.get("id")
         if not aid:
             raise AppliancePutError(f"Refusing {what} PUT; appliance id missing")
@@ -897,7 +1066,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         headers = dict(self.headers)
         headers["If-Match"] = token if token.startswith('"') or token.startswith("W/") else f'"{token}"'
         url = f"{self.base_url}/appliances/{aid}"
-        put_response = requests.put(
+        put_response = _http().put(
             url,
             headers=headers,
             json=body,
@@ -909,7 +1078,11 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             if DEBUG:
                 print(f"      DEBUG {what} PUT HTTP {put_response.status_code}", file=sys.stderr)
                 print(json.dumps(_redact_appliance_for_debug(body), indent=2, default=str), file=sys.stderr)
-                print(_strip_controls((put_response.text or "")[:API_ERROR_BODY_PREVIEW]), file=sys.stderr)
+                # A 4xx body can echo the PUT document, so the same redaction as the normal error line applies.
+                print(
+                    _strip_controls(redact_preview(put_response.text or "", API_ERROR_BODY_PREVIEW)),
+                    file=sys.stderr,
+                )
             body_preview = _strip_controls(redact_preview(put_response.text or "", API_ERROR_BODY_PREVIEW))
             hint = ""
             text_l = (put_response.text or "").lower()

@@ -23,6 +23,7 @@ SNMP_PUT_ALLOWED = ("snmpServer.snmpd.conf", "snmpServer.enabled")
 
 
 class SnmpMixin:
+    """Menu 1 snmpd.conf edits. cz-configd owns that file, so every change is a full appliance PUT, not an SSH edit."""
     @staticmethod
     def _snmpd_lines_without_user(appliance: Dict[str, Any], user: str) -> list:
         """Return snmpd.conf lines with this user's entries and engine-ID pins removed."""
@@ -84,6 +85,7 @@ class SnmpMixin:
 
     @staticmethod
     def _snmpd_lines_without_engine_pins(appliance: Dict[str, Any]) -> list:
+        """Current snmpd.conf minus engine pins (and v1/v2c lines when STRIP_V1V2_COMMUNITIES is on), so step 3 leaves exactly one engineIDType line."""
         existing_conf = appliance.get("snmpServer", {}).get("snmpd.conf", "")
         lines = existing_conf.splitlines() if existing_conf else []
         drop = SnmpMixin._engine_pin_patterns() + SnmpMixin._community_patterns()
@@ -98,11 +100,23 @@ class SnmpMixin:
 
     @staticmethod
     def _require_snmp_line(user: str, auth_hash: str = "", priv_hash: str = "", rouser_line: str = "") -> None:
-        """A newline in these fields becomes another snmpd.conf directive."""
+        """A newline in these fields becomes another snmpd.conf directive.
+
+        Each field is checked on its own. Joining them with a newline first and
+        then looking for one refused every push.
+
+        The user name has no length check. USM names are 1-32 octets (RFC 3414),
+        so a longer name passes here and is only refused by snmpd on the box.
+        """
         # print(f"DEBUG snmp token: user_len={len(user or '')} rouser={bool(rouser_line)}")
-        blob = "\n".join((user or "", auth_hash or "", priv_hash or "", rouser_line or ""))
-        if "\n" in blob or "\r" in blob:
-            raise AppliancePutError("Refusing SNMP line with a newline")
+        for label, value in (
+            ("user", user),
+            ("auth hash", auth_hash),
+            ("priv hash", priv_hash),
+            ("rouser line", rouser_line),
+        ):
+            if "\n" in (value or "") or "\r" in (value or ""):
+                raise AppliancePutError(f"Refusing SNMP {label} with a newline")
         if not re.fullmatch(SNMP_NAME_RE, user or ""):
             raise AppliancePutError("Refusing SNMP user; it must match SNMP_NAME_RE")
         for label, value in (("auth hash", auth_hash), ("priv hash", priv_hash)):

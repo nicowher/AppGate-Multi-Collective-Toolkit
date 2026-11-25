@@ -3,7 +3,6 @@
 Lives in ``core/`` so ``app/`` stays menu + config + folders. ``APP_DIR`` is
 the parent of this package (``app/``), not ``app/core/``.
 
-
   is_valid_host / prompt_until_valid
       Step 0 prompts: IPv4/IPv6/FQDN and re-ask on bad input.
 
@@ -117,13 +116,20 @@ def expand_exclude_tokens(raw: str) -> set:
 
 
 def normalize_allow_source(entry: Any) -> Dict[str, Any]:
-    """One check for the preview merge and the PUT. A bad nic must fail here so it is not sent."""
+    """One check for the preview merge and the PUT. A bad nic must fail here so it is not sent.
+
+    netmask must be a whole number or a string of digits. int() alone accepted a
+    JSON true (1) and cut a decimal (2.4 -> 2), so a typo became a very wide prefix.
+    """
     if not isinstance(entry, dict):
         raise ValueError("allowSources row must be an object")
-    try:
-        mask = int(entry.get("netmask"))
-    except (TypeError, ValueError):
-        raise ValueError("allowSources address or netmask is invalid") from None
+    raw_mask = entry.get("netmask")
+    # print(f"DEBUG allow: netmask type={type(raw_mask).__name__}")
+    if isinstance(raw_mask, bool) or not (
+        isinstance(raw_mask, int) or (isinstance(raw_mask, str) and raw_mask.strip().isdigit() and raw_mask.strip().isascii())
+    ):
+        raise ValueError("allowSources netmask must be a whole number (for example 24)")
+    mask = int(str(raw_mask).strip())
     address = format_scoped_ip(str(entry.get("address") or ""))
     host = address.split("%", 1)[0]
     try:
@@ -217,6 +223,7 @@ def _norm_dist(name: str) -> str:
 
 
 def _wheel_name_version(filename: str) -> tuple:
+    """Distribution name and version from a wheel file name, so an extract can be matched against the pinned hashes."""
     base = filename[:-4] if filename.lower().endswith(".whl") else filename
     parts = base.split("-")
     for i, part in enumerate(parts):
@@ -246,6 +253,7 @@ def _pinned_wheels() -> Dict[tuple, set]:
 
 
 def _file_sha256(path: str) -> str:
+    """Hash a wheel in chunks to compare with the pin before it is unpacked."""
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
@@ -293,6 +301,7 @@ ensure_vendor_site()
 
 
 def vendor_has_wheels() -> bool:
+    """True when menu D has already fetched wheels, so an air-gapped host can install without network."""
     return os.path.isdir(VENDOR_WHEELS) and any(
         name.endswith((".whl", ".tar.gz", ".zip"))
         for name in os.listdir(VENDOR_WHEELS)
@@ -470,16 +479,32 @@ def prompt_until_valid(
             print("      This field is required. Try again.", file=sys.stderr)
 
 
+def read_credentials_text(path: str) -> str:
+    """Decode credentials.json the way Windows editors save it: UTF-16 by BOM, else UTF-8 with or without BOM."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    # print(f"DEBUG creds: bytes={len(raw)} head={raw[:3]!r}")
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    return raw.decode("utf-8-sig")
+
+
 def load_credentials(path: str) -> Dict[str, Any]:
-    """Load optional credentials.json. Missing or invalid files become {}."""
+    """Load optional credentials.json. A missing file is {}; an unreadable one stops with E21.
+
+    UTF-8 with or without a BOM and UTF-16 (BOM) are read, because Windows
+    editors save all three. A file that exists but cannot be read stops the tool:
+    carrying on as if there were no file made the run ask for every secret and
+    hid the broken file behind one warning. Whole numbers are read as text; a
+    true/false or decimal value stops with E21.
+    """
     if not os.path.isfile(path):
         # print(f"DEBUG creds: missing {path}")
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
+        data = json.loads(read_credentials_text(path))
         if not isinstance(data, dict):
-            return {}
+            raise ValueError(f"the top level is a JSON {type(data).__name__}, not an object")
         try:
             mode = os.stat(path).st_mode & 0o077
             if mode and os.name == "posix":
@@ -494,16 +519,35 @@ def load_credentials(path: str) -> Dict[str, Any]:
         if DEBUG:
             print(f"      DEBUG creds: loaded {path} keys={sorted(data)}", file=sys.stderr)
         out: Dict[str, Any] = {}
+        wrong_type = []
         for key, value in data.items():
             # Keep objects/arrays (collectives[], mibs[]) — do not stringify them.
             if isinstance(value, (list, dict)):
                 out[key] = value
+            elif isinstance(value, (bool, float)):
+                # str(True) is "True"; it would be sent as a password or user name.
+                wrong_type.append(f"{key} is {type(value).__name__}")
             else:
                 out[key] = "" if value is None else str(value)
-        return out
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        print(f"Warning: Could not load credentials from {path}: {exc}", file=sys.stderr)
-        return {}
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+        # ValueError covers JSONDecodeError. RecursionError is a file nested too deep to parse.
+        # print(f"DEBUG creds: load failed type={type(exc).__name__} pos={getattr(exc, 'pos', None)}")
+        # The reason is the parser position or encoding error, never the file text.
+        reason = str(exc)[:200] if not isinstance(exc, RecursionError) else "nested too deeply"
+        halt(
+            "E21",
+            f"Could not read {path}: {reason}",
+            "Save it as UTF-8 (with or without BOM) or UTF-16, as one JSON object. "
+            "Move it aside to start without it.",
+        )
+    # print(f"DEBUG creds: wrong-type keys={wrong_type!r}")
+    if wrong_type:
+        halt(
+            "E21",
+            f"credentials.json has values that are not text: {', '.join(wrong_type)}",
+            'Write each one as a quoted string, for example "ssh_password": "...".',
+        )
+    return out
 
 
 def prompt_yes(prompt: str, *, default_yes: bool = False) -> bool:
@@ -576,10 +620,19 @@ _REDACT_KEY_SUBSTR = (
     "authkey",
     "privkey",
 )
-_SECRET_JSON = re.compile(
-    r'("(?:password|token|secret|passphrase|community|privateKey|authKey|key)"\s*:\s*")[^"]*"',
-    re.I,
+# Any key whose name contains one of these words is a secret (authPassphrase,
+# newPassword, sshPrivateKey). Over-hiding a field such as keyType in an error
+# body is the safer mistake.
+_SECRET_WORD = re.compile(
+    r"password|passwd|token|secret|passphrase|community|key|snmpd\.conf", re.I
 )
+# A quoted key, a colon, and a quoted string value. The key is a plain run of
+# non-quote characters and the word check runs on it separately, so the match
+# time stays linear even for a long or unclosed key (a pattern with the words
+# inside the key class backtracked for minutes on a crafted body).
+_QUOTED_PAIR = re.compile(r'("([^"\\\n]{0,200})"\s*:\s*")((?:[^"\\]|\\.)*)"')
+_QUOTED_PAIR_SQ = re.compile(r"('([^'\\\n]{0,200})'\s*:\s*')((?:[^'\\]|\\.)*)'")
+_LOCALIZED_KEY = re.compile(r"(-l\s*0x)[0-9a-f]+", re.I)
 _REDACT_KEYS = frozenset(
     {"snmpd.conf", "key", "httpsP12", "awsSecret", "p12", "password", "token"}
 )
@@ -587,9 +640,26 @@ _replaced_run_dir = ""
 
 
 def redact_preview(text: str, limit: int = 300) -> str:
-    """Cap an error body and hide echoed secrets. Controllers sometimes repeat the POST."""
-    clipped = (text or "")[:limit]
-    return _SECRET_JSON.sub(r'\1<redacted>"', clipped)
+    """Cap an error body and hide echoed secrets. Controllers sometimes repeat the POST.
+
+    Redact first, then cut. Cutting first can split a value so the pattern no
+    longer matches and the start of the secret is printed.
+
+    A key is hidden when its name contains a secret word (password, token,
+    secret, passphrase, community, key, snmpd.conf), in double or single quotes.
+    A localized key is hidden after -l with any case and optional space. A
+    secret that is not a quoted string value (a bare number) is not matched.
+    """
+    def _hide(match, quote):
+        if _SECRET_WORD.search(match.group(2)):
+            return match.group(1) + "<redacted>" + quote
+        return match.group(0)
+
+    hidden = _QUOTED_PAIR.sub(lambda m: _hide(m, '"'), text or "")
+    hidden = _QUOTED_PAIR_SQ.sub(lambda m: _hide(m, "'"), hidden)
+    hidden = _LOCALIZED_KEY.sub(r"\1<redacted>", hidden)
+    # print(f"DEBUG redact: in={len(text or '')} out={len(hidden)} limit={limit}")
+    return hidden[:limit]
 
 
 def redact_for_backup(obj: Any) -> Any:

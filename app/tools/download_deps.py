@@ -24,6 +24,7 @@ from core.utils import (
 
 
 def main() -> None:
+    """Menu D: fetch the pinned wheels on a networked machine for copying to an air-gapped host."""
     # print(f"DEBUG deps: vendor={VENDOR_DIR} packages={VENDOR_PACKAGES}")
     if DEBUG:
         print(f"      DEBUG deps: writing wheels to {VENDOR_DIR}", file=sys.stderr)
@@ -42,6 +43,7 @@ def main() -> None:
 
 
 def upgrade_main() -> None:
+    """Menu U: reinstall the pinned set into vendor/site. A newer release is not taken."""
     # print("DEBUG deps: reinstall pinned vendor set")
     if DEBUG:
         print(f"      DEBUG deps: pip install --upgrade {VENDOR_PACKAGES}", file=sys.stderr)

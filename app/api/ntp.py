@@ -18,6 +18,7 @@ NTP_PUT_ALLOWED = ("ntp", "ntpServers", "ntpServer")
 
 
 class NtpMixin:
+    """Menu 5 NTP reads and PUTs. Mixed into AppGateClient so it reuses that client's token, CA pin and If-Match handling."""
     @staticmethod
     def _ntp_key_for_api(entry: Dict[str, Any]) -> Dict[str, Any]:
         """6.7 GET shape: ntp.servers[].hostname, optional keyType/keyNo/key (SHA256 → HEX:)."""
@@ -57,6 +58,7 @@ class NtpMixin:
 
     @staticmethod
     def _ntp_hostname(entry: Any) -> str:
+        """A server comes back as a bare string or an object with hostname. Both forms must compare the same in the add and merge path."""
         if isinstance(entry, str):
             return entry.strip()
         if isinstance(entry, dict):

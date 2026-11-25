@@ -6,7 +6,7 @@ Reached via ``python app/main.py 2`` or launcher menu option 2
 Steps:
   1/3  API login (inventory only — do not PUT appliance JSON)
   2/3  Same exclude table as SNMP credentials / walk
-  3/3  SSH overlay (FQDN first). Unharden: SSHBRUTE, cz-config nopasswd,
+  3/3  SSH overlay on the session address. Unharden: SSHBRUTE, cz-config nopasswd,
        drop-in, ssh_confirm.sh TTY guard. Harden: restore backups, nopasswd
        false, nohup restart cz-configd (SSH drop otherwise).
 
@@ -29,6 +29,7 @@ from config import (
     DEBUG,
     DRY_RUN,
     SSH_CONCURRENCY,
+    SSH_LOG_PREVIEW,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
@@ -46,22 +47,38 @@ from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
 
 
 def _fail(target: Target, message: str) -> None:
-    """Fail-soft. Console is human; DEBUG prints the SSH/API detail."""
+    """Fail-soft. Console is human; the report keeps the detail so the reason survives without DEBUG.
+
+    The detail is the SSH or script error: step names, error kind, and the box
+    label. It holds no password and is capped at SSH_LOG_PREVIEW characters.
+    """
     target.status = "failed"
     low = message.lower()
-    if "getaddrinfo" in low:
+    if "getaddrinfo" in low or "(no dns)" in low:
         human = "Hostname does not resolve. Use the SSH IP or fix DNS."
-    elif "auth" in low:
+    elif "(auth)" in low or "auth failed" in low:
         human = "SSH login failed. Check username and password."
+    elif "(hostkey)" in low or "host key" in low:
+        human = "SSH host key did not match or was not accepted."
+    elif "(network)" in low or "timed out" in low or "timeout" in low:
+        human = "Could not reach the box over SSH (timeout or no route). SSHBRUTE may be rate-limiting this computer."
+    elif "acas script failed" in low:
+        human = "The ACAS script stopped at a step. The report lists the steps that ran."
+    elif "cz-configd is not active" in low:
+        human = "cz-configd did not come back after harden. Check the service on the box."
+    elif "no ssh address answered" in low:
+        human = "No SSH address for this box answered."
     else:
-        human = "ACAS prep failed on this appliance. Check the report."
+        human = "ACAS prep failed on this appliance. The report has the reason."
     target.error = human
+    target.detail = message[:SSH_LOG_PREVIEW]
     print_result(target, human, ok=False)
     if DEBUG:
         print(f"      Details: {message}", file=sys.stderr)
 
 
 def _mode_from_argv() -> str:
+    """Command-line mode (1/unharden, 2/harden) so the menu can be skipped."""
     if len(sys.argv) < 2:
         return ""
     raw = sys.argv[1].strip().lower()
@@ -73,6 +90,7 @@ def _mode_from_argv() -> str:
 
 
 def _prompt_mode() -> str:
+    """Unharden or harden. The command line wins; otherwise ask."""
     mode = _mode_from_argv()
     if mode:
         return mode
@@ -89,10 +107,13 @@ def _prompt_mode() -> str:
 
 
 def _summarize_output(text: str) -> str:
+    """Short step list for the result line, so the operator sees what ran without the whole script output."""
     hits = []
     for token in (
         "STEP_IPTABLES_OK",
         "STEP_IPTABLES_SKIP",
+        # Unharden found rules saved by an earlier run and did not overwrite them.
+        "STEP_IPTABLES_SAVED_KEPT",
         "STEP_SUDOERS_OK",
         "STEP_SUDOERS_DROPIN_OK",
         "STEP_SUDOERS_ALREADY",
@@ -117,6 +138,7 @@ def _emit_report(
     dry_run: bool,
     started_at: str,
 ) -> None:
+    """Run report without passwords. Written even after a partial run, so the operator can see which boxes changed."""
     if not (WRITE_RUN_REPORT or DEBUG):
         return
     report = {
@@ -145,6 +167,7 @@ def _emit_report(
                 "ssh_endpoints": t.ssh_endpoints(),
                 "status": t.status,
                 "error": t.error,
+                "detail": t.detail,
             }
             for t in selected
         ],
@@ -158,6 +181,7 @@ def _apply(
     mode: str,
     dry_run: bool,
 ) -> None:
+    """Step 3: preview, or run the script per box in parallel after the address and host-key check. A box with no working address is skipped."""
     verb = "Unharden" if mode == "unharden" else "Harden"
     print(f"\n[3/3] {verb} via SSH (up to {SSH_CONCURRENCY} at a time)...")
     if dry_run:
@@ -192,10 +216,13 @@ def _apply(
                 if ln.startswith("STEP_"):
                     print(f"        {ln}")
 
-    run_ssh_batch(selected, _one, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
+    # A box with no answering address or a refused host key already failed above. Do not SSH to it.
+    ready = [t for t in selected if t.status != "failed"]
+    run_ssh_batch(ready, _one, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 
 
 def main() -> None:
+    """Menu 2: login, inventory and exclude, preview, confirm, then apply and report."""
     warn_insecure_transport()
     creds = load_credentials(CREDENTIALS_PATH)
     collectives = _parse_collectives(creds)

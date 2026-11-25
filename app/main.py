@@ -85,6 +85,7 @@ def _sigint_confirm_cancel(signum, frame) -> None:
 
 
 def _menu_select_hint() -> str:
+    """A release zip has no D/U menu, so the hint must not offer it."""
     return "1, 2, 3, 4, 5, 6, C, or Q" if IS_RELEASE else "1, 2, 3, 4, 5, 6, C, D, U, or Q"
 
 
@@ -210,7 +211,21 @@ def cli(argv: Optional[List[str]] = None) -> None:
 
     No args  → interactive menu (return to menu after each tool).
     First arg 1|2|3|4|5|c|d|u|walk|acas|ntp|deps → run that tool once; remaining args go to Python.
+
+    Closed input (Ctrl+D, Ctrl+Z then Enter on Windows, or an empty pipe) ends the
+    toolkit with a message. No later prompt can be answered, so it is a cancel, and
+    any yes/no that was waiting stays No.
     """
+    try:
+        _cli(argv)
+    except EOFError:
+        # print("DEBUG cli: EOF on stdin")
+        print("\nInput closed. Stopping; nothing further was applied.", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cli(argv: Optional[List[str]] = None) -> None:
+    """Menu loop. cli() wraps it so closed input is a clean stop, not a traceback."""
     args = list(sys.argv[1:] if argv is None else argv)
     if args and not _normalize_menu_choice(args[0]):
         print(f"Invalid choice. Use {_menu_select_hint()}.", file=sys.stderr)

@@ -5,6 +5,8 @@ boxes require (allowed_types has keyboard-interactive but not password).
 kbd-int uses Transport, so host keys are checked with the same policy.
 Connect, channel reads, and the exit-status wait use SSH_TIMEOUT.
 SSH_STRICT_HOST_KEY follows LAB_MODE. The main thread asks once per appliance before connect. A worker must not ask.
+Before parallel work, prime_target_host_keys finds one answering address per box
+by reading host keys without a password, and keeps it in memory for the session.
 """
 from core.utils import ensure_package, run_target_batch
 
@@ -19,8 +21,10 @@ import hashlib
 import ipaddress
 import logging
 import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import shlex
 import socket
 import sys
@@ -53,6 +57,66 @@ _SSH_DISABLED = {
 }
 
 
+# CNSA_STRICT allow-lists. Everything paramiko offers outside these is disabled.
+_CNSA_ALLOW = {
+    "ciphers": ("aes256-ctr", "aes256-gcm@openssh.com"),
+    "macs": ("hmac-sha2-512", "hmac-sha2-512-etm@openssh.com"),
+    "kex": (
+        "ecdh-sha2-nistp384",
+        "ecdh-sha2-nistp521",
+        "diffie-hellman-group16-sha512",
+        "diffie-hellman-group18-sha512",
+    ),
+    "keys": ("ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "rsa-sha2-512"),
+}
+_CNSA_RSA_MIN_BITS = 3072
+
+
+def _cnsa_on() -> bool:
+    """Read at each connect, so a menu C change applies in this session."""
+    import config as _config
+
+    return bool(getattr(_config, "CNSA_STRICT", False))
+
+
+def _ssh_disabled() -> dict:
+    """Algorithms to refuse for this connection: the STIG floor, plus everything outside CNSA when CNSA_STRICT is on."""
+    if not _cnsa_on():
+        return _SSH_DISABLED
+    preferred = {
+        "ciphers": paramiko.Transport._preferred_ciphers,
+        "macs": paramiko.Transport._preferred_macs,
+        "kex": paramiko.Transport._preferred_kex,
+        "keys": paramiko.Transport._preferred_keys,
+    }
+    out = {kind: [a for a in algs if a not in _CNSA_ALLOW[kind]] for kind, algs in preferred.items()}
+    out["pubkeys"] = list(out["keys"])
+    # print(f"DEBUG cnsa: disabled={ {k: len(v) for k, v in out.items()} }")
+    return out
+
+
+def _cnsa_key_problem(key) -> str:
+    """Why this host key is below CNSA, or empty. RSA must be 3072 bits or more."""
+    if key is None or not _cnsa_on():
+        return ""
+    name = key.get_name()
+    if name.startswith("rsa") or name == "ssh-rsa":
+        bits = key.get_bits()
+        if bits < _CNSA_RSA_MIN_BITS:
+            return f"host key is RSA-{bits}, below the CNSA minimum of {_CNSA_RSA_MIN_BITS}"
+    elif name not in _CNSA_ALLOW["keys"]:
+        return f"host key type {name} is not CNSA-grade"
+    return ""
+
+
+def _cnsa_reason(exc: BaseException) -> str:
+    """A negotiation failure under CNSA_STRICT gets a plain reason instead of paramiko's text."""
+    text = str(exc).lower()
+    if _cnsa_on() and ("incompatible" in text or "no acceptable" in text or "no matching" in text):
+        return "the box offers no CNSA-grade SSH algorithm (CNSA_STRICT is on)"
+    return ""
+
+
 def _close_channel(stdout) -> None:
     """The session stays open. Each command still needs its channel released."""
     try:
@@ -78,7 +142,6 @@ from config import (
     SSH_LOG_PREVIEW,
     SSH_PORT,
     SSH_STRICT_HOST_KEY,
-    SSH_PRIME_BATCH,
     SSH_PRIME_TIMEOUT,
     SSH_TIMEOUT,
     YES_ANSWERS,
@@ -86,6 +149,7 @@ from config import (
 
 
 def _addr_is_ip(value: str) -> bool:
+    """Prompts name a box by hostname when one exists, not by the last IPv6 tried."""
     text = (value or "").strip()
     if text.startswith("[") and text.endswith("]"):
         text = text[1:-1]
@@ -104,38 +168,41 @@ def _ssh_display_name(addrs: Sequence[str]) -> str:
     return addrs[0] if addrs else ""
 
 
-def _tcp_open(host: str) -> bool:
-    """Port open is not a login. A password probe of every open port would spend a lockout attempt on each."""
-    try:
-        sock = socket.create_connection((host, SSH_PORT), timeout=SSH_PRIME_TIMEOUT)
-    except OSError:
-        return False
-    try:
-        sock.close()
-    except OSError:
-        pass
-    return True
-
-
 def _host_resolves(host: str) -> bool:
-    """False if DNS fails (Windows 11001). Skip FQDN, try ssh_ip — not a password problem."""
+    """False if DNS fails (Windows 11001). Skip FQDN, try ssh_ip — not a password problem.
+
+    getaddrinfo has no timeout of its own, so it runs in a helper thread and waits
+    at most SSH_PRIME_TIMEOUT. A slow or dead resolver then counts as "no DNS" and
+    the next address (usually the admin IP) is tried, instead of stalling the
+    address search on the main thread. An IP address resolves at once.
+    """
+    # print(f"DEBUG dns: resolve {host!r}")
     name = (host or "").strip()
     if name.startswith("[") and name.endswith("]"):
         name = name[1:-1]
     if not name:
         return False
-    try:
-        socket.getaddrinfo(name, SSH_PORT, type=socket.SOCK_STREAM)
+    if _addr_is_ip(name.split("%", 1)[0]):
         return True
-    except (socket.gaierror, OSError, ValueError):
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = pool.submit(socket.getaddrinfo, name, SSH_PORT, type=socket.SOCK_STREAM)
+        fut.result(timeout=SSH_PRIME_TIMEOUT)
+        return True
+    except (socket.gaierror, OSError, ValueError, FuturesTimeout):
         return False
+    finally:
+        # A lookup still waiting on the OS is left to finish in the background.
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 _ssh_progress_active = False
 
 
 class SSHSession:
+    """One user and password for SSH work on appliances. Address order, host-key policy and retry rules live here so every tool behaves the same."""
     def __init__(self, ssh_user: str, ssh_password: str) -> None:
+        """Fail kind and reason come from the last attempt, and the label tags log lines with the appliance."""
         self.ssh_user = ssh_user
         self.ssh_password = ssh_password
         self._ssh_fail_kind = ""
@@ -145,6 +212,7 @@ class SSHSession:
 
     @staticmethod
     def _unwrap(host: Any) -> Tuple[Any, List[str]]:
+        """Accept a Target (use its address list and pin), one address, or a list of addresses."""
         if getattr(host, "ssh_endpoints", None) is not None and not isinstance(
             host, (str, bytes, list, tuple)
         ):
@@ -155,15 +223,22 @@ class SSHSession:
 
     @staticmethod
     def _pin(target: Any, addr: str) -> None:
-        if target is not None and addr:
+        """Later steps and later menus in this session go straight to this address."""
+        if target is None or not addr:
+            return
+        if hasattr(target, "pin_ssh_host"):
+            target.pin_ssh_host(addr)
+        else:
             target.ssh_ok_host = addr
 
     def _set_log_label(self, target: Any) -> None:
+        """Every log line names its appliance, because SSH work runs in parallel."""
         self._log_label = ""
         if target is not None and hasattr(target, "label"):
             self._log_label = target.label() or ""
 
     def _tag(self, addr: str = "") -> str:
+        """Log prefix: appliance label plus the address being tried."""
         if self._log_label and addr:
             return f"{self._log_label} {addr}"
         return self._log_label or addr
@@ -202,6 +277,7 @@ class SSHSession:
 
     @staticmethod
     def _net_reason(exc: BaseException) -> str:
+        """Short reason (timeout, unreachable, no DNS, else the error type) for the failure line. A traceback is not useful to the operator."""
         text = str(exc).lower()
         name = type(exc).__name__
         if name in ("TimeoutError", "timeout") or "timed out" in text:
@@ -230,53 +306,6 @@ class SSHSession:
         # System known_hosts is not the production pin. A planted key there must not pass.
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
-    def prime_host_keys(self, hosts: Union[str, Sequence[str]]) -> bool:
-        """Check a few addresses at once, then send the password to only the first one that accepts a connection.
-
-        A name already in known_hosts still gets a connect attempt. Returning
-        early on a cached FQDN used to skip this box's working private IP.
-        Pins the address that answered on the Target for later SSH steps.
-        """
-        target, addrs = self._unwrap(hosts)
-        self._set_log_label(target)
-        pending = []
-        for host in addrs:
-            if not _host_resolves(host):
-                self._log(f"{self._tag(host)} skip (no DNS)", noise=True)
-                continue
-            pending.append(host)
-        batch_size = max(1, SSH_PRIME_BATCH)
-        while pending:
-            batch = pending[:batch_size]
-            pending = pending[batch_size:]
-            # print(f"DEBUG prime: batch={batch!r}")
-            open_hosts = self._tcp_open_batch(batch)
-            for host in batch:
-                if host not in open_hosts:
-                    continue
-                if self._with_ssh(host, lambda _c: True, timeout=SSH_PRIME_TIMEOUT) is not None:
-                    if DEBUG:
-                        self._log(f"{self._tag(host)} ok")
-                    self._pin(target, host)
-                    return True
-                self._log(f"{self._tag(host)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
-                if self._ssh_fail_kind in ("auth", "keyonly", "hostkey"):
-                    self._pin(target, host)
-                    return False
-        return False
-
-    def _tcp_open_batch(self, batch: list) -> set:
-        """See which addresses accept TCP. The password is not sent here."""
-        if len(batch) == 1:
-            return {batch[0]} if _tcp_open(batch[0]) else set()
-        open_hosts = set()
-        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            futs = {pool.submit(_tcp_open, host): host for host in batch}
-            for fut in as_completed(futs):
-                if fut.result():
-                    open_hosts.add(futs[fut])
-        return open_hosts
-
     def _with_ssh(self, ip: str, fn, timeout: Optional[int] = None):
         """Open an SSH session, run *fn(client)*, then close.
 
@@ -296,7 +325,7 @@ class SSHSession:
                 allow_agent=False,
                 look_for_keys=False,
                 auth_timeout=min(wait, SSH_AUTH_TIMEOUT),
-                disabled_algorithms=_SSH_DISABLED,
+                disabled_algorithms=_ssh_disabled(),
             )
             self._mark_ssh("", "ok")
             return fn(client)
@@ -324,7 +353,10 @@ class SSHSession:
             self._last_reason = self._net_reason(exc)
             self._log(f"{self._tag(ip)} {type(exc).__name__}: {exc}", noise=True)
         except paramiko.SSHException as exc:
-            if "host key" in str(exc).lower():
+            cnsa = _cnsa_reason(exc)
+            if cnsa:
+                self._mark_ssh("cnsa", cnsa)
+            elif "host key" in str(exc).lower():
                 self._mark_ssh("hostkey", "host key mismatch")
             elif self._ssh_fail_kind != "hostkey":
                 self._mark_ssh("network", type(exc).__name__)
@@ -371,7 +403,7 @@ class SSHSession:
         try:
             sock = socket.create_connection((ip, SSH_PORT), timeout=SSH_TIMEOUT)
             sock.settimeout(SSH_TIMEOUT)
-            transport = paramiko.Transport(sock, disabled_algorithms=_SSH_DISABLED)
+            transport = paramiko.Transport(sock, disabled_algorithms=_ssh_disabled())
             transport.banner_timeout = SSH_TIMEOUT
             transport.auth_timeout = SSH_AUTH_TIMEOUT
             transport.start_client(timeout=SSH_TIMEOUT)
@@ -417,13 +449,20 @@ class SSHSession:
         error: str = "SSH failed",
         prompt_password: bool = True,
     ):
-        """Try FQDN then IP.
+        """Try the session address first, then the rest of the list, one pass.
 
-        None = connect miss, try the next address.
+        None = connect miss, try the next address. If the address remembered
+        for this session stopped answering, the walk goes on down the list and
+        pins the first one that works.
         False = connected but the work failed — do not retry the other NIC
         (that would bounce snmpd / re-run ACAS on the same box).
         Auth failure stops the IP walk (same wrong password on every NIC
         trips SSHBRUTE). Main thread may then ask for a new password.
+        A host-key mismatch also stops: the box gets no password on any address.
+        A fallback address only gets the password once it shows the same key
+        as an address already approved for this box.
+        If every address misses, the session address is forgotten so the next
+        menu run searches again.
         """
         target, addrs = self._unwrap(host)
         self._set_log_label(target)
@@ -440,7 +479,12 @@ class SSHSession:
                 self._log(f"{self._tag(addr)} skip (no DNS)", noise=True)
                 continue
 
+            if i > 0 and not _login_allowed(addr, addrs[:i]):
+                self._log(f"{self._tag(addr)} skip (no answer or a different host key)", noise=True)
+                continue
+
             last = addr
+            # print(f"DEBUG ssh_endpoints: {self._tag(addr)} try {i + 1}/{len(addrs)}")
             result = self._with_ssh(addr, fn)
             if result is False:
                 raise ValueError(f"{error} (connected but failed) ({label or addr})")
@@ -456,7 +500,12 @@ class SSHSession:
                 auth_hit = addr
                 self._pin(target, addr)
                 break
-            self._log(f"{self._tag(addr)} trying next", noise=True)
+            if self._ssh_fail_kind in ("hostkey", "cnsa"):
+                break
+            if i + 1 < len(addrs):
+                self._log(f"{self._tag(addr)} trying next", noise=True)
+        if self._ssh_fail_kind in ("network", "") and target is not None and hasattr(target, "forget_ssh_host"):
+            target.forget_ssh_host()
         if (
             prompt_password
             and self._ssh_fail_kind == "auth"
@@ -498,6 +547,7 @@ class SSHSession:
         timeout: Optional[int] = None,
         extra_stdin: str = "",
     ) -> Optional[Tuple[int, str]]:
+        """Run a script under sudo. If sudo -n works the password is not written, so it is never left on stdin for the script to read."""
         wait = SSH_TIMEOUT if timeout is None else timeout
         nopass = self._sudo_skips_password(client)
         # print(f"DEBUG sudo: nopass={nopass}")
@@ -603,6 +653,7 @@ def host_key_store_provisioned() -> bool:
 
 
 def _known_hosts_path() -> str:
+    """The toolkit store set by install_oob_host_keys, else SSH_KNOWN_HOSTS or the user file."""
     if _oob_known_hosts:
         return _oob_known_hosts
     path = SSH_KNOWN_HOSTS.strip() or str(Path.home() / ".ssh" / "known_hosts")
@@ -676,16 +727,23 @@ def _host_key_fingerprint(key) -> str:
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
 
+# Why the last host-key read failed, when that reason is worth showing (CNSA). Main thread only.
+_last_key_read_error = ""
+
+
 def _read_remote_host_key(host: str, timeout: int = SSH_PRIME_TIMEOUT):
     """Read the server key without authenticating. A password here would spend a lockout attempt."""
     sock = None
     transport = None
+    global _last_key_read_error
+    _last_key_read_error = ""
     try:
         sock = socket.create_connection((host, SSH_PORT), timeout=timeout)
-        transport = paramiko.Transport(sock, disabled_algorithms=_SSH_DISABLED)
+        transport = paramiko.Transport(sock, disabled_algorithms=_ssh_disabled())
         transport.start_client(timeout=timeout)
         return transport.get_remote_server_key()
-    except (OSError, paramiko.SSHException):
+    except (OSError, paramiko.SSHException) as exc:
+        _last_key_read_error = _cnsa_reason(exc)
         return None
     finally:
         if transport is not None:
@@ -735,6 +793,7 @@ def _any_stored_key(host: str):
 
 
 def _stored_host_key(host: str, key):
+    """The saved key of the same type as the one the server showed, or None."""
     path = _ensure_known_hosts_path()
     if not os.path.isfile(path):
         return None
@@ -748,35 +807,64 @@ def _stored_host_key(host: str, key):
     return entry.get(key.get_name())
 
 
+# One writer at a time for the toolkit known_hosts file (see _save_host_key).
+_KNOWN_HOSTS_LOCK = threading.Lock()
+
+
 def _save_host_key(host: str, key) -> None:
-    """Append one accepted key. A wildcard name is already refused by the line check."""
+    """Append one accepted key. A wildcard name is already refused by the line check.
+
+    The address search saves on the main thread, and a fallback address saves from
+    SSH worker threads. The lock keeps two saves from losing each other's key. The
+    new file is written beside the old one and swapped in with os.replace, so a
+    reader in another thread sees the old file or the new one, never half of it.
+    """
+    # print(f"DEBUG known_hosts: save host={host!r} type={key.get_name()} thread={threading.current_thread().name}")
     from paramiko.hostkeys import HostKeys
 
     path = _ensure_known_hosts_path()
-    known = HostKeys()
-    if os.path.isfile(path):
-        known.load(path)
-    known.add(host, key.get_name(), key)
-    known.save(path)
-    try:
-        os.chmod(path, SSH_KNOWN_HOSTS_MODE)
-    except OSError:
-        pass
+    with _KNOWN_HOSTS_LOCK:
+        known = HostKeys()
+        if os.path.isfile(path):
+            known.load(path)
+        known.add(host, key.get_name(), key)
+        fd, tmp = tempfile.mkstemp(prefix=".known_hosts.", dir=os.path.dirname(path) or ".")
+        os.close(fd)
+        try:
+            known.save(tmp)
+            try:
+                os.chmod(tmp, SSH_KNOWN_HOSTS_MODE)
+            except OSError:
+                pass
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
+
+def _box_key(names: Sequence[str]):
+    """The key already approved for this appliance under any of its names, or None."""
+    for name in names:
+        key = _any_stored_key(name)
+        if key is not None:
+            return key
+    return None
 
 
 def _login_allowed(host: str, pinned: list) -> bool:
-    """Send the password only if this address already has a saved key, or presents that same key."""
+    """Send the password only if this address already has a saved key, or presents that same key.
+
+    One unauthenticated key read per fallback address. A timeout there returns
+    False, so a dead NIC is skipped without a password attempt.
+    """
     if _any_stored_key(host) is not None:
         return True
-    expected = None
-    for name in pinned:
-        expected = _any_stored_key(name)
-        if expected is not None:
-            break
+    expected = _box_key(pinned)
     if expected is None:
         return True
-    if not _tcp_open(host):
-        return False
     remote = _read_remote_host_key(host)
     if remote is not None and remote == expected:
         _save_host_key(host, remote)
@@ -784,62 +872,65 @@ def _login_allowed(host: str, pinned: list) -> bool:
     return False
 
 
-def _bind_same_key_hosts(target, host: str, key) -> None:
-    """A timeout on the shown address must be able to try another address that presents the same key."""
-    target.ssh_only_host = ""
-    target.ssh_approved_hosts = []
-    approved = [host]
-    for other in target.ssh_endpoints():
-        if other == host or not _host_resolves(other) or not _tcp_open(other):
-            continue
-        other_key = _read_remote_host_key(other)
-        if other_key is not None and other_key == key:
-            _save_host_key(other, other_key)
-            approved.append(other)
-    target.ssh_ok_host = host
-    target.ssh_only_host = ""
-    target.ssh_approved_hosts = approved
+def _find_ssh_address(target) -> bool:
+    """Main thread, before parallel work. Pick this box's SSH address without sending a password.
 
-
-def _prompt_store_host_key(target) -> bool:
-    """One prompt per appliance, on the main thread. No skips the box. Yes keeps every address that presents that same key."""
+    1. An address found earlier in this toolkit session is reused with no probe.
+    2. Otherwise each address is tried in order, reading the server key only
+       (no login). No DNS, a timeout, or a refused port moves to the next one.
+    3. The first address that answers decides. A key that matches the one saved
+       for this box pins it. An unknown or changed key is shown once: yes saves
+       it and pins the address, no skips the box.
+    The worker then logs in once on the pinned address. A separate test login
+    here used to double the SSH connections per box and trip SSHBRUTE.
+    """
     from config import YES_ANSWERS
 
-    saved = []
-    for host in target.ssh_endpoints():
-        if _any_stored_key(host) is not None:
-            saved.append(host)
-    if saved:
-        target.ssh_only_host = ""
-        target.ssh_approved_hosts = []
-        names = []
-        for host in target.ssh_endpoints():
-            if host not in names:
-                names.append(host)
-        key = _any_stored_key(saved[0])
-        if key is not None:
-            for host in names:
-                if _any_stored_key(host) is None:
-                    _save_host_key(host, key)
-        target.ssh_ok_host = saved[0]
-        target.ssh_approved_hosts = names
-        print(f"      {target.label()}: using stored host key", file=sys.stderr)
+    pinned = target.session_ssh_host()
+    if pinned and _any_stored_key(pinned) is not None:
+        target.pin_ssh_host(pinned)
+        print(f"      {target.label()}: using {pinned} (found earlier this session)", file=sys.stderr)
         return True
-    for host in target.ssh_endpoints():
+    names = target.ssh_endpoints()
+    missed = []
+    for host in names:
         if not _host_resolves(host):
+            missed.append(f"{host} (no DNS)")
             continue
+        # print(f"DEBUG find_addr: {target.label()} probe {host}")
         key = _read_remote_host_key(host)
+        if key is None and _last_key_read_error:
+            # Every NIC runs the same sshd, so another address cannot do better.
+            target.status = "failed"
+            target.error = f"{host}: {_last_key_read_error}"
+            print(f"      {target.label()}: {target.error}", file=sys.stderr)
+            return False
         if key is None:
+            missed.append(f"{host} (no answer)")
+            print(f"      {target.label()}: {host} did not answer on port {SSH_PORT}; trying next", file=sys.stderr)
             continue
+        problem = _cnsa_key_problem(key)
+        if problem:
+            target.status = "failed"
+            target.error = f"{host}: {problem} (CNSA_STRICT is on)"
+            print(f"      {target.label()}: {target.error}", file=sys.stderr)
+            return False
         stored = _stored_host_key(host, key)
         if stored is not None and stored == key:
-            _bind_same_key_hosts(target, host, key)
+            target.pin_ssh_host(host)
+            print(f"      {target.label()}: using {host} (stored host key)", file=sys.stderr)
+            return True
+        if _any_stored_key(host) is None and _box_key([n for n in names if n != host]) == key:
+            # Same box under another name. That name's key was already approved.
+            _save_host_key(host, key)
+            target.pin_ssh_host(host)
+            print(f"      {target.label()}: using {host} (same host key as this box's other name)", file=sys.stderr)
             return True
         if not sys.stdin.isatty():
             target.status = "failed"
             target.error = "SSH host key prompt needs a terminal"
             return False
-        changed = stored is not None
+        changed = _any_stored_key(host) is not None
         print(
             f"      {target.label()}: {'changed' if changed else 'unknown'} SSH host key for {host}",
             file=sys.stderr,
@@ -852,18 +943,19 @@ def _prompt_store_host_key(target) -> bool:
             target.error = "SSH host key was not stored"
             return False
         _save_host_key(host, key)
-        _bind_same_key_hosts(target, host, key)
+        target.pin_ssh_host(host)
         return True
     target.status = "failed"
-    target.error = "Could not read the SSH host key"
+    target.error = "No SSH address answered: " + (", ".join(missed) or "no address")
     print(f"      {target.label()}: {target.error}", file=sys.stderr)
     return False
 
 
 def prime_target_host_keys(targets, collectives) -> None:
-    """Main thread: prompt once per appliance, then pin ssh_ok_host.
+    """Main thread: find one working address per appliance and check its host key.
 
-    Workers must not ask. A missing username or a prime failure skips that box and continues.
+    Workers must not ask. A missing username or no answering address fails that
+    box and the next one is still checked. Callers must skip boxes left failed.
     """
     from core.prompts import collective_for_target
 
@@ -871,24 +963,30 @@ def prime_target_host_keys(targets, collectives) -> None:
     _attach_existing_known_hosts()
     # print(f"DEBUG prime_keys: n={len(targets)}")
     print(
-        "      SSH: checking host keys before parallel work starts.",
+        "      SSH: finding each appliance's address and checking host keys before parallel work starts.",
         file=sys.stderr,
     )
     for target in targets:
-        print(f"      {target.label()}: checking SSH host key", file=sys.stderr)
-        if not _prompt_store_host_key(target):
-            continue
         try:
             col = collective_for_target(target, collectives)
-            session = SSHSession(col["ssh_username"], ssh_password_for(target, col))
-            session.prime_host_keys(target)
-        except (OSError, paramiko.SSHException, ValueError, KeyError, RuntimeError) as exc:
+            if not (col.get("ssh_username") or "").strip():
+                raise KeyError("ssh_username")
+        except (KeyError, ValueError, RuntimeError) as exc:
+            target.status = "failed"
+            target.error = f"missing SSH setting {exc}"
+            print(f"      {target.label()}: {target.error}", file=sys.stderr)
+            continue
+        print(f"      {target.label()}: checking SSH address and host key", file=sys.stderr)
+        try:
+            _find_ssh_address(target)
+        except (OSError, paramiko.SSHException, ValueError) as exc:
             target.status = "failed"
             target.error = str(exc)
             print(f"      {target.label()}: {exc}", file=sys.stderr)
 
 
 def ssh_password_for(target, col: dict) -> str:
+    """A retry password the operator typed for this box wins over the credentials file."""
     override = getattr(target, "ssh_password_override", None)
     if override:
         return override
@@ -904,6 +1002,7 @@ def _auth_retry_allowed() -> bool:
 
 
 def _note_auth_fail() -> None:
+    """Count wrong-password attempts across the run so retries stop before the appliance lockout."""
     global _auth_failures
     _auth_failures += 1
 

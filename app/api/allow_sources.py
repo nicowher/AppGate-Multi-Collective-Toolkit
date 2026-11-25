@@ -13,6 +13,7 @@ ALLOW_SOURCES_PARENTS = tuple(sorted(set(ALLOW_SOURCES_SLOT_PARENT.values())))
 
 
 class AllowSourcesMixin:
+    """Menu 6 reads and PUTs of allowSources. Mixed into AppGateClient so it reuses that client's token, CA pin and If-Match handling."""
     @staticmethod
     def _allow_source_key(entry: Any) -> tuple:
         """Same rule as the preview merge. A second copy here used to accept a row the other path dropped."""

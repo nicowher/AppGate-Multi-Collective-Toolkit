@@ -127,11 +127,26 @@ def _api_by_collective(
 
     PUTs to the same Controller stay sequential. Never send collective 2's
     token to collective 1's appliance id.
+
+    The first failure stops the step for every collective. Earlier boxes are
+    rolled back, and every box not reached yet is marked failed. A box left in
+    its old status would go on to the SSH steps, and step 7 would purge its SNMP
+    user even though it never got the new createUser line.
     """
     by_col: Dict[int, List[Target]] = {}
     applied = []
     for t in targets:
         by_col.setdefault(t.collective, []).append(t)
+    order = [t for col in sorted(by_col) for t in by_col[col]]
+
+    def _stop_after(failed: Target) -> None:
+        rollback_prior(applied)
+        done = {id(t) for t, _c in applied} | {id(failed)}
+        left = [t for t in order if id(t) not in done and t.status != "failed"]
+        # print(f"DEBUG api_by_collective: stop at {failed.label()} left={[t.label() for t in left]}")
+        for t in left:
+            _fail(t, f"not changed; this step stopped after {failed.label()} failed")
+
     for col in sorted(by_col):
         client = clients.get(col)
         if client is None:
@@ -144,15 +159,16 @@ def _api_by_collective(
                 applied.append((target, client))
             except AppliancePutError as exc:
                 _fail(target, str(exc), code="E08")
-                rollback_prior(applied)
+                _stop_after(target)
                 return
             except Exception as exc:
                 _fail(target, str(exc))
-                rollback_prior(applied)
+                _stop_after(target)
                 return
 
 
 def main() -> None:
+    """Menu 1: login, inventory, preview all 8 steps, then apply only after confirm. Each step skips boxes that failed an earlier step."""
     try:
         warn_insecure_transport()
         creds = load_credentials(CREDENTIALS_PATH)
@@ -175,7 +191,7 @@ def main() -> None:
                 "SNMP Read-Only Username (rouser)",
                 required=False,
                 pattern=SNMP_NAME_RE,
-                pattern_msg="Use letters, digits, underscore, dot, or hyphen.",
+                pattern_msg="Use 1-32 letters, digits, underscore, dot, or hyphen.",
             ),
         }
         if inputs["snmp_auth"] and inputs["snmp_auth"] == inputs["snmp_priv"]:
@@ -234,7 +250,8 @@ def main() -> None:
 
         _print_summary(selected, user=user, rouser_line=rouser_line, dry_run=dry_run)
         report = _build_run_report(
-            collectives, inventory, selected, user=user, dry_run=dry_run, started_at=started_at
+            collectives, inventory, selected, user=user, dry_run=dry_run, started_at=started_at,
+            clients=clients,
         )
         if WRITE_RUN_REPORT or DEBUG:
             _emit_run_report(report)
@@ -275,6 +292,7 @@ def main() -> None:
                     user=user,
                     dry_run=False,
                     started_at=live_started,
+                    clients=clients,
                 )
                 if WRITE_RUN_REPORT or DEBUG:
                     _emit_run_report(live_report)
@@ -379,6 +397,9 @@ def _run_phases_3_to_8(
             _fail(target, f"hash: {exc}")
 
     print("\n[6/8] Pushing SNMPv3 config via each Controller...")
+    # Appliance ids whose createUser PUT succeeded. Step 7 purges only these, so a box
+    # that was never pushed keeps its existing SNMP user.
+    pushed: set = set()
     mode = "replace" if replace else "add"
     if dry_run:
         for target in _ok(selected):
@@ -406,6 +427,7 @@ def _run_phases_3_to_8(
                 snapshot_label=target.label(),
             )
             target.status = "ok"
+            pushed.add(target.appliance_id)
             print_result(target, f"SNMP {mode}")
 
         _api_by_collective(_ok(selected), clients, _push)
@@ -432,7 +454,10 @@ def _run_phases_3_to_8(
                     appliance_id=target.appliance_id,
                 )
 
-        run_ssh_batch(_ok(selected), _ssh_purge, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
+        # A rolled-back box is failed, so _ok drops it even though its id is in pushed.
+        purge_set = [t for t in _ok(selected) if t.appliance_id in pushed]
+        # print(f"DEBUG step7: purge={[t.label() for t in purge_set]}")
+        run_ssh_batch(purge_set, _ssh_purge, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 
     print(f"\n[8/8] Validating SNMP walks (up to {WALK_CONCURRENCY} at a time)...")
     # print(f"DEBUG step8: dry_run={dry_run} skip={SKIP_CREDENTIAL_WALK}")
@@ -478,6 +503,7 @@ def _run_phases_3_to_8(
 def _print_summary(
     selected: List[Target], *, user: str, rouser_line: str, dry_run: bool
 ) -> None:
+    """End-of-run table per collective: preview, ok or failed, with the engine ID."""
     print("\n" + "=" * SUMMARY_WIDTH)
     print("DRY-RUN Preview" if dry_run else "Configuration Summary")
     print("=" * SUMMARY_WIDTH)
@@ -509,9 +535,21 @@ def _build_run_report(
     user: str,
     dry_run: bool,
     started_at: str,
+    clients: Optional[ClientMap] = None,
 ) -> Dict[str, Any]:
-    """Structured end-of-run report. No passwords, tokens, or full localized keys."""
+    """Structured end-of-run report. No passwords, tokens, or full localized keys.
+
+    The API version is the one each Controller negotiated at login. Collectives
+    can run different releases, so the config default is only the fallback.
+    """
     finished_at = datetime.now(timezone.utc).isoformat()
+    versions: Dict[int, str] = {}
+    for c in collectives:
+        idx = int(c["index"])
+        client = (clients or {}).get(idx)
+        versions[idx] = str(getattr(client, "api_version", "") or APPGATE_API_VERSION)
+    distinct = sorted(set(versions.values()))
+    # print(f"DEBUG report: api_versions={versions!r}")
     report: Dict[str, Any] = {
         "script": "snmp_credentials",
         "started_at": started_at,
@@ -521,10 +559,14 @@ def _build_run_report(
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "collectives": [
-            {"index": int(c["index"]), "api_username": c["api_username"]}
+            {
+                "index": int(c["index"]),
+                "api_username": c["api_username"],
+                "api_version": versions[int(c["index"])],
+            }
             for c in collectives
         ],
-        "api_version": APPGATE_API_VERSION,
+        "api_version": distinct[0] if len(distinct) == 1 else "mixed",
         "insecure_api": insecure_api_enabled(),
         "config": {
             "hash": SNMP_HASH_ALGO,

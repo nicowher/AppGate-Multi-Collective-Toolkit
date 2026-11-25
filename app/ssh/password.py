@@ -18,7 +18,7 @@ from .client import SSHSession
 
 
 class CzPassword(SSHSession):
-    """FQDN-first SSH to apply a new cz password on one appliance."""
+    """SSH to apply a new cz password on one appliance. Address order comes from Target.ssh_endpoints."""
 
     def verify_login(self, host: Union[str, Sequence[str]]) -> bool:
         """Connect with this session's password. True if auth works."""
@@ -35,6 +35,7 @@ class CzPassword(SSHSession):
             return False
 
     def set_password(self, host: Union[str, Sequence[str]], new_password: str) -> str:
+        """The new password goes to the script on stdin only. Empty or multi-line passwords are refused before connecting."""
         # print(f"DEBUG czpw: hosts={host!r} new_len={len(new_password)}")
         if not (new_password or "").strip():
             raise ValueError("New SSH password is empty")
@@ -66,6 +67,7 @@ echo STEP_PASSWORD_OK
 """
 
     def _run_script(self, host: Union[str, Sequence[str]], new_password: str) -> str:
+        """Run the hash-and-set script on the session address. Success needs exit 0 and STEP_PASSWORD_OK."""
         script = self._script()
         if DEBUG:
             print(f"      DEBUG czpw: script_len={len(script)}", file=sys.stderr)

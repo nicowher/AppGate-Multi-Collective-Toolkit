@@ -32,6 +32,8 @@ from config import (
     ALLOW_SOURCES_PROTECTED,
     ALLOW_SOURCES_PARENT_LABEL,
     ALLOW_SOURCES_SLOT_PARENT,
+    ALLOW_SOURCES_WIDE_V4,
+    ALLOW_SOURCES_WIDE_V6,
     DEBUG,
     DRY_RUN,
     SSH_PRIME_TIMEOUT,
@@ -63,6 +65,7 @@ from core.utils import (
     halt,
     load_credentials,
     print_error,
+    prompt_yes,
     write_json_report,
 )
 
@@ -401,8 +404,25 @@ def _plan_one_checked(
 
 
 def _ssh_peer(target: Target) -> str:
-    """Address used to guess this PC's outbound IP toward the appliance."""
+    """Admin address used to guess this PC's outbound IP toward the appliance.
+
+    The lockout check also tests the session SSH address (see _lockout_peers).
+    """
+    # print(f"DEBUG lockout: peer admin={target.ssh_ip!r} session={target.session_ssh_host()!r}")
     return target.ssh_ip or target.ssh_fqdn or (target.self_ips[0] if target.self_ips else "")
+
+
+def _lockout_peers(target: Target) -> List[str]:
+    """Admin address plus the session SSH address, when they differ.
+
+    The session address is the route the operator really uses to reach this box.
+    Testing only the admin IP could pass a Replace that cuts that route off.
+    """
+    peers = []
+    for peer in (target.session_ssh_host(), _ssh_peer(target)):
+        if peer and peer not in peers:
+            peers.append(peer)
+    return peers
 
 
 def _plan_key(target: Target) -> str:
@@ -428,13 +448,21 @@ def _check_lockout(
         if target.status == "failed":
             continue
         desired = plans.get(_plan_key(target)) or {}
-        peer = _ssh_peer(target)
-        local_ip = _outbound_ip(peer)
-        if DEBUG:
-            print(
-                f"      DEBUG lockout: {target.label()} local={local_ip!r} peer={peer!r}",
-                file=sys.stderr,
-            )
+        # Every route this computer may use to the box: the admin address and, when an
+        # earlier menu found one, the address SSH is actually using this session.
+        local_ips = []
+        unresolved = []
+        for peer in _lockout_peers(target):
+            local_ip = _outbound_ip(peer)
+            if DEBUG:
+                print(
+                    f"      DEBUG lockout: {target.label()} local={local_ip!r} peer={peer!r}",
+                    file=sys.stderr,
+                )
+            if not local_ip:
+                unresolved.append(peer)
+            elif local_ip not in local_ips:
+                local_ips.append(local_ip)
         for parent, label in checks:
             rows = desired.get(parent) or []
             if not rows:
@@ -445,15 +473,17 @@ def _check_lockout(
                 "Admin/API": "reach Admin/API on",
                 "SPA/HTTPS": "reach SPA/HTTPS on",
             }.get(label, f"use {label} on")
-            if not local_ip:
+            if not local_ips or unresolved:
                 blocked.append(
                     f"Could not tell this computer's address toward {host} ({label})."
                 )
-                continue
-            if not _rule_allows(local_ip, rows):
-                blocked.append(
-                    f"This computer ({local_ip}) would no longer be allowed to {verb} {host}."
-                )
+                if not local_ips:
+                    continue
+            for local_ip in local_ips:
+                if not _rule_allows(local_ip, rows):
+                    blocked.append(
+                        f"This computer ({local_ip}) would no longer be allowed to {verb} {host}."
+                    )
             for item in _protected_items():
                 if not _rows_cover(item, rows):
                     blocked.append(
@@ -466,6 +496,41 @@ def _check_lockout(
             *blocked,
             "Add this computer's IP, use Add instead of Replace, or turn off lockout in Configure.",
         )
+
+
+def _wide_rows(plans: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> List[str]:
+    """Rows whose prefix opens a very large range (shorter than ALLOW_SOURCES_WIDE_V4 / _V6)."""
+    out = []
+    for rows_by_parent in plans.values():
+        for parent, rows in (rows_by_parent or {}).items():
+            for row in rows or []:
+                try:
+                    ip = ipaddress.ip_address(str(row.get("address") or "").split("%", 1)[0])
+                    mask = int(row.get("netmask"))
+                except (TypeError, ValueError):
+                    continue
+                floor = ALLOW_SOURCES_WIDE_V4 if ip.version == 4 else ALLOW_SOURCES_WIDE_V6
+                if mask < floor:
+                    text = f"{row.get('address')}/{mask} ({_parent_label(parent)})"
+                    if text not in out:
+                        out.append(text)
+    return out
+
+
+def _confirm_wide_prefixes(plans: Dict[str, Dict[str, List[Dict[str, Any]]]]) -> bool:
+    """Ask before a very wide prefix is applied. Anything but yes cancels.
+
+    A prefix such as /1 lets about half of all addresses reach SSH, Admin or
+    HTTPS on the box, which is almost never what the operator meant.
+    """
+    wide = _wide_rows(plans)
+    # print(f"DEBUG allow: wide={wide!r}")
+    if not wide:
+        return True
+    print("\n      These rows allow a very large address range:", file=sys.stderr)
+    for text in wide:
+        print(f"        {text}", file=sys.stderr)
+    return prompt_yes("      Apply them anyway? [y/N]: ")
 
 
 def _confirm_replace(
@@ -671,6 +736,15 @@ def main() -> None:
         else:
             apply = input("\n      Apply these changes now? [y/N]: ").strip().lower()
             go = apply in YES_ANSWERS
+        if go:
+            wide_plans = {
+                _plan_key(t): _plan_one(t, collectives)
+                for t in selected
+                if t.status == "preview"
+            }
+            if not _confirm_wide_prefixes(wide_plans):
+                print("      Cancelled. Nothing was changed.")
+                go = False
         if go:
             for target in selected:
                 if target.status == "preview":

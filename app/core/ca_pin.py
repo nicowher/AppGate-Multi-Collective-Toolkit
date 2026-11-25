@@ -247,6 +247,7 @@ def _reject_loose_windows(path: str, *, directory: bool = False) -> None:
                 fatal=True,
             )
         class ACL_SIZE(ctypes.Structure):
+            """ctypes ACL_SIZE_INFORMATION for GetAclInformation. The ACE count bounds the walk in the Windows permission check."""
             _fields_ = [
                 ("AceCount", wintypes.DWORD),
                 ("AclBytesInUse", wintypes.DWORD),

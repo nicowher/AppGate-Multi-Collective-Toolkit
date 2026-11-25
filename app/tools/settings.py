@@ -24,13 +24,14 @@ EDITABLE = (
     ("DEBUG", bool, "step traces and JSON dump on console"),
     ("LAB_MODE", bool, "SSH host keys, passphrase floor, STIG cz password"),
     ("INSECURE_API", bool, "skip Controller CA file (API only, not SSH)"),
+    ("CNSA_STRICT", bool, "SSH and Controller TLS use only CNSA-grade algorithms"),
     ("DRY_RUN", bool, "force preview; skip pin/push/purge/walk"),
     ("SKIP_CREDENTIAL_WALK", bool, "skip walk after SNMP credential push"),
     ("ALLOW_SOURCES_LOCKOUT_SSH", bool, "abort replace if this host fails new SSH rules"),
     ("ALLOW_SOURCES_LOCKOUT_HTTPS", bool, "abort replace if this host fails Admin/SPA HTTPS rules"),
     ("WRITE_RUN_REPORT", bool, "write reports/*.json"),
     ("SSH_TIMEOUT", int, "SSH command timeout (seconds)"),
-    ("SSH_PRIME_TIMEOUT", int, "host-key prime timeout (skip dead IPs)"),
+    ("SSH_PRIME_TIMEOUT", int, "per-address host-key read and DNS wait (skip dead NICs)"),
     ("SSH_AUTH_TIMEOUT", int, "SSH connect/auth timeout (seconds)"),
     ("SSH_CONCURRENCY", int, "parallel SSH sessions"),
     ("SSH_PORT", int, "SSH port"),
@@ -49,13 +50,24 @@ EDITABLE = (
 
 
 def _literal(value) -> str:
+    """Python text for one bool or int value written back to config.py."""
     if isinstance(value, bool):
         return "True" if value else "False"
     return str(int(value))
 
 
 def _write_assignment(text: str, name: str, value) -> str:
-    """Replace one assignment. A loose match would rewrite the wrong knob."""
+    """Replace one assignment. A loose match would rewrite the wrong knob.
+
+    A name assigned more than once is refused: only one line could be changed,
+    and the later line would still win at import, so the save would have no effect.
+    """
+    # print(f"DEBUG settings: {name} assignments={len(re.findall(rf'^{re.escape(name)}\s*=', text, re.M))}")
+    count = len(re.findall(rf"^{re.escape(name)}\s*=", text, re.MULTILINE))
+    if count != 1:
+        raise ValueError(
+            f"{name} is assigned {count} times in config.py; leave exactly one line, then save again"
+        )
     lit = _literal(value)
     pat = re.compile(
         rf"^({re.escape(name)}\s*=\s*)(True|False|-?\d+)(\s*(#.*)?)?$",
@@ -68,6 +80,7 @@ def _write_assignment(text: str, name: str, value) -> str:
 
 
 def _parse_bool(raw: str, current: bool) -> bool:
+    """Enter keeps the current value; anything not clearly yes or no is refused."""
     s = raw.strip().lower()
     if not s:
         return current
@@ -79,6 +92,7 @@ def _parse_bool(raw: str, current: bool) -> bool:
 
 
 def _parse_int(raw: str, current: int, name: str = "") -> int:
+    """Enter keeps the current value. Ranges stop a value that would hang or break a run, such as a 0 timeout or a huge concurrency."""
     s = raw.strip()
     if not s:
         return current
@@ -103,6 +117,7 @@ def _parse_int(raw: str, current: int, name: str = "") -> int:
 
 
 def _apply_runtime(name: str, value) -> None:
+    """Apply the value in this process too, including LAB_MODE's linked settings, until the toolkit restarts."""
     setattr(config, name, value)
     if name == "LAB_MODE":
         config.SSH_STRICT_HOST_KEY = not value
@@ -115,6 +130,7 @@ def _apply_runtime(name: str, value) -> None:
 
 
 def main() -> bool:
+    """Menu C: edit config.py values. INSECURE_API and LAB_MODE need an extra confirm before saving."""
     # print(f"DEBUG settings: path={CONFIG_PATH} DEBUG={config.DEBUG} LAB_MODE={config.LAB_MODE}")
     print("Configure config.py (Enter keeps the current value).")
     print("SSH_STRICT_HOST_KEY follows LAB_MODE. INSECURE_API does not.")
@@ -148,8 +164,14 @@ def main() -> bool:
                     continue
             with open(CONFIG_PATH, encoding="utf-8") as fh:
                 text = fh.read()
-            for name, _t, _h in EDITABLE:
-                text = _write_assignment(text, name, values[name])
+            try:
+                for name, _t, _h in EDITABLE:
+                    text = _write_assignment(text, name, values[name])
+            except ValueError as exc:
+                # Nothing has been written yet, so config.py is unchanged.
+                print(f"      {exc}")
+                print("      Save cancelled; config.py was not changed.")
+                continue
             try:
                 mode = os.stat(CONFIG_PATH).st_mode & 0o777
             except OSError:

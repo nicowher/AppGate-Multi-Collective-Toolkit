@@ -8,6 +8,7 @@
 SHA256 keys get HEX: if missing. Reports never store the NTP key.
 """
 import os
+import re
 import sys
 import time
 
@@ -92,25 +93,29 @@ def _prompt_merge_mode(clients: ClientMap, selected: List[Target]) -> bool:
 
 
 def _host_list(servers: list) -> str:
+    """Hostnames only for messages. Keys are never printed."""
     return ", ".join(s.get("hostname") or "?" for s in servers) or "(none)"
 
 
 def _ntpdata_ok(output: str, servers: list) -> bool:
-    """A hostname echo is not sync. Require a normal leap and a real stratum."""
+    """A hostname echo is not sync. Require a normal leap and a real stratum.
+
+    chronyc ntpdata prints one field per line ("Leap status     : Normal",
+    "Stratum         : 2"). Each is matched as a whole line, so "Not synchronised
+    (normal soon)" or the word normal elsewhere in the output does not count.
+    """
     text = output or ""
     low = text.lower()
     if not low.strip() or "cannot talk" in low or "not authorised" in low:
         return False
-    if "leap status" not in low or "normal" not in low:
+    leap_lines = [m.group(1) for m in re.finditer(r"(?im)^\s*leap status\s*:\s*(.+?)\s*$", text)]
+    # print(f"DEBUG ntpdata: leap={leap_lines!r}")
+    if not leap_lines or not any(v.lower() == "normal" for v in leap_lines):
         return False
     stratum = None
-    for line in text.splitlines():
-        if "stratum" not in line.lower():
-            continue
-        digits = "".join(ch if ch.isdigit() else " " for ch in line).split()
-        if digits:
-            stratum = int(digits[0])
-            break
+    for m in re.finditer(r"(?im)^\s*stratum\s*:\s*(\d{1,3})\s*$", text):
+        stratum = int(m.group(1))
+        break
     if stratum is None or not 1 <= stratum <= 15:
         return False
     names = []
@@ -131,6 +136,7 @@ def _apply(
     overwrite: bool,
     dry_run: bool,
 ) -> None:
+    """Steps 3 and 4: PUT NTP per box (rolling back on a failure), then restart chrony's apply service over SSH and verify sync."""
     mode = "overwrite" if overwrite else "add/update"
     changing = set()
     print(f"\n[3/4] Push NTP via API ({mode})...")
@@ -218,6 +224,9 @@ def _apply(
         return
     prime_target_host_keys(live, collectives)
     for target in live:
+        if target.status == "failed":
+            # No answering address or a refused host key. The API change is already in; only the restart is skipped.
+            continue
         col = collective_for_target(target, collectives)
         try:
             NtpSsh(col["ssh_username"], ssh_password_for(target, col)).restart_customization(
@@ -273,6 +282,7 @@ def _emit_report(
     dry_run: bool,
     started_at: str,
 ) -> None:
+    """Run report with hostnames only, no keys."""
     if not (WRITE_RUN_REPORT or DEBUG):
         return
     report = {
@@ -307,6 +317,7 @@ def _emit_report(
 
 
 def main() -> None:
+    """Menu 5: login, inventory, add or overwrite, preview, confirm, apply, verify and report."""
     warn_insecure_transport()
     creds = load_credentials(CREDENTIALS_PATH)
     collectives = _parse_collectives(creds)

@@ -2,7 +2,6 @@
 
 Lives in ``core/`` — used by ``tools/snmp_credentials.py``, not by the API.
 
-
 Why localize at all: net-snmp createUser with -l expects Kul (localized key),
 not the human passphrase. Kul is bound to that appliance's engine ID, so the
 same password yields different hex on every box — required for multi-appliance.
@@ -40,6 +39,7 @@ HASH_HEX_LEN = {
 
 
 class SNMPHashGenerator:
+    """RFC 3414 key localization in-process, so passphrases never go to a remote command line."""
     def generate_hashes(
         self,
         user: str,
@@ -84,6 +84,7 @@ class SNMPHashGenerator:
 
     @staticmethod
     def _localize(passphrase: str, engine_id: str, hash_algo: str) -> str:
+        """Passphrase to localized key (Kul) for one engine ID. The lab floor is the absolute minimum here; the STIG floor is checked by the caller."""
         if not passphrase or len(passphrase) < SNMP_MIN_PASSPHRASE_LEN_LAB:
             raise ValueError(
                 f"SNMP passphrase must be at least {SNMP_MIN_PASSPHRASE_LEN_LAB} characters (RFC 3414)"
@@ -99,6 +100,7 @@ class SNMPHashGenerator:
 
     @staticmethod
     def _check_lengths(data: Dict[str, Any], hash_algo: str) -> Dict[str, Any]:
+        """Refuse a key of the wrong size before it is written into snmpd.conf. AES-256 privacy uses 32 bytes (64 hex)."""
         expected = {"auth": HASH_HEX_LEN[hash_algo], "priv": 64}
         for key, expected_len in expected.items():
             value = data.get("hashes", {}).get(key)

@@ -22,6 +22,7 @@ from config import (
     LAB_MODE,
     NTP_WEAK_KEY_TYPES,
     SNMP_MIN_PASSPHRASE_LEN,
+    SNMP_NAME_RE,
     STIG_PASSWORD_MIN_LEN,
     YES_ANSWERS,
 )
@@ -73,15 +74,28 @@ def _require(
 
 
 def _optional_str(item: dict, key: str) -> str:
+    """A missing, null, list or object value reads as empty, so a malformed field inherits the top-level value instead of becoming its Python text."""
     val = item.get(key)
     if val is None or isinstance(val, (list, dict)):
         return ""
+    if isinstance(val, (bool, float)):
+        # str(True) is "True", which would be sent as a password or user name.
+        halt(
+            "E21",
+            f"credentials.json collectives row: {key} is {type(val).__name__}, not text",
+            "Write it as a quoted string.",
+        )
     return str(val).strip()
 
 
 def _parse_mibs(value: Any) -> List[str]:
+    """MIB list for walks. A non-list is ignored rather than split into characters."""
     if not isinstance(value, list):
         return []
+    bad = [x for x in value if not isinstance(x, (str, int)) or isinstance(x, bool)]
+    if bad:
+        # str(None) is "None", which would be walked as a MIB name.
+        halt("E21", "credentials.json mibs must be a list of names", "Remove null, true/false, and nested values.")
     return [str(x).strip() for x in value if str(x).strip()]
 
 
@@ -114,6 +128,7 @@ def stig_password_errors(password: str) -> List[str]:
 
 
 def resolve_mibs(col: dict, creds: dict) -> List[str]:
+    """The collective's MIB list wins when it is set; otherwise the top-level list."""
     local = col.get("mibs")
     if isinstance(local, list) and local:
         return _parse_mibs(local)
@@ -140,7 +155,13 @@ def _parse_ntp_servers(value: Any) -> List[Dict[str, str]]:
 
 
 def _parse_ntp_servers_checked(value: Any) -> List[Dict[str, str]]:
-    """Raise on a bad row or a non-array so the caller can halt. Ignoring an object would look like no servers were set."""
+    """Raise on a bad row or a non-array so the caller can halt. Ignoring an object would look like no servers were set.
+
+    Only control characters are refused here. A hostname that is not an IP or FQDN
+    passes this check and is sent to the Controller. The IP-or-FQDN check runs only
+    later, at the chronyc verify step.
+    """
+    # print(f"DEBUG ntp rows: n={len(value) if isinstance(value, list) else type(value).__name__}")
     if value is None:
         return []
     if not isinstance(value, list):
@@ -151,6 +172,8 @@ def _parse_ntp_servers_checked(value: Any) -> List[Dict[str, str]]:
             host = _reject_controls("hostname", item.strip())
             if not host:
                 raise ValueError("NTP row is empty")
+            if not is_valid_host(host):
+                raise ValueError(f"NTP hostname is not an IP or FQDN: {host!r}")
             out.append({"hostname": host, "keyType": "", "keyNo": "", "key": ""})
             continue
         if not isinstance(item, dict):
@@ -158,7 +181,11 @@ def _parse_ntp_servers_checked(value: Any) -> List[Dict[str, str]]:
         host = _reject_controls("hostname", str(item.get("hostname") or "").strip())
         if not host:
             raise ValueError("NTP row is missing hostname")
+        if not is_valid_host(host):
+            raise ValueError(f"NTP hostname is not an IP or FQDN: {host!r}")
         kn = item.get("keyNo")
+        if isinstance(kn, (bool, float, list, dict)):
+            raise ValueError(f"NTP keyNo for {host} must be a whole number or text")
         key_no = "" if kn is None else _reject_controls("keyNo", str(kn).strip())
         out.append(
             {
@@ -181,6 +208,7 @@ def resolve_allowed_sources(col: dict, creds: dict) -> Dict[str, list]:
 
 
 def resolve_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
+    """The collective's NTP list wins when it is non-empty; otherwise top-level. Both go through the same row checks, and a bad row halts with E12."""
     local = col.get("ntp_servers")
     if isinstance(local, list) and local:
         return _parse_ntp_servers(local)
@@ -204,6 +232,10 @@ def ensure_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
             if servers:
                 break
             print("      At least one NTP hostname is required.", file=sys.stderr)
+            continue
+        if not is_valid_host(host):
+            # Checked before the PUT. The chronyc verify step used to be the first check.
+            print("      Enter an IP address or an FQDN (e.g. ntp.example.com).", file=sys.stderr)
             continue
         key_type = input("      keyType (e.g. SHA256, empty if none): ").strip()
         if key_type.replace("-", "").upper() in NTP_WEAK_KEY_TYPES and not LAB_MODE:
@@ -234,6 +266,7 @@ def ensure_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
 
 
 def _row_from_item(item: dict) -> Dict[str, Any]:
+    """Normalize one collectives[] row, or a single-Controller file. Old admin_* keys map to api_* so older files still load."""
     row: Dict[str, Any] = {
         "fqdn": str(item.get("fqdn") or item.get("hostname") or "").strip(),
         "agip": str(item.get("agip") or "").strip(),
@@ -377,9 +410,24 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
 
 
 def _exclude_collectives(cols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Same idea as appliance exclude: Enter keeps all. Tokens: index, range, FQDN/IP."""
+    """Same idea as appliance exclude: Enter keeps all. Tokens: index, range, FQDN/IP.
+
+    A comma part that matches no collective is listed and the question is asked
+    again, so a typo cannot leave a Controller in the run unnoticed.
+    """
     if len(cols) < 2:
         return cols
+
+    def _keys(col: Dict[str, Any]) -> set:
+        keys = {
+            str(col.get("index") or "").lower(),
+            (col.get("fqdn") or "").lower(),
+            (col.get("agip") or "").lower(),
+        }
+        keys.discard("")
+        return keys
+
+    all_keys = set().union(*(_keys(c) for c in cols))
     while True:
         raw = input(
             "      Exclude collectives (e.g. 1,3 or 1-3 or FQDN; Enter for all): "
@@ -389,17 +437,19 @@ def _exclude_collectives(cols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # print(f"DEBUG collectives: exclude raw={raw!r}")
         try:
             tokens = expand_exclude_tokens(raw)
-            break
         except ValueError as exc:
             print(f"      {exc}", file=sys.stderr)
+            continue
+        unmatched = [
+            part.strip() for part in raw.split(",")
+            if part.strip() and not (expand_exclude_tokens(part) & all_keys)
+        ]
+        if not unmatched:
+            break
+        print(f"      No collective matches: {', '.join(unmatched)}. Enter the list again.", file=sys.stderr)
     kept: List[Dict[str, Any]] = []
     for col in cols:
-        keys = {
-            str(col.get("index") or "").lower(),
-            (col.get("fqdn") or "").lower(),
-            (col.get("agip") or "").lower(),
-        }
-        if tokens & keys:
+        if tokens & _keys(col):
             print(f"      Excluding collective {col.get('index')} {col.get('fqdn')}", flush=True)
             continue
         kept.append(col)
@@ -407,6 +457,7 @@ def _exclude_collectives(cols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def collective_for_target(target: Any, collectives: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The credentials row that owns this appliance. Settings must come from that row, never another collective. A missing row is an error, not a default."""
     idx = int(getattr(target, "collective", 1) or 1)
     for col in collectives:
         try:
@@ -457,11 +508,13 @@ def _require_new_password(bucket: dict, label: str) -> str:
 
 
 def _field_filled(bucket: dict, key: str, *, min_len: int = 0) -> bool:
+    """A secret counts as present only when it meets the minimum length, so a too-short value is asked for again."""
     val = (bucket.get(key) or "").strip()
     return bool(val) and (not min_len or len(val) >= min_len)
 
 
 def _secret_keys(*, need_ssh: bool, need_snmp: bool, need_new_password: bool) -> List[str]:
+    """Secret fields this tool needs, so a tool never prompts for secrets it does not use."""
     keys: List[str] = []
     if need_ssh:
         keys.extend(("ssh_username", "ssh_password"))
@@ -502,6 +555,7 @@ def _global_skip_keys(
     need_snmp: bool,
     need_new_password: bool,
 ) -> set:
+    """Fields every collective already has. Those are not asked globally, so a global prompt never covers for per-row secrets that are already set."""
     skip = set()
     for key in _secret_keys(
         need_ssh=need_ssh, need_snmp=need_snmp, need_new_password=need_new_password
@@ -525,6 +579,7 @@ def _fill_secret_fields(
     need_new_password: bool,
     skip: Optional[set] = None,
 ) -> None:
+    """Prompt for the secrets missing from one bucket (global or one collective). Fields in skip are not asked."""
     skip = skip or set()
     if need_ssh:
         if "ssh_username" not in skip:
@@ -537,7 +592,13 @@ def _fill_secret_fields(
             )
     if need_snmp:
         if "snmp_user" not in skip:
-            bucket["snmp_user"] = _require(bucket, "snmp_user", f"{label} SNMP User")
+            bucket["snmp_user"] = _require(
+                bucket,
+                "snmp_user",
+                f"{label} SNMP User",
+                pattern=SNMP_NAME_RE,
+                pattern_msg="Use 1-32 letters, digits, underscore, dot, or hyphen.",
+            )
         if "snmp_auth" not in skip:
             bucket["snmp_auth"] = _require(
                 bucket,
@@ -545,6 +606,8 @@ def _fill_secret_fields(
                 f"{label} SNMP Auth",
                 sensitive=True,
                 min_len=SNMP_MIN_PASSPHRASE_LEN,
+                validator=snmp_secret_ok,
+                validator_msg="No spaces or control characters in an SNMP passphrase.",
             )
         if "snmp_priv" not in skip:
             bucket["snmp_priv"] = _require(
@@ -553,6 +616,8 @@ def _fill_secret_fields(
                 f"{label} SNMP Priv",
                 sensitive=True,
                 min_len=SNMP_MIN_PASSPHRASE_LEN,
+                validator=snmp_secret_ok,
+                validator_msg="No spaces or control characters in an SNMP passphrase.",
             )
     if need_new_password and "ssh_password_new" not in skip:
         bucket["ssh_password_new"] = _require_new_password(bucket, label)
@@ -582,6 +647,7 @@ def _copy_secret_fields(
 def _clear_secret_fields(
     col: dict, *, need_ssh: bool = True, need_snmp: bool, need_new_password: bool
 ) -> None:
+    """Blank one row's secrets when the operator chose to re-enter them for that collective, so the prompt that follows asks again instead of reusing the global values."""
     for key in _secret_keys(
         need_ssh=need_ssh, need_snmp=need_snmp, need_new_password=need_new_password
     ):
@@ -603,6 +669,61 @@ def promote_shared_fields(creds: dict, keys: tuple) -> None:
 
 
 def prepare_collectives(
+    creds: dict,
+    collectives: List[Dict[str, Any]],
+    *,
+    need_ssh: bool = True,
+    need_snmp: bool = False,
+    need_new_password: bool = False,
+) -> List[Dict[str, Any]]:
+    """Fill each collective's secrets, then check SNMP settings before any login.
+
+    Values already in the file are not prompted for, so the prompt never checks
+    them. The SNMP check runs here on every row instead, and stops the tool with
+    E21 before step 1 rather than failing on the box later.
+    """
+    out = _prepare_collectives(
+        creds,
+        collectives,
+        need_ssh=need_ssh,
+        need_snmp=need_snmp,
+        need_new_password=need_new_password,
+    )
+    if need_snmp:
+        require_snmp_settings(out)
+    return out
+
+
+def snmp_secret_ok(value: str) -> bool:
+    """A passphrase goes into the walk's snmp.conf as one token. A space cuts it short; CR or LF adds a directive."""
+    return bool(value) and not any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value)
+
+
+def snmp_setting_errors(col: Dict[str, Any]) -> List[str]:
+    """Problems with one collective's SNMP user and passphrases. Names fields only, never the values."""
+    label = f"collective {col.get('index', '?')} ({col.get('fqdn') or 'no FQDN'})"
+    errors = []
+    user = str(col.get("snmp_user") or "")
+    if user and not re.fullmatch(SNMP_NAME_RE, user):
+        errors.append(
+            f"{label}: snmp_user must be 1-32 letters, digits, underscore, dot, or hyphen (USM limit)."
+        )
+    for key in ("snmp_auth", "snmp_priv"):
+        value = str(col.get(key) or "")
+        if value and not snmp_secret_ok(value):
+            errors.append(f"{label}: {key} contains a space or a control character.")
+    return errors
+
+
+def require_snmp_settings(collectives: List[Dict[str, Any]]) -> None:
+    """Stop before login when any collective's SNMP settings would fail on the box or in the walk."""
+    errors = [msg for col in collectives for msg in snmp_setting_errors(col)]
+    # print(f"DEBUG snmp settings: errors={len(errors)}")
+    if errors:
+        halt("E21", "SNMP settings in credentials.json cannot be used", *errors)
+
+
+def _prepare_collectives(
     creds: dict,
     collectives: List[Dict[str, Any]],
     *,

@@ -3,11 +3,12 @@
 Lives in ``core/``. Called from ``tools/snmp_credentials.py`` (step 8) and
 ``tools/snmp_walk.py`` (menu 3).
 
-
 Why walk at all: pin/push can succeed while snmpd still has stale usmUser
 keys; a walk with the *passphrases* is the real acceptance test.
 
-Menu 1 step 8 walks ssh_ok_host only. Menu 3 (no SSH) still tries FQDN then IP.
+Menu 1 step 8 walks the address SSH found this session only. Menu 3 (no SSH)
+uses that address too when an earlier menu found one; otherwise it tries the
+same list SSH would (admin hostname, admin IP, then the other NIC IPs).
 Attempts per address are tunable (WALK_IP_ATTEMPTS / WALK_FQDN_ATTEMPTS).
 Install/prompt must stay on the main thread — workers cannot call input().
 
@@ -50,13 +51,15 @@ from config import (
 
 
 class SNMPValidator:
-    """Walk one host list (FQDN then IPs) until one endpoint succeeds."""
+    """Walk one host list in the order given (Target.walk_endpoints) until one endpoint succeeds."""
 
     def __init__(self) -> None:
+        """The walk tool is detected once per validator and the last error is kept for the caller's message."""
         self._tool: Optional[Tuple[Optional[str], Optional[str]]] = None
         self._last_walk_error = ""
 
     def _set_walk_error(self, message: str) -> None:
+        """Remember why the last address failed. DEBUG also prints it as it happens."""
         self._last_walk_error = message
         if DEBUG:
             print(f"      {message}", file=sys.stderr)
@@ -70,6 +73,7 @@ class SNMPValidator:
         engine_id: Optional[str] = None,
         label: str = "",
     ) -> bool:
+        """Walk each address in order with the passphrases, and stop at the first success. A list means fallbacks; the order comes from Target.walk_endpoints."""
         hosts: List[str] = [host] if isinstance(host, str) else [h for h in host if h]
         if not hosts:
             return False
@@ -101,6 +105,7 @@ class SNMPValidator:
 
     @staticmethod
     def _addr_is_ip(value: str) -> bool:
+        """Attempt counts differ for names and IPs (WALK_FQDN_ATTEMPTS, WALK_IP_ATTEMPTS)."""
         text = (value or "").strip()
         if text.startswith("[") and text.endswith("]"):
             text = text[1:-1]
@@ -119,6 +124,7 @@ class SNMPValidator:
         engine_id: Optional[str] = None,
         max_attempts: int = WALK_FQDN_ATTEMPTS,
     ) -> bool:
+        """One address with retries. If no walk tool is found it offers to install one, then uses Net-SNMP or pysnmp."""
         # Pick a walk backend. If none is installed, offer native Net-SNMP
         # (Linux/macOS) or fall back to pip/vendor pysnmp (Windows too).
         tool_type, executable = self._cached_detect()
@@ -236,6 +242,7 @@ class SNMPValidator:
                 pass
 
     def _cached_detect(self) -> Tuple[Optional[str], Optional[str]]:
+        """Tool detection runs subprocesses, so it is done once per validator."""
         if self._tool is None:
             self._tool = self._detect_snmpwalk()
         return self._tool
@@ -319,6 +326,7 @@ class SNMPValidator:
         return self._install_pysnmp()
 
     def _install_snmpwalk_linux(self) -> bool:
+        """Net-SNMP from the system package manager, only after the operator said yes. Every call has a timeout."""
         if shutil.which("apt-get"):
             print("      Detected Debian/Ubuntu. Installing via apt-get...", file=sys.stderr)
             subprocess.run(["sudo", "apt-get", "update", "-qq"], check=False, timeout=PKG_INSTALL_TIMEOUT)
@@ -335,11 +343,13 @@ class SNMPValidator:
         return self._detect_snmpwalk()[0] is not None
 
     def _install_snmpwalk_macos(self) -> bool:
+        """Net-SNMP from Homebrew, only after the operator said yes."""
         print("      Detected macOS. Installing via Homebrew...", file=sys.stderr)
         subprocess.run(["brew", "install", "net-snmp"], check=True, timeout=PKG_INSTALL_TIMEOUT)
         return self._detect_snmpwalk()[0] is not None
 
     def _install_pysnmp(self) -> bool:
+        """pysnmp from the pinned vendor set first, then the pinned online install. The fallback when no native walk tool is available."""
         if install_from_vendor("pysnmp"):
             return self._detect_snmpwalk()[0] is not None
         try:
@@ -356,6 +366,7 @@ class SNMPValidator:
         return self._detect_snmpwalk()[0] is not None
 
     def _usm(self, engine_id: Optional[str] = None):
+        """pysnmp USM protocol objects from the same SNMP_HASH_ALGO and SNMP_PRIV_PROTOCOL as createUser, plus the engine ID when known."""
         kwargs = {
             "authProtocol": get_auth_protocol(),
             "privProtocol": get_priv_protocol(),
@@ -372,6 +383,7 @@ class SNMPValidator:
     def _validate_snmp_walk_pysnmp(
         self, ip: str, user: str, auth: str, priv: str, engine_id: Optional[str] = None
     ) -> bool:
+        """pysnmp walk of SNMP_WALK_OID with authPriv. Used on Windows and when Net-SNMP is missing."""
         try:
             from pysnmp.hlapi.v3arch.asyncio import (
                 ContextData,

@@ -145,6 +145,13 @@ SKIP_CREDENTIAL_WALK = False
 # True: do not require certs/<host>.pem and do not verify the Controller cert.
 # A release zip (app/vendor/RELEASE) ignores this and still requires the file.
 INSECURE_API = False
+# CNSA-grade crypto only, for SSH and the Controller API. Off by default: a box or
+# Controller that cannot meet it fails to connect, with a reason. SSH then allows
+# aes256-ctr/aes256-gcm, hmac-sha2-512, P-384/P-521 or DH group16+ key exchange,
+# P-384/P-521 or rsa-sha2-512 host keys (RSA 3072 bits or more). The API uses
+# TLS 1.2 with ECDHE AES-256-GCM-SHA384 on P-384. AppGate documents SSH ciphers as
+# aes*-ctr only, so aes256-ctr is what an appliance will normally negotiate.
+CNSA_STRICT = False
 # Folder of hand-placed Controller CA PEMs. File name is the dialed host.
 CA_DIRNAME = "certs"
 # Menu 6 replace: abort (E20) if this workstation would not match new SSH allowSources.
@@ -153,6 +160,9 @@ ALLOW_SOURCES_LOCKOUT_SSH = True
 ALLOW_SOURCES_LOCKOUT_HTTPS = True
 # Extra IPs or CIDRs that must still match those same rules. This host cannot see them.
 ALLOW_SOURCES_PROTECTED = ()
+# Menu 6 asks before applying a prefix shorter than these (a very large range).
+ALLOW_SOURCES_WIDE_V4 = 8
+ALLOW_SOURCES_WIDE_V6 = 16
 # Directory for run-*.json / dryrun-*.json / walk-*.json (under repo root).
 REPORTS_DIRNAME = "reports"
 SNMPD_STOP_RETRIES = 5
@@ -169,6 +179,8 @@ WALK_ERROR_PREVIEW = 500
 SUMMARY_WIDTH = 60
 # Inventory table hostname column (step 2).
 INVENTORY_NAME_WIDTH = 30
+# Inventory table SSH address column cap. A longer FQDN is cut with "…" so the row stays on one line.
+INVENTORY_ADDR_WIDTH = 40
 # pip download of vendor wheels is slower than a single install.
 VENDOR_DOWNLOAD_TIMEOUT = 300
 # RFC 3411 engine ID is 5–32 octets. Type-3 MAC IDs are 11.
@@ -234,7 +246,8 @@ APPLIANCE_SKIP_STATUS = (
     "warning",
 )
 # Safe for snmpd.conf lines and remote sed (DISA: no metacharacters).
-SNMP_NAME_RE = r"^[A-Za-z0-9_.-]+$"
+# 1-32 characters: USM user names are 1-32 octets (RFC 3414); snmpd refuses longer ones.
+SNMP_NAME_RE = r"^[A-Za-z0-9_.-]{1,32}$"
 # Keys searched in GET /appliances/status JSON (not metrics like volume).
 HEALTH_STATUS_MAX_DEPTH = 4
 HEALTH_STATUS_KEYS = (
@@ -264,6 +277,8 @@ APPLIANCE_FUNCTION_NAMES = (
     "connector",
     "metricsAggregator",
     "connectionBroker",
+    # 7.x (peer 25) appliance function.
+    "telemetryAggregator",
 )
 # GUI Allowed Sources → appliance JSON parent. spa and https both use clientInterface.
 ALLOW_SOURCES_SLOT_PARENT = {
@@ -309,10 +324,9 @@ API_AUTH_FAIL_CODES = (401, 403)
 # WAN-safe: 8s covers satellite/DoD RTT; 3s prime skips dead NICs.
 SSH_TIMEOUT = 8
 SSH_AUTH_TIMEOUT = 8
-# Host-key prime only (skip dead overlay IPs quickly).
+# Address search only: how long one unauthenticated host-key read may wait
+# before the next address is tried (skip dead overlay IPs quickly).
 SSH_PRIME_TIMEOUT = 3
-# How many prime connects may run at once. More than this can trip SSHBRUTE.
-SSH_PRIME_BATCH = 2
 # cz-configd restart (ACAS harden) can outlast a normal SSH command.
 ACAS_SSH_TIMEOUT = 60
 # ACAS unharden is SSH overlay only (API would persist STIG-hostile state).
