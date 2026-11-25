@@ -27,7 +27,7 @@ from config import (
 )
 from getpass import getpass
 
-from core.utils import REPO_ROOT, expand_exclude_tokens, halt, is_valid_host, prompt_until_valid
+from core.utils import REPO_ROOT, expand_exclude_tokens, halt, is_valid_host, prompt_until_valid, prompt_yes
 
 CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
 
@@ -227,8 +227,7 @@ def ensure_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
                 "key": key,
             }
         )
-        more = input("      Add another NTP server? [y/N]: ").strip().lower()
-        if more not in YES_ANSWERS:
+        if not prompt_yes("      Add another NTP server? [y/N]: "):
             break
     col["ntp_servers"] = servers
     return servers
@@ -356,13 +355,13 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
                     "Nothing left after excluding collectives",
                     "Press Enter to keep all Controllers, or exclude fewer numbers/FQDNs.",
                 )
-            more = input(
+            more_yes = prompt_yes(
                 "      Add another Controller besides those in the file? [y/N]: "
-            ).strip().lower()
+            )
             first_ask = False
         else:
-            more = input("      Add another Controller? [y/N]: ").strip().lower()
-        if more not in YES_ANSWERS:
+            more_yes = prompt_yes("      Add another Controller? [y/N]: ")
+        if not more_yes:
             break
         used = set()
         for col in out:

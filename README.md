@@ -29,7 +29,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **FQDN first**, then IP (pinned working IP first after a successful SSH). Gateways never use the Controller IP.
 - **`LAB_MODE`** (bottom of `app/config.py`) drives SSH host-key policy, SNMP min passphrase (8 lab / 15 off-lab), and the STIG cz-password check. It does not skip the Controller CA and it does not print localized keys. **Defaults off.** **`DEBUG` and `DRY_RUN` are separate.**
 - **Controller CA:** copy the AppGate CA export into `certs/`. `AppGate_SDP_<host>_CA.cer` is accepted, as are `<host>.cer` and `<host>.pem`. The file name is the host you dial. FQDN and IP may share one file. If the FQDN `.cer` is present, the IP fallback uses it. Several collectives means several files. Current and next CA can be in the same PEM. Login uses that file as `verify` and does not download a CA. A missing file skips that host. A file that is not a CA certificate (`CA:TRUE`), a PEM or `certs/` directory that is group/world writable on Unix, or a PEM, `certs/`, or the parent of `certs/` writable by Everyone, Users, or Authenticated Users on Windows (in-process DACL, allow-ACEs and object allow-ACEs, matched by SID; an unparsed ACE type stops login), or a host-name collision stops login and does not send a password. If `cryptography` is missing, login stops with that reason instead of a traceback. `INSECURE_API=True` prints a warning at startup. `INSECURE_API=True` skips the file (`verify` off) and does not change SSH or STIG. `LAB_MODE` does not control this. A release zip ignores `INSECURE_API`.
-- **Production SSH:** `SSH_STRICT_HOST_KEY` follows `LAB_MODE` (`True` when lab is off). Strict mode rejects unknown host keys. Set `SSH_KNOWN_HOSTS` or `ssh_host_keys` in credentials.json before connecting. Lab mode still accepts any host key.
+- **Production SSH:** `SSH_STRICT_HOST_KEY` follows `LAB_MODE` (`True` when lab is off). An unknown or changed key prompts once per appliance. Yes stores it. No skips that box. A non-interactive run still needs `SSH_KNOWN_HOSTS` or `ssh_host_keys`. Lab mode still accepts any host key if that prompt is not reached.
 - **Ctrl+C during a tool:** `Cancel this job and return to menu? [y/N]` (default N continues). Second Ctrl+C cancels. `SIGTERM` and `SIGHUP` exit without that prompt. In-flight SSH/walks are not killed instantly. At the menu / Return to menu, Ctrl+C just redisplays the menu.
 - **Preview first**, then Apply. Replace (menu 6) uses **y** then type **YES**. `DRY_RUN=True` skips Apply.
 - **Color:** status words only (OK, Failed, ERROR, WARNING, ok, timeout). Set `NO_COLOR=1` to disable.
@@ -37,7 +37,7 @@ This is **not** [sdpctl](https://github.com/appgate/sdpctl). Use sdpctl for back
 - **DEBUG off:** GUI names (SSH, SPA/HTTPS, Admin/API, Ping, SNMP), no engine-ID hex, no Python dicts. **DEBUG on:** plus raw API fields, endpoints, engine hex, STEP_* (ACAS), SSH script preview.
 - **Shared run path:** `core/run.py` (login, inventory/exclude, add vs replace, result line). Appliance PUT helpers: `api/snmp.py`, `api/ntp.py`, `api/allow_sources.py` mixins on `AppGateClient`.
 - **TLS:** the CA file is required unless `INSECURE_API=True`. That switch is not lab mode.
-- **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then private IPv4 and IPv6 unique-local, then public addresses of either family. Link-local is last, and its zone is kept. A `peerInterface` address is tried only when this box already has that address. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime checks `SSH_PRIME_BATCH` addresses at once, then sends the password only to the first one that accepts a connection (`SSH_PRIME_TIMEOUT`). An auth failure stops the walk. Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. **DEBUG off:** `SSH n/N` and failures only. **DEBUG on:** every try, uncolored. Production does not prompt to trust a new host key.
+- **SSH:** pinned `ssh_ok_host` first (reused in later steps), then this appliance's FQDN (appliance/admin/client — never `peerInterface.hostname`), then private IPv4 and IPv6 unique-local, then public addresses of either family. Link-local is last, and its zone is kept. A `peerInterface` address is tried only when this box already has that address. Credentials `agip` only on the **login** Controller. Unresolvable names skipped. Prime checks `SSH_PRIME_BATCH` addresses at once, then sends the password only to the first one that accepts a connection (`SSH_PRIME_TIMEOUT`). An auth failure stops the walk. Password retry is per hostname; confirm mismatch re-asks. Workers never call `input()`. **DEBUG off:** `SSH n/N` and failures only. **DEBUG on:** every try, uncolored. An unknown or changed SSH host key prompts once per appliance on the main thread. Yes stores that key. A later run uses the saved key and does not probe again. Other addresses on the same box are kept only when they present the same key, so a timeout can try the next one. No skips that box. If no key can be read, or the username is missing, that appliance fails and the next one is still prompted. Workers do not ask.
 - **Reports:** `reports/run-*.json`, `dryrun-*.json`, `walk-*.json`, `acas-*.json`, `cz-password-*.json`, `ntp-*.json` (no passwords/tokens; `0600` on Unix). Console JSON only if `DEBUG=True`.
 - **Logout:** when the process exits, each logged-in Controller gets `DELETE /admin/login`. A logout failure is ignored, so a finished job still looks finished.
 - **Dependencies:** unpacked wheels in `app/vendor/site` are appended to `sys.path`, not put in front. Installs use `app/vendor/requirements.txt` hashes and `--target vendor/site`. An empty `vendor/site` extracts a wheel only when its hash is in that pin. Menu U reinstalls that pin. It does not take a newer PyPI release. The pin needs Python 3.11.5+. Release zips include a Windows amd64 / **Python 3.14** `vendor/site`.
@@ -176,7 +176,7 @@ Copy `credentials.example.json` to `credentials.json` next to the launchers. Mis
 
 | Field | Required | Used by | Meaning |
 | --- | --- | --- | --- |
-| `ssh_host_keys` | Production SSH | known_hosts | OpenSSH lines from outside the admin API. Required when `LAB_MODE=False` unless `SSH_KNOWN_HOSTS` is set. |
+| `ssh_host_keys` | Production SSH | known_hosts | OpenSSH lines from outside the admin API. Optional when a terminal can answer the host-key prompt. Required for a non-interactive run unless `SSH_KNOWN_HOSTS` is set. |
 | `ssh_username` | Menus 1, 2, 4, 5 | SSH | Appliance login (usually `cz`). Not used by walk. |
 | `ssh_password` | Menus 1, 2, 4, 5 | SSH | Current sudo/SSH password. Not used by walk. |
 | `ssh_password_new` | Menu 4 only | cz password | Replacement cz password. Prefer per-collective. Global-only prints a warning |
@@ -254,7 +254,7 @@ Applies mainly to **menu 1** (SNMP) and **menu 4** (cz password).
 
 **Known deviations (`app/config.py`):**
 
-- `LAB_MODE=False`: CA pin, reject unknown SSH host keys, SNMP passphrase ≥15, STIG cz password on. Localized keys are not printed in either mode. Set `LAB_MODE=True` only in lab.
+- `LAB_MODE=False`: CA pin, SSH host-key prompt then reject if not stored, SNMP passphrase ≥15, STIG cz password on. Localized keys are not printed in either mode. Set `LAB_MODE=True` only in lab.
 - `DEBUG` is **False** (engine IDs stay off the console and out of reports in production).
 - AppGate `createUser` stores a vendor priv OID that is still AES-256 CFB.
 
@@ -278,7 +278,7 @@ Other knobs:
 | Variable | Meaning |
 | --- | --- |
 | `CA_DIRNAME` | Folder of hand-placed Controller CA files. Default `certs`. Names: `AppGate_SDP_<host>_CA.cer`, `<host>.cer`, `<host>.pem`. DER is converted under `certs/.converted/` and removed when the process exits. |
-| `SSH_KNOWN_HOSTS` | Production: set this, or set `ssh_host_keys`. Strict mode does not load `~/.ssh/known_hosts`. Wildcard lines are refused. Lab mode does not require a pin. |
+| `SSH_KNOWN_HOSTS` | Optional pin file. If unset, an accepted prompt is stored under `certs/known_hosts`. Strict mode does not load `~/.ssh/known_hosts`. Wildcard lines are refused. |
 | `SSH_PRIME_TIMEOUT` | Seconds per address when priming host keys (default 3; skip dead NICs) |
 | `SSH_PRIME_BATCH` | How many prime reachability checks may run at once (default 2). The password is sent to one open address at a time. |
 | `SSH_CONCURRENCY` / `WALK_CONCURRENCY` | Parallel SSH / SNMP walks (default 5) |
@@ -318,7 +318,7 @@ Per-box errors skip that appliance and continue. The console line is a sentence 
 | **E04** | Nothing left after appliance exclude | Enter to keep all, or exclude fewer |
 | **E05** | No Controller left, or a duplicate FQDN | Enter to keep all, or use a different FQDN |
 | **E06** | CA file missing, not a CA, or ACL too open | Place the Controller CA in `certs/`. Restrict the file, `certs/`, and its parent. `INSECURE_API=True` skips the file. `LAB_MODE` does not. |
-| **E07** | SSH host key rejected | Production does not prompt. Add the appliance host key to `SSH_KNOWN_HOSTS` or `ssh_host_keys`. Lab accepts any key |
+| **E07** | SSH host key rejected | The prompt was declined, or this run has no terminal. Add the key to `SSH_KNOWN_HOSTS` or `ssh_host_keys` for a non-interactive run. |
 | **E08** | Appliance PUT refused / HTTP 422 | Unexpected field diff, missing `site`, or **View** on **Client Profile** (`portal.profiles[]`). Not SSH. |
 | **E09** | SNMP engine-ID / SSH box failed | Try a new SSH password after FQDN+IP; sudo; `engineIDType 3`; `ETH_IFACE` MAC |
 | **E10** | SNMP walk failed | UDP/161, user/auth/priv, leftover `usmUser`; others still walk |
@@ -344,7 +344,7 @@ Per-box errors skip that appliance and continue. The console line is a sentence 
 | Gateway missing from list | Need Appliance **View** on those tags |
 | Engine ID not found | `engineIDType 3`, SSH/sudo, MAC on `ETH_IFACE` |
 | Walk / digest error | Leftover `usmUser`, algorithm mismatch |
-| Unknown SSH host key | Production: add it out of band (`SSH_KNOWN_HOSTS` or `ssh_host_keys`). There is no trust prompt. Lab accepts any key |
+| Unknown SSH host key | Prompt once per appliance. Yes stores the key. No skips that box. A non-interactive run still needs `SSH_KNOWN_HOSTS` or `ssh_host_keys` |
 | SSH hang while priming keys | Overlay IPs: up to `SSH_PRIME_BATCH` connects at once; prime stops after the first working address (`SSH_PRIME_TIMEOUT`) |
 | Gateway getaddrinfo / wrong NIC | FQDN skipped if DNS fails; SSH tries private IPv4 and IPv6 unique-local before public addresses. Link-local is last |
 | Connector SSH'd a Controller | `peerInterface.hostname` is ignored. A peer address is tried only when this box already has it |

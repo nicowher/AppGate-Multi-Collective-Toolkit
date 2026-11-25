@@ -506,6 +506,15 @@ def load_credentials(path: str) -> Dict[str, Any]:
         return {}
 
 
+def prompt_yes(prompt: str, *, default_yes: bool = False) -> bool:
+    """A control character is cancel, not No. Ctrl+X must not continue the job."""
+    raw = input(prompt)
+    if any(ord(ch) < 32 or ord(ch) == 127 or unicodedata.category(ch) == "Cf" for ch in raw):
+        print("\n      Cancelled.", file=sys.stderr)
+        raise KeyboardInterrupt
+    return is_yes(raw, default_yes=default_yes)
+
+
 def is_yes(answer: str, *, default_yes: bool = False) -> bool:
     """True for y/yes. Empty input follows *default_yes* (install prompts default yes)."""
     text = (answer or "").strip().lower()

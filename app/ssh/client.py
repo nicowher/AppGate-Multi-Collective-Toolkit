@@ -4,9 +4,7 @@ Password auth first; keyboard-interactive is the fallback some AppGate
 boxes require (allowed_types has keyboard-interactive but not password).
 kbd-int uses Transport, so host keys are checked with the same policy.
 Connect, channel reads, and the exit-status wait use SSH_TIMEOUT.
-SSH_STRICT_HOST_KEY follows
-LAB_MODE: lab uses WarningPolicy; production rejects unknown keys and
-requires SSH_KNOWN_HOSTS or ssh_host_keys. Never input() from a worker.
+SSH_STRICT_HOST_KEY follows LAB_MODE. The main thread asks once per appliance before connect. A worker must not ask.
 """
 from core.utils import ensure_package, run_target_batch
 
@@ -16,6 +14,8 @@ except ImportError:
     ensure_package("paramiko", "paramiko")
     import paramiko
 
+import base64
+import hashlib
 import ipaddress
 import logging
 import os
@@ -439,6 +439,7 @@ class SSHSession:
             if not _host_resolves(addr):
                 self._log(f"{self._tag(addr)} skip (no DNS)", noise=True)
                 continue
+
             last = addr
             result = self._with_ssh(addr, fn)
             if result is False:
@@ -449,7 +450,7 @@ class SSHSession:
                 self._pin(target, addr)
                 return result
             self._log(f"{self._tag(addr)} {self._last_reason or self._ssh_fail_kind or 'fail'}")
-            if self._ssh_fail_kind in ("auth", "keyonly", "hostkey"):
+            if self._ssh_fail_kind in ("auth", "keyonly"):
                 if self._ssh_fail_kind == "auth":
                     _note_auth_fail()
                 auth_hit = addr
@@ -580,6 +581,22 @@ class SSHSession:
 _oob_known_hosts = ""
 
 
+def _attach_existing_known_hosts() -> None:
+    """A key accepted on a previous run lives in certs/known_hosts. Load it before the strict check."""
+    global _oob_known_hosts
+    if _oob_known_hosts:
+        return
+    path = SSH_KNOWN_HOSTS.strip()
+    if path:
+        _oob_known_hosts = os.path.expanduser(path)
+        return
+    from core.utils import REPO_ROOT
+
+    path = os.path.join(REPO_ROOT, "certs", "known_hosts")
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        _oob_known_hosts = path
+
+
 def host_key_store_provisioned() -> bool:
     """True when an out-of-band known_hosts file or ssh_host_keys was supplied."""
     return bool(SSH_KNOWN_HOSTS.strip() or _oob_known_hosts)
@@ -653,24 +670,222 @@ def install_oob_host_keys(collectives) -> None:
         raise ValueError(f"Could not restrict {path}: {exc}") from exc
 
 
-def prime_target_host_keys(targets, collectives) -> None:
-    """Main thread: connect each box once and pin ssh_ok_host.
+def _host_key_fingerprint(key) -> str:
+    """SHA256 fingerprint only. The raw key is not shown."""
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
-    Stops after the first working address so overlay IPs do not add timeouts.
-    Success lines are DEBUG-only. Failures (timeout, auth) always print.
+
+def _read_remote_host_key(host: str, timeout: int = SSH_PRIME_TIMEOUT):
+    """Read the server key without authenticating. A password here would spend a lockout attempt."""
+    sock = None
+    transport = None
+    try:
+        sock = socket.create_connection((host, SSH_PORT), timeout=timeout)
+        transport = paramiko.Transport(sock, disabled_algorithms=_SSH_DISABLED)
+        transport.start_client(timeout=timeout)
+        return transport.get_remote_server_key()
+    except (OSError, paramiko.SSHException):
+        return None
+    finally:
+        if transport is not None:
+            try:
+                transport.close()
+            except OSError:
+                pass
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def _ensure_known_hosts_path() -> str:
+    """Toolkit store, not the user known_hosts file. An empty SSH_KNOWN_HOSTS must not trust that file."""
+    global _oob_known_hosts
+    path = SSH_KNOWN_HOSTS.strip()
+    if path:
+        path = os.path.expanduser(path)
+    else:
+        from core.utils import REPO_ROOT
+
+        path = os.path.join(REPO_ROOT, "certs", "known_hosts")
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    _oob_known_hosts = path
+    return path
+
+
+def _any_stored_key(host: str):
+    """A previous yes is enough. A timed-out probe must not throw that pin away."""
+    path = _ensure_known_hosts_path()
+    if not os.path.isfile(path):
+        return None
+    from paramiko.hostkeys import HostKeys
+
+    known = HostKeys()
+    known.load(path)
+    entry = known.lookup(host)
+    if not entry:
+        return None
+    for key in entry.values():
+        return key
+    return None
+
+
+def _stored_host_key(host: str, key):
+    path = _ensure_known_hosts_path()
+    if not os.path.isfile(path):
+        return None
+    from paramiko.hostkeys import HostKeys
+
+    known = HostKeys()
+    known.load(path)
+    entry = known.lookup(host)
+    if not entry:
+        return None
+    return entry.get(key.get_name())
+
+
+def _save_host_key(host: str, key) -> None:
+    """Append one accepted key. A wildcard name is already refused by the line check."""
+    from paramiko.hostkeys import HostKeys
+
+    path = _ensure_known_hosts_path()
+    known = HostKeys()
+    if os.path.isfile(path):
+        known.load(path)
+    known.add(host, key.get_name(), key)
+    known.save(path)
+    try:
+        os.chmod(path, SSH_KNOWN_HOSTS_MODE)
+    except OSError:
+        pass
+
+
+def _login_allowed(host: str, pinned: list) -> bool:
+    """Send the password only if this address already has a saved key, or presents that same key."""
+    if _any_stored_key(host) is not None:
+        return True
+    expected = None
+    for name in pinned:
+        expected = _any_stored_key(name)
+        if expected is not None:
+            break
+    if expected is None:
+        return True
+    if not _tcp_open(host):
+        return False
+    remote = _read_remote_host_key(host)
+    if remote is not None and remote == expected:
+        _save_host_key(host, remote)
+        return True
+    return False
+
+
+def _bind_same_key_hosts(target, host: str, key) -> None:
+    """A timeout on the shown address must be able to try another address that presents the same key."""
+    target.ssh_only_host = ""
+    target.ssh_approved_hosts = []
+    approved = [host]
+    for other in target.ssh_endpoints():
+        if other == host or not _host_resolves(other) or not _tcp_open(other):
+            continue
+        other_key = _read_remote_host_key(other)
+        if other_key is not None and other_key == key:
+            _save_host_key(other, other_key)
+            approved.append(other)
+    target.ssh_ok_host = host
+    target.ssh_only_host = ""
+    target.ssh_approved_hosts = approved
+
+
+def _prompt_store_host_key(target) -> bool:
+    """One prompt per appliance, on the main thread. No skips the box. Yes keeps every address that presents that same key."""
+    from config import YES_ANSWERS
+
+    saved = []
+    for host in target.ssh_endpoints():
+        if _any_stored_key(host) is not None:
+            saved.append(host)
+    if saved:
+        target.ssh_only_host = ""
+        target.ssh_approved_hosts = []
+        names = []
+        for host in target.ssh_endpoints():
+            if host not in names:
+                names.append(host)
+        key = _any_stored_key(saved[0])
+        if key is not None:
+            for host in names:
+                if _any_stored_key(host) is None:
+                    _save_host_key(host, key)
+        target.ssh_ok_host = saved[0]
+        target.ssh_approved_hosts = names
+        print(f"      {target.label()}: using stored host key", file=sys.stderr)
+        return True
+    for host in target.ssh_endpoints():
+        if not _host_resolves(host):
+            continue
+        key = _read_remote_host_key(host)
+        if key is None:
+            continue
+        stored = _stored_host_key(host, key)
+        if stored is not None and stored == key:
+            _bind_same_key_hosts(target, host, key)
+            return True
+        if not sys.stdin.isatty():
+            target.status = "failed"
+            target.error = "SSH host key prompt needs a terminal"
+            return False
+        changed = stored is not None
+        print(
+            f"      {target.label()}: {'changed' if changed else 'unknown'} SSH host key for {host}",
+            file=sys.stderr,
+        )
+        print(f"      {key.get_name()} {_host_key_fingerprint(key)}", file=sys.stderr)
+        verb = "Replace the stored key" if changed else "Store this key and continue"
+        ans = input(f"      {verb}? [y/N]: ").strip().lower()
+        if ans not in YES_ANSWERS:
+            target.status = "failed"
+            target.error = "SSH host key was not stored"
+            return False
+        _save_host_key(host, key)
+        _bind_same_key_hosts(target, host, key)
+        return True
+    target.status = "failed"
+    target.error = "Could not read the SSH host key"
+    print(f"      {target.label()}: {target.error}", file=sys.stderr)
+    return False
+
+
+def prime_target_host_keys(targets, collectives) -> None:
+    """Main thread: prompt once per appliance, then pin ssh_ok_host.
+
+    Workers must not ask. A missing username or a prime failure skips that box and continues.
     """
     from core.prompts import collective_for_target
 
     install_oob_host_keys(collectives)
+    _attach_existing_known_hosts()
     # print(f"DEBUG prime_keys: n={len(targets)}")
     print(
         "      SSH: checking host keys before parallel work starts.",
         file=sys.stderr,
     )
     for target in targets:
-        col = collective_for_target(target, collectives)
-        session = SSHSession(col["ssh_username"], ssh_password_for(target, col))
-        session.prime_host_keys(target)
+        print(f"      {target.label()}: checking SSH host key", file=sys.stderr)
+        if not _prompt_store_host_key(target):
+            continue
+        try:
+            col = collective_for_target(target, collectives)
+            session = SSHSession(col["ssh_username"], ssh_password_for(target, col))
+            session.prime_host_keys(target)
+        except (OSError, paramiko.SSHException, ValueError, KeyError, RuntimeError) as exc:
+            target.status = "failed"
+            target.error = str(exc)
+            print(f"      {target.label()}: {exc}", file=sys.stderr)
 
 
 def ssh_password_for(target, col: dict) -> str:

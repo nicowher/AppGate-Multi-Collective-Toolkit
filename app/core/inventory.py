@@ -53,6 +53,8 @@ class Target:
     walk_ok: Optional[bool] = None
     ssh_password_override: Optional[str] = None
     ssh_ok_host: str = ""
+    ssh_only_host: str = ""
+    ssh_approved_hosts: List[str] = field(default_factory=list)
     self_ips: List[str] = field(default_factory=list)
 
     def label(self) -> str:
@@ -67,11 +69,15 @@ class Target:
         )
 
     def ssh_endpoints(self) -> List[str]:
-        """This appliance's FQDN, then private addresses, then public addresses.
+        """Addresses that presented the approved host key, or else FQDN then private then public.
 
         Credentials agip is only appended when this box is the login Controller.
         Trying every Controller's shared agip used to SSH the wrong appliance.
         """
+        if self.ssh_approved_hosts:
+            return list(self.ssh_approved_hosts)
+        if self.ssh_only_host:
+            return [self.ssh_only_host]
         out: List[str] = []
         # print(f"DEBUG ssh_endpoints: pin={self.ssh_ok_host!r} fqdn={self.ssh_fqdn!r} ips={self.ssh_ips!r}")
         if self.ssh_ok_host:
