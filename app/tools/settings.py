@@ -16,6 +16,7 @@ if _APP_DIR not in sys.path:
 
 import config
 from config import YES_ANSWERS
+from core.utils import print_error
 
 CONFIG_PATH = os.path.join(_APP_DIR, "config.py")
 
@@ -154,6 +155,15 @@ def main() -> bool:
                 if first not in YES_ANSWERS or second != "YES":
                     print("      Save cancelled.")
                     continue
+            if not values.get("CNSA_STRICT", True) and getattr(config, "CNSA_STRICT", True):
+                # Same kind of downgrade as LAB_MODE and INSECURE_API, so it gets a yes too.
+                confirm = input(
+                    "      CNSA_STRICT=False relaxes TLS and SSH for every Controller and box "
+                    "(SHA-256 MACs, P-256, AES-128 and TLS 1.3 become possible). Continue? [y/N]: "
+                ).strip().lower()
+                if confirm not in YES_ANSWERS:
+                    print("      Save cancelled.")
+                    continue
             if values.get("LAB_MODE") and not config.LAB_MODE:
                 confirm = input(
                     "      LAB_MODE=True disables SSH host-key checks and STIG floors. "
@@ -169,8 +179,7 @@ def main() -> bool:
                     text = _write_assignment(text, name, values[name])
             except ValueError as exc:
                 # Nothing has been written yet, so config.py is unchanged.
-                print(f"      {exc}")
-                print("      Save cancelled; config.py was not changed.")
+                print_error("E22", str(exc), "Save cancelled; config.py was not changed. Remove the duplicate line and save again.")
                 continue
             try:
                 mode = os.stat(CONFIG_PATH).st_mode & 0o777

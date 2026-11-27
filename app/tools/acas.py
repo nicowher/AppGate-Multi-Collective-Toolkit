@@ -21,29 +21,37 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import List
 
-from core.run import login_collectives, print_result, select_appliances
+from core.run import (
+    preview_then_apply,
+    login_collectives,
+    print_result,
+    fail_box,
+    report_target_fields,
+    select_appliances,
+    ssh_failure_code,
+    ssh_failure_reason,
+)
 from config import (
     ACAS_CZCONFIGD_UNIT,
     DEBUG,
-    DRY_RUN,
     SSH_CONCURRENCY,
-    SSH_LOG_PREVIEW,
     WRITE_RUN_REPORT,
-    YES_ANSWERS,
     warn_insecure_transport,
 )
-from core.inventory import Target
+from core.inventory import STATUS_FAILED, STATUS_OK, STATUS_PREVIEW, Target
+from core.ui import boxes, step_banner
 from core.prompts import (
+    require_collectives,
     CREDENTIALS_PATH,
     _parse_collectives,
     collective_for_target,
     prepare_collectives,
 )
-from core.utils import HaltError, halt, load_credentials, print_error, write_json_report
+from core.utils import load_credentials, run_tool, write_json_report
 from ssh.acas import AcasPrep
-from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
+from ssh.client import iter_primed_targets, run_ssh_batch, ssh_password_for
 
 
 def _fail(target: Target, message: str) -> None:
@@ -52,29 +60,17 @@ def _fail(target: Target, message: str) -> None:
     The detail is the SSH or script error: step names, error kind, and the box
     label. It holds no password and is capped at SSH_LOG_PREVIEW characters.
     """
-    target.status = "failed"
     low = message.lower()
-    if "getaddrinfo" in low or "(no dns)" in low:
-        human = "Hostname does not resolve. Use the SSH IP or fix DNS."
-    elif "(auth)" in low or "auth failed" in low:
-        human = "SSH login failed. Check username and password."
-    elif "(hostkey)" in low or "host key" in low:
-        human = "SSH host key did not match or was not accepted."
-    elif "(network)" in low or "timed out" in low or "timeout" in low:
-        human = "Could not reach the box over SSH (timeout or no route). SSHBRUTE may be rate-limiting this computer."
+    human = ssh_failure_reason(message)
+    if human:
+        pass
     elif "acas script failed" in low:
         human = "The ACAS script stopped at a step. The report lists the steps that ran."
     elif "cz-configd is not active" in low:
         human = "cz-configd did not come back after harden. Check the service on the box."
-    elif "no ssh address answered" in low:
-        human = "No SSH address for this box answered."
     else:
         human = "ACAS prep failed on this appliance. The report has the reason."
-    target.error = human
-    target.detail = message[:SSH_LOG_PREVIEW]
-    print_result(target, human, ok=False)
-    if DEBUG:
-        print(f"      Details: {message}", file=sys.stderr)
+    fail_box(target, human, message, ssh_failure_code(message) or "E14")
 
 
 def _mode_from_argv() -> str:
@@ -156,18 +152,15 @@ def _emit_report(
             }
             for c in collectives
         ],
-        "ok_count": sum(1 for t in selected if t.status == "ok"),
-        "preview_count": sum(1 for t in selected if t.status == "preview"),
-        "failed_count": sum(1 for t in selected if t.status == "failed"),
+        "ok_count": sum(1 for t in selected if t.status == STATUS_OK),
+        "preview_count": sum(1 for t in selected if t.status == STATUS_PREVIEW),
+        "failed_count": sum(1 for t in selected if t.status == STATUS_FAILED),
         "targets": [
             {
-                "label": t.label(),
+                **report_target_fields(t, hide_addresses=False),
                 "ssh_fqdn": t.ssh_fqdn,
                 "ssh_ip": t.ssh_ip,
                 "ssh_endpoints": t.ssh_endpoints(),
-                "status": t.status,
-                "error": t.error,
-                "detail": t.detail,
             }
             for t in selected
         ],
@@ -175,50 +168,49 @@ def _emit_report(
     write_json_report("acas-" + mode, report)
 
 
-def _apply(
-    selected: List[Target],
-    collectives: list,
-    mode: str,
-    dry_run: bool,
-) -> None:
-    """Step 3: preview, or run the script per box in parallel after the address and host-key check. A box with no working address is skipped."""
+def _preview(selected: List[Target], mode: str) -> None:
+    """Step 3 preview: one Plan line per box, nothing sent."""
     verb = "Unharden" if mode == "unharden" else "Harden"
-    print(f"\n[3/3] {verb} via SSH (up to {SSH_CONCURRENCY} at a time)...")
-    if dry_run:
-        for target in selected:
-            if mode == "unharden":
-                print(
-                    f"      {target.label()}: would cz-config nopasswd, drop-in, "
-                    "banner TTY, then iptables -F SSHBRUTE -A ACCEPT"
-                )
-            else:
-                print(
-                    f"      {target.label()}: would cz-config nopasswd false, "
-                    f"restore backups, rm drop-in, restart {ACAS_CZCONFIGD_UNIT}"
-                )
-            target.status = "preview"
-        return
+    step_banner("[3/3]", f"{verb} each box over SSH", f"{boxes(len(selected))}, up to {SSH_CONCURRENCY} at a time")
+    if mode == "unharden":
+        plan = "cz-config nopasswd, sudo drop-in, banner TTY skip, open SSHBRUTE"
+    else:
+        plan = f"nopasswd off, restore backups, remove drop-in, restart {ACAS_CZCONFIGD_UNIT}"
+    for target in selected:
+        if target.status == STATUS_FAILED:
+            continue
+        print_result(target, plan, word="Plan")
+        target.status = STATUS_PREVIEW
 
-    prime_target_host_keys(selected, collectives)
+
+def _apply_live(confirmed: List[Target], collectives: list, mode: str) -> None:
+    """Step 3 live: run the script on each confirmed box, each starting as soon as its SSH address is settled.
+
+    Kept apart from the preview on purpose: one function with dry-run branches is
+    the shape that let other menus act on boxes the confirm had not covered.
+    """
+    verb = "Unharden" if mode == "unharden" else "Harden"
+    step_banner("[3/3]", f"{verb} each box over SSH", f"{boxes(len(confirmed))}, up to {SSH_CONCURRENCY} at a time")
 
     def _one(target: Target) -> None:
+        """One box in a worker thread: unharden or harden, and record a plain failure reason instead of raising, so other boxes continue."""
         col = collective_for_target(target, collectives)
         session = AcasPrep(col["ssh_username"], ssh_password_for(target, col))
         if mode == "unharden":
             out = session.unharden(target)
         else:
             out = session.harden(target)
-        target.status = "ok"
-        print_result(target, mode)
+        target.status = STATUS_OK
+        print_result(target, "unhardened for the ACAS scan" if mode == "unharden" else "hardened again")
         if DEBUG:
             print(f"      {target.label()}: {_summarize_output(out)}")
             for ln in out.splitlines():
                 if ln.startswith("STEP_"):
                     print(f"        {ln}")
 
-    # A box with no answering address or a refused host key already failed above. Do not SSH to it.
-    ready = [t for t in selected if t.status != "failed"]
-    run_ssh_batch(ready, _one, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
+    # Boxes are handed over as their address is settled; a box with no answering
+    # address or a refused host key is never yielded, so it gets no SSH.
+    run_ssh_batch(iter_primed_targets(confirmed, collectives), _one, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 
 
 def main() -> None:
@@ -226,12 +218,7 @@ def main() -> None:
     warn_insecure_transport()
     creds = load_credentials(CREDENTIALS_PATH)
     collectives = _parse_collectives(creds)
-    if not collectives:
-        halt(
-            "E01",
-            "No collectives defined (collectives[] or agip)",
-            "Add collectives[].fqdn (and agip) to credentials.json, or enter them when prompted.",
-        )
+    require_collectives(collectives)
     prepare_collectives(creds, collectives)
 
     mode = _prompt_mode()
@@ -243,40 +230,23 @@ def main() -> None:
     selected = select_appliances(clients, step="[2/3]")
     if mode in ("unharden", "deharden"):
         print("This weakens STIG until you harden again.", file=sys.stderr)
-    started_at = datetime.now(timezone.utc).isoformat()
-    _apply(selected, collectives, mode, True)
-    _emit_report(mode, collectives, selected, dry_run=True, started_at=started_at)
-    if DRY_RUN:
-        print("      DRY_RUN is set — preview only.", file=sys.stderr)
-    elif any(t.status == "preview" for t in selected):
-        apply = input("\n      Apply to these appliances now? [y/N]: ").strip().lower()
-        if apply in YES_ANSWERS:
-            if mode in ("unharden", "deharden"):
-                print("This weakens STIG until you harden again.", file=sys.stderr)
-            for target in selected:
-                if target.status == "preview":
-                    target.status = "pending"
-                    target.error = ""
-            live_started = datetime.now(timezone.utc).isoformat()
-            try:
-                _apply(selected, collectives, mode, dry_run=False)
-            finally:
-                _emit_report(
-                    mode, collectives, selected, dry_run=False, started_at=live_started
-                )
+    def _stig_note() -> None:
+        """Unharden weakens STIG until harden runs again; say it right before the change."""
+        if mode in ("unharden", "deharden"):
+            print("This weakens STIG until you harden again.", file=sys.stderr)
 
-    if any(t.status == "failed" for t in selected):
+    preview_then_apply(
+        selected,
+        preview=lambda: _preview(selected, mode),
+        apply=lambda go: _apply_live(go, collectives, mode),
+        report=lambda dry, at: _emit_report(mode, collectives, selected, dry_run=dry, started_at=at),
+        prompt=f"{mode.capitalize()} {{boxes}} now?",
+        before_apply=_stig_note,
+    )
+
+    if any(t.status == STATUS_FAILED for t in selected):
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user", file=sys.stderr)
-        sys.exit(1)
-    except HaltError:
-        sys.exit(1)
-    except Exception as exc:
-        print(f"\nError: {exc}", file=sys.stderr)
-        sys.exit(1)
+    run_tool(main)

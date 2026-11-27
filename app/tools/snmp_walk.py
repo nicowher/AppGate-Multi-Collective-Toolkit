@@ -19,7 +19,9 @@ if _APP_DIR not in sys.path:
 
 from datetime import datetime, timezone
 
-from core.run import login_collectives, print_result, select_appliances
+from core.ui import boxes, run_summary, step_banner
+from core.inventory import STATUS_FAILED, STATUS_OK
+from core.run import fail_box, login_collectives, print_result, select_appliances
 from config import (
     DEBUG,
     SNMP_AUTH_PROTOCOL,
@@ -33,6 +35,7 @@ from config import (
 )
 
 from core.prompts import (
+    require_collectives,
     CREDENTIALS_PATH,
     _parse_collectives,
     _require,
@@ -43,8 +46,7 @@ from core.prompts import (
 )
 from core.snmp_validate import SNMPValidator
 from core.utils import (
-    HaltError,
-    halt,
+    run_tool,
     is_valid_host,
     load_credentials,
     print_error,
@@ -128,12 +130,7 @@ def _walk_single(creds: dict, user: str, auth: str, priv: str) -> int:
 def _walk_inventory(creds: dict) -> int:
     """Walk every selected appliance from the Controller inventory, in parallel, on the address SSH found this session if there is one."""
     collectives = _parse_collectives(creds)
-    if not collectives:
-        halt(
-            "E01",
-            "No collectives defined (collectives[] or agip)",
-            "Add collectives[].fqdn to credentials.json or enter when prompted.",
-        )
+    require_collectives(collectives)
     prepare_collectives(creds, collectives, need_ssh=False, need_snmp=True)
 
     clients = login_collectives(collectives, step="[1/3]")
@@ -142,10 +139,11 @@ def _walk_inventory(creds: dict) -> int:
     # print("DEBUG walk-inventory:", [t.label() for t in selected])
     if DEBUG:
         print(f"      DEBUG walk-inventory: selected={[t.label() for t in selected]}", file=sys.stderr)
-    print(f"\n[3/3] SNMP walk (up to {WALK_CONCURRENCY} at a time)...")
+    step_banner("[3/3]", "Check each box answers an SNMPv3 walk", f"{boxes(len(selected))}, up to {WALK_CONCURRENCY} at a time")
     # print(f"DEBUG walk-inventory: parallel={WALK_CONCURRENCY}")
 
     def _walk_one(target) -> None:
+        """Walk one box, trying its addresses in order, so one dead NIC does not fail a box that answers elsewhere."""
         col = collective_for_target(target, collectives)
         ok = SNMPValidator().validate_snmp_walk(
             target.walk_endpoints(),
@@ -156,7 +154,9 @@ def _walk_inventory(creds: dict) -> int:
             label=target.label(),
         )
         target.walk_ok = ok
-        print_result(target, "walk", ok=ok)
+        if ok:
+            target.status = STATUS_OK
+            print_result(target, "SNMPv3 walk answered")
         if DEBUG:
             print(
                 f"      DEBUG walk: {target.label()} endpoints={target.walk_endpoints()!r}",
@@ -165,18 +165,23 @@ def _walk_inventory(creds: dict) -> int:
         if not ok:
             raise RuntimeError("SNMP walk failed")
 
-    def _walk_fail(target, _exc) -> None:
+    def _walk_fail(target, exc) -> None:
+        """A worker exception marks only this box failed (E10), so the other walks continue."""
         target.walk_ok = False
-        print_error(
-            "E10",
-            f"{target.label()}: walk FAILED",
-            "This host is skipped; others continue.",
-            "Each address in turn (session address, admin name, admin IP, other IPs): check UDP/161, SNMP user/auth/priv, and leftover usmUser.",
-            "Lab: pysnmp CFB warning is harmless. Air-gap: install vendor wheels (menu D).",
-        )
+        fail_box(target, "No answer to the SNMPv3 walk on any address.", str(exc), "E10")
 
     run_target_batch(selected, _walk_one, WALK_CONCURRENCY, _walk_fail)
     failed = sum(1 for t in selected if not t.walk_ok)
+    # Same closing lines as the other menus: counts, then each failed box with its code.
+    run_summary(selected, preview=False)
+    if failed:
+        # The hints once for the run, instead of a block per failed box.
+        print_error(
+            "E10",
+            f"{failed} box(es) did not answer the SNMPv3 walk",
+            "Each address in turn (session address, admin name, admin IP, other IPs): check UDP/161, SNMP user/auth/priv, and leftover usmUser.",
+            "Lab: pysnmp CFB warning is harmless. Air-gap: install vendor wheels (menu D).",
+        )
 
     if WRITE_RUN_REPORT or DEBUG:
         report = {
@@ -200,6 +205,7 @@ def _walk_inventory(creds: dict) -> int:
                     "ssh_ip": t.ssh_ip,
                     "walk_endpoints": t.walk_endpoints(),
                     "walk_ok": t.walk_ok,
+                    "code": t.code if t.status == STATUS_FAILED else "",
                 }
                 for t in selected
             ],
@@ -229,13 +235,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user", file=sys.stderr)
-        sys.exit(1)
-    except HaltError:
-        sys.exit(1)
-    except Exception as exc:
-        print(f"\nError: {exc}", file=sys.stderr)
-        sys.exit(1)
+    run_tool(main)

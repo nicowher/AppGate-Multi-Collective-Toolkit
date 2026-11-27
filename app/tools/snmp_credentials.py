@@ -34,12 +34,17 @@ from typing import Any, Callable, Dict, List, Optional
 
 from api.appgate import AppGateClient, AppliancePutError
 from core.run import (
+    preview_then_apply,
     ClientMap,
     login_collectives,
+    fail_box,
+    report_target_fields,
     rollback_prior,
     print_result,
     prompt_add_or_replace,
     select_appliances,
+    ssh_failure_code,
+    ssh_failure_reason,
 )
 from config import (
     APPGATE_API_VERSION,
@@ -58,11 +63,12 @@ from config import (
     SUMMARY_WIDTH,
     insecure_api_enabled,
     WRITE_RUN_REPORT,
-    YES_ANSWERS,
     warn_insecure_transport,
 )
-from core.inventory import Target
+from core.inventory import STATUS_FAILED, STATUS_OK, STATUS_PREVIEW, Target
+from core.ui import boxes, run_summary, step_banner
 from core.prompts import (
+    require_collectives,
     CREDENTIALS_PATH,
     _parse_collectives,
     _require,
@@ -73,28 +79,30 @@ from core.prompts import (
 from core.snmp_hashgen import SNMPHashGenerator
 from core.snmp_validate import SNMPValidator
 from core.utils import (
+    print_unexpected_error,
+    run_tool,
     HaltError,
     begin_replaced_run,
-    halt,
     load_credentials,
     print_error,
     run_target_batch,
     write_json_report,
 )
-from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
+from ssh.client import iter_primed_targets, run_ssh_batch, ssh_password_for
 from ssh.engine import SNMPEngineFetcher
 
 def _ok(targets: List[Target]) -> List[Target]:
     """Appliances that have not failed a previous phase (still in the run)."""
-    return [t for t in targets if t.status != "failed"]
+    return [t for t in targets if t.status != STATUS_FAILED]
 
 
 def _fail(target: Target, message: str, code: str = "E09") -> None:
-    """Mark one appliance failed and keep going (fail-soft)."""
-    target.status = "failed"
+    """Mark one appliance failed and keep going (fail-soft). The report keeps the detail."""
     low = message.lower()
-    if "auth" in low:
-        human = "SSH login failed. Check username and password."
+    # The old bare "auth" check also matched SNMP text such as "auth hash".
+    human = ssh_failure_reason(message)
+    if human:
+        pass
     elif "walk" in low:
         human = "SNMP walk failed. Check UDP 161, the SNMP user, and leftover users on the box."
     elif "engine" in low:
@@ -103,10 +111,7 @@ def _fail(target: Target, message: str, code: str = "E09") -> None:
         human = "The Controller rejected the SNMP change. Check the report."
     else:
         human = message
-    target.error = human
-    print_result(target, human, ok=False)
-    if DEBUG:
-        print(f"      Details: {code} {message}", file=sys.stderr)
+    fail_box(target, human, message, ssh_failure_code(message) or code)
 
 
 def _prompt_snmp_mode() -> bool:
@@ -140,12 +145,14 @@ def _api_by_collective(
     order = [t for col in sorted(by_col) for t in by_col[col]]
 
     def _stop_after(failed: Target) -> None:
+        """First API failure in a step: roll back boxes already changed and mark the rest not changed, so a half-applied collective is not left behind."""
         rollback_prior(applied)
         done = {id(t) for t, _c in applied} | {id(failed)}
-        left = [t for t in order if id(t) not in done and t.status != "failed"]
+        left = [t for t in order if id(t) not in done and t.status != STATUS_FAILED]
         # print(f"DEBUG api_by_collective: stop at {failed.label()} left={[t.label() for t in left]}")
         for t in left:
-            _fail(t, f"not changed; this step stopped after {failed.label()} failed")
+            # Same code as the API step that stopped (not E09, which is the engine-ID read).
+            _fail(t, f"not changed; this step stopped after {failed.label()} failed", code="E08")
 
     for col in sorted(by_col):
         client = clients.get(col)
@@ -173,12 +180,7 @@ def main() -> None:
         warn_insecure_transport()
         creds = load_credentials(CREDENTIALS_PATH)
         collectives = _parse_collectives(creds)
-        if not collectives:
-            halt(
-                "E01",
-                "No collectives defined (collectives[] or agip)",
-                "Add collectives[].fqdn to credentials.json or enter when prompted.",
-            )
+        require_collectives(collectives)
         prepare_collectives(creds, collectives, need_snmp=True)
         promote_shared_fields(creds, ("rouser",))
         inputs = {
@@ -201,7 +203,6 @@ def main() -> None:
                 file=sys.stderr,
             )
 
-        dry_run = True
         if DEBUG:
             print(
                 f"      DEBUG step0: preview first DRY_RUN={DRY_RUN} collectives={len(collectives)}",
@@ -210,7 +211,6 @@ def main() -> None:
         hashgen = SNMPHashGenerator()
         user = inputs["snmp_user"]
         rouser_line = f"rouser {inputs['rouser']} priv" if inputs.get("rouser") else ""
-        started_at = datetime.now(timezone.utc).isoformat()
 
         clients = login_collectives(collectives, step="[1/8]")
         # print("DEBUG step1: logged in", list(clients))
@@ -235,69 +235,43 @@ def main() -> None:
             print(f"      DEBUG step2: selected={[t.label() for t in selected]}", file=sys.stderr)
         replace = _prompt_snmp_mode()
 
-        _run_phases_3_to_8(
-            selected=selected,
-            clients=clients,
-            collectives=collectives,
-            hashgen=hashgen,
-            user=user,
-            snmp_auth=inputs["snmp_auth"],
-            snmp_priv=inputs["snmp_priv"],
-            rouser_line=rouser_line,
-            dry_run=dry_run,
-            replace=replace,
+        phase_args = dict(
+            selected=selected, clients=clients, collectives=collectives, hashgen=hashgen, user=user,
+            snmp_auth=inputs["snmp_auth"], snmp_priv=inputs["snmp_priv"], rouser_line=rouser_line, replace=replace,
         )
 
-        _print_summary(selected, user=user, rouser_line=rouser_line, dry_run=dry_run)
-        report = _build_run_report(
-            collectives, inventory, selected, user=user, dry_run=dry_run, started_at=started_at,
-            clients=clients,
+        def _phases(dry: bool, targets: Optional[List[Target]] = None) -> None:
+            """Steps 3-8 on targets (the live run gets only the confirmed boxes), then menu 1's table for every box."""
+            _run_phases_3_to_8(dry_run=dry, **dict(phase_args, selected=targets if targets is not None else selected))
+            _print_summary(selected, user=user, rouser_line=rouser_line, dry_run=dry)
+
+        def _report(dry: bool, at: str) -> None:
+            """Menu 1's own report shape (engine ID lengths, hash lengths, planned actions)."""
+            built = _build_run_report(
+                collectives, inventory, selected, user=user, dry_run=dry, started_at=at, clients=clients,
+            )
+            if WRITE_RUN_REPORT or DEBUG:
+                _emit_run_report(built)
+
+        def _live_banner() -> None:
+            """Say the live run starts, and clear the preview's walk results."""
+            print("\n*** Applying config (live run) — pin, push, purge, walk. ***\n", file=sys.stderr)
+            for target in selected:
+                if target.status == STATUS_PREVIEW:
+                    target.walk_ok = None
+
+        preview_then_apply(
+            selected,
+            preview=lambda: _phases(True),
+            apply=lambda go: _phases(False, go),
+            report=_report,
+            prompt="Push SNMP config to {boxes} now?",
+            before_apply=_live_banner,
+            summary=False,
+            dry_run_note=False,
         )
-        if WRITE_RUN_REPORT or DEBUG:
-            _emit_run_report(report)
 
-        if (not DRY_RUN) and dry_run and any(t.status == "preview" for t in selected):
-            # print(f"DEBUG: preview_count={sum(1 for t in selected if t.status == 'preview')}")
-            apply = input(
-                "\n      Push config to these appliances now? [y/N]: "
-            ).strip().lower()
-            if apply in YES_ANSWERS:
-                print(
-                    "\n*** Applying config (live run) — pin, push, purge, walk. ***\n",
-                    file=sys.stderr,
-                )
-                for target in selected:
-                    if target.status == "preview":
-                        target.status = "pending"
-                        target.error = ""
-                        target.walk_ok = None
-                live_started = datetime.now(timezone.utc).isoformat()
-                _run_phases_3_to_8(
-                    selected=selected,
-                    clients=clients,
-                    collectives=collectives,
-                    hashgen=hashgen,
-                    user=user,
-                    snmp_auth=inputs["snmp_auth"],
-                    snmp_priv=inputs["snmp_priv"],
-                    rouser_line=rouser_line,
-                    dry_run=False,
-                    replace=replace,
-                )
-                _print_summary(selected, user=user, rouser_line=rouser_line, dry_run=False)
-                live_report = _build_run_report(
-                    collectives,
-                    inventory,
-                    selected,
-                    user=user,
-                    dry_run=False,
-                    started_at=live_started,
-                    clients=clients,
-                )
-                if WRITE_RUN_REPORT or DEBUG:
-                    _emit_run_report(live_report)
-
-        if any(t.status == "failed" for t in selected):
+        if any(t.status == STATUS_FAILED for t in selected):
             sys.exit(1)
 
     except KeyboardInterrupt:
@@ -306,7 +280,7 @@ def main() -> None:
     except HaltError:
         sys.exit(1)
     except Exception as exc:
-        print(f"\nError: {exc}", file=sys.stderr)
+        print_unexpected_error(exc)
         sys.exit(1)
 
 
@@ -323,44 +297,49 @@ def _run_phases_3_to_8(
     dry_run: bool,
     replace: bool = False,
 ) -> None:
-    """Steps 3–8 (shared by dry-run preview and live apply).
+    """Steps 3-8: the preview (no change anywhere) or the live run.
 
-    dry_run=True:  print planned actions; step 4 greps engine ID without snmpd bounce.
-    dry_run=False: mutate via API + SSH, then prove with a walk.
+    Two separate paths on purpose: one loop with dry_run branches in every step
+    is the shape that once let a live run act on boxes the preview had not
+    cleared. Steps 4 and 5 (engine read, key localization) are shared helpers.
     """
-    print("\n[3/8] Pinning engineIDType via API...")
-    # print(f"DEBUG step3: dry_run={dry_run} n={len(_ok(selected))}")
+    keys = dict(selected=selected, collectives=collectives, hashgen=hashgen, user=user,
+                snmp_auth=snmp_auth, snmp_priv=snmp_priv)
     if dry_run:
-        for target in _ok(selected):
-            print(f"      {target.label()}: would set engineIDType {ENGINE_ID_TYPE}")
+        _preview_phases(replace=replace, **keys)
     else:
-        def _pin(target: Target, client: AppGateClient) -> None:
-            client.ensure_engine_id_type3(target.appliance_id)
-            print(f"      {target.label()}: engineIDType set")
+        _live_phases(clients=clients, rouser_line=rouser_line, replace=replace, **keys)
 
-        _api_by_collective(_ok(selected), clients, _pin)
-        time.sleep(SNMP_RELOAD_DELAY)
 
-    print(f"\n[4/8] SSH engine ID (up to {SSH_CONCURRENCY} at a time)...")
-    # print(f"DEBUG step4: restart_snmpd={not dry_run}")
-    prime_target_host_keys(_ok(selected), collectives)
+def _step4_engine(selected: List[Target], collectives: list, *, restart: bool) -> None:
+    """Step 4: read each box's engine ID over SSH (live: restart snmpd first so engineIDType 3 applies).
+
+    Each box starts as soon as its SSH address is settled. Two boxes with the
+    same engine ID both fail, because keys localized to one ID would be valid
+    on both.
+    """
+    step_banner(
+        "[4/8]",
+        "Read each SNMP engine ID over SSH",
+        f"{boxes(len(_ok(selected)))}, up to {SSH_CONCURRENCY} at a time" + ("; snmpd restarts first" if restart else ""),
+    )
+    # print(f"DEBUG step4: restart_snmpd={restart}")
 
     def _ssh_engine(target: Target) -> None:
-        if target.status == "failed":
+        """Read one box's engine ID over SSH, because the localized keys depend on it."""
+        if target.status == STATUS_FAILED:
             return
         col = collective_for_target(target, collectives)
         engine_id = SNMPEngineFetcher(
             col["ssh_username"], ssh_password_for(target, col)
-        ).get_engine_id(target, restart_snmpd=not dry_run)
+        ).get_engine_id(target, restart_snmpd=restart)
         if engine_id.lower().startswith("0x"):
             engine_id = engine_id[2:]
         target.engine_id = engine_id
-        if DEBUG:
-            print(f"      {target.label()}: engine {engine_id}")
-        else:
-            print(f"      {target.label()}: engine ID read")
+        # The engine ID itself only with DEBUG (it stays off the console in production).
+        print_result(target, f"engine ID {engine_id}" if DEBUG else "engine ID read")
 
-    run_ssh_batch(_ok(selected), _ssh_engine, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
+    run_ssh_batch(iter_primed_targets(_ok(selected), collectives), _ssh_engine, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
     seen_engine: Dict[str, Target] = {}
     for target in list(_ok(selected)):
         eid = (target.engine_id or "").lower()
@@ -380,7 +359,12 @@ def _run_phases_3_to_8(
             "After FQDN+IP fail: Try a new password. Check sudo, eth0, engineIDType 3.",
         )
 
-    print("\n[5/8] Localizing SNMPv3 keys...")
+
+def _step5_localize(
+    selected: List[Target], collectives: list, hashgen: SNMPHashGenerator, user: str, snmp_auth: str, snmp_priv: str
+) -> None:
+    """Step 5: localize auth and priv keys to each engine ID in memory (RFC 3414); nothing is sent."""
+    step_banner("[5/8]", "Localize the SNMPv3 keys to each engine ID", "in memory, RFC 3414")
     for target in _ok(selected):
         try:
             col = collective_for_target(target, collectives)
@@ -392,112 +376,156 @@ def _run_phases_3_to_8(
             )
             target.auth_hash = data["hashes"]["auth"]
             target.priv_hash = data["hashes"]["priv"]
-            print(f"      {target.label()}: hashed")
+            print_result(target, f"keys localized ({SNMP_AUTH_PROTOCOL} / {SNMP_PRIV_PROTOCOL})")
         except Exception as exc:
             _fail(target, f"hash: {exc}")
 
-    print("\n[6/8] Pushing SNMPv3 config via each Controller...")
+
+def _preview_phases(
+    *, selected: List[Target], collectives: list, hashgen: SNMPHashGenerator, user: str,
+    snmp_auth: str, snmp_priv: str, replace: bool,
+) -> None:
+    """Preview of steps 3-8: plan lines only, plus the read-only engine read and key localization.
+
+    Nothing is changed: no API pin or push, no snmpd restart, no USM purge, no
+    walk. Boxes that would change end with status "preview".
+    """
+    n = len(_ok(selected))
+    step_banner("[3/8]", f"Pin engineIDType {ENGINE_ID_TYPE} via the Controller API", boxes(n))
+    for target in _ok(selected):
+        print_result(target, f"set engineIDType {ENGINE_ID_TYPE}", word="Plan")
+    _step4_engine(selected, collectives, restart=False)
+    _step5_localize(selected, collectives, hashgen, user, snmp_auth, snmp_priv)
+    mode = "replace" if replace else "add"
+    step_banner("[6/8]", "Push the SNMPv3 user through each Controller", boxes(len(_ok(selected))))
+    for target in _ok(selected):
+        print_result(target, f"{mode} SNMPv3 user {user}", word="Plan")
+        if DEBUG:
+            print(f"      DEBUG {target.label()}: engine={target.engine_id or '?'}", file=sys.stderr)
+        target.status = STATUS_PREVIEW
+    step_banner("[7/8]", "Clear the old SNMP key rows over SSH", f"{boxes(len(_ok(selected)))}, up to {SSH_CONCURRENCY} at a time")
+    for target in _ok(selected):
+        print_result(target, f"clear old usmUser rows for {user}", word="Plan")
+    step_banner("[8/8]", "Check each box answers an SNMPv3 walk", f"{boxes(len(_ok(selected)))}, up to {WALK_CONCURRENCY} at a time")
+    for target in _ok(selected):
+        if SKIP_CREDENTIAL_WALK:
+            print_result(target, "walk skipped (SKIP_CREDENTIAL_WALK)", word="Skip")
+        else:
+            host = (target.walk_endpoints() or ["?"])[0]
+            print_result(target, f"walk {host}", word="Plan")
+            if DEBUG:
+                print(f"      DEBUG walk endpoints={target.walk_endpoints()!r}", file=sys.stderr)
+        target.walk_ok = None
+
+
+def _live_phases(
+    *, selected: List[Target], clients: ClientMap, collectives: list, hashgen: SNMPHashGenerator, user: str,
+    snmp_auth: str, snmp_priv: str, rouser_line: str, replace: bool,
+) -> None:
+    """Live steps 3-8: pin, read the engine ID after an snmpd restart, localize, push, purge, walk.
+
+    Each step acts only on boxes not failed so far; a box whose push failed or
+    was rolled back is not purged.
+    """
+    step_banner("[3/8]", f"Pin engineIDType {ENGINE_ID_TYPE} via the Controller API", boxes(len(_ok(selected))))
+
+    def _pin(target: Target, client: AppGateClient) -> None:
+        """Step 3: pin engineIDType 3 so step 4 reads the MAC-based engine ID the keys are localized to."""
+        client.ensure_engine_id_type3(target.appliance_id)
+        print_result(target, f"engineIDType {ENGINE_ID_TYPE} set")
+
+    _api_by_collective(_ok(selected), clients, _pin)
+    time.sleep(SNMP_RELOAD_DELAY)
+    _step4_engine(selected, collectives, restart=True)
+    _step5_localize(selected, collectives, hashgen, user, snmp_auth, snmp_priv)
+
+    step_banner("[6/8]", "Push the SNMPv3 user through each Controller", boxes(len(_ok(selected))))
     # Appliance ids whose createUser PUT succeeded. Step 7 purges only these, so a box
     # that was never pushed keeps its existing SNMP user.
     pushed: set = set()
     mode = "replace" if replace else "add"
-    if dry_run:
-        for target in _ok(selected):
-            print(f"      {target.label()}: would {mode} SNMPv3 user {user}")
-            if DEBUG:
-                print(
-                    f"      DEBUG {target.label()}: engine={target.engine_id or '?'}",
-                    file=sys.stderr,
-                )
-            target.status = "preview"
-    else:
-        if replace:
-            begin_replaced_run()
+    if replace:
+        begin_replaced_run()
 
-        def _push(target: Target, client: AppGateClient) -> None:
-            col = collective_for_target(target, collectives)
-            snmp_user = col.get("snmp_user") or user
-            client.update_snmp_config(
-                snmp_user,
-                target.auth_hash,
-                target.priv_hash,
-                rouser_line,
-                appliance_id=target.appliance_id,
-                replace=replace,
-                snapshot_label=target.label(),
-            )
-            target.status = "ok"
-            pushed.add(target.appliance_id)
-            print_result(target, f"SNMP {mode}")
-
-        _api_by_collective(_ok(selected), clients, _push)
-
-    print(f"\n[7/8] SSH purge leftover usmUser (up to {SSH_CONCURRENCY} at a time)...")
-    if dry_run:
-        for target in _ok(selected):
-            print(f"      {target.label()}: would purge persistent usmUser {user}")
-    else:
-        def _ssh_purge(target: Target) -> None:
-            col = collective_for_target(target, collectives)
-            SNMPEngineFetcher(
-                col["ssh_username"], ssh_password_for(target, col)
-            ).purge_persistent_user(
-                target,
-                col.get("snmp_user") or user,
-                keep_hash=target.auth_hash,
-            )
-            print(f"      {target.label()}: persistent USM purged")
-            client = clients.get(int(target.collective))
-            if client is not None:
-                client.strip_localized_key(
-                    col.get("snmp_user") or user,
-                    appliance_id=target.appliance_id,
-                )
-
-        # A rolled-back box is failed, so _ok drops it even though its id is in pushed.
-        purge_set = [t for t in _ok(selected) if t.appliance_id in pushed]
-        # print(f"DEBUG step7: purge={[t.label() for t in purge_set]}")
-        run_ssh_batch(purge_set, _ssh_purge, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
-
-    print(f"\n[8/8] Validating SNMP walks (up to {WALK_CONCURRENCY} at a time)...")
-    # print(f"DEBUG step8: dry_run={dry_run} skip={SKIP_CREDENTIAL_WALK}")
-    if dry_run or SKIP_CREDENTIAL_WALK:
-        for target in _ok(selected):
-            if SKIP_CREDENTIAL_WALK:
-                print(f"      {target.label()}: skipped (SKIP_CREDENTIAL_WALK)")
-            else:
-                host = (target.walk_endpoints() or ["?"])[0]
-                print(f"      {target.label()}: would walk {host}")
-                if DEBUG:
-                    print(
-                        f"      DEBUG walk endpoints={target.walk_endpoints()!r}",
-                        file=sys.stderr,
-                    )
-            target.walk_ok = None
-    else:
-        time.sleep(SNMP_RELOAD_DELAY)
-
-        def _walk_one(target: Target) -> None:
-            col = collective_for_target(target, collectives)
-            ok = SNMPValidator().validate_snmp_walk(
-                target.walk_endpoints(),
-                col.get("snmp_user") or user,
-                col.get("snmp_auth") or snmp_auth,
-                col.get("snmp_priv") or snmp_priv,
-                engine_id=target.engine_id,
-                label=target.label(),
-            )
-            target.walk_ok = ok
-            print_result(target, "walk", ok=ok)
-            if not ok:
-                raise RuntimeError("SNMP walk failed")
-
-        run_target_batch(
-            _ok(selected),
-            _walk_one,
-            WALK_CONCURRENCY,
-            lambda t, e: _fail(t, "SNMP walk failed", code="E10"),
+    def _push(target: Target, client: AppGateClient) -> None:
+        """Step 6: write createUser through the Controller. Only boxes recorded here are purged in step 7."""
+        col = collective_for_target(target, collectives)
+        snmp_user = col.get("snmp_user") or user
+        client.update_snmp_config(
+            snmp_user,
+            target.auth_hash,
+            target.priv_hash,
+            rouser_line,
+            appliance_id=target.appliance_id,
+            replace=replace,
+            snapshot_label=target.label(),
         )
+        target.status = STATUS_OK
+        pushed.add(target.appliance_id)
+        print_result(target, f"SNMPv3 user {user} ({mode})")
+
+    _api_by_collective(_ok(selected), clients, _push)
+
+    step_banner("[7/8]", "Clear the old SNMP key rows over SSH", f"{boxes(len(_ok(selected)))}, up to {SSH_CONCURRENCY} at a time")
+
+    def _ssh_purge(target: Target) -> None:
+        """Step 7: clear the old persistent USM rows so snmpd recreates the user with the new key, then drop the localized key from the API copy."""
+        col = collective_for_target(target, collectives)
+        SNMPEngineFetcher(
+            col["ssh_username"], ssh_password_for(target, col)
+        ).purge_persistent_user(
+            target,
+            col.get("snmp_user") or user,
+            keep_hash=target.auth_hash,
+            # Replace keeps only this user, so the other users' saved key rows go too.
+            drop_others=replace,
+        )
+        client = clients.get(int(target.collective))
+        if client is not None:
+            client.strip_localized_key(
+                col.get("snmp_user") or user,
+                appliance_id=target.appliance_id,
+            )
+        # One line once both parts are done: rows cleared on the box, key off the API copy.
+        print_result(target, "old key rows cleared; new key active")
+
+    # A rolled-back box is failed, so _ok drops it even though its id is in pushed.
+    purge_set = [t for t in _ok(selected) if t.appliance_id in pushed]
+    # print(f"DEBUG step7: purge={[t.label() for t in purge_set]}")
+    run_ssh_batch(purge_set, _ssh_purge, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
+
+    step_banner("[8/8]", "Check each box answers an SNMPv3 walk", f"{boxes(len(_ok(selected)))}, up to {WALK_CONCURRENCY} at a time")
+    # print(f"DEBUG step8: skip={SKIP_CREDENTIAL_WALK}")
+    if SKIP_CREDENTIAL_WALK:
+        for target in _ok(selected):
+            print_result(target, "walk skipped (SKIP_CREDENTIAL_WALK)", word="Skip")
+            target.walk_ok = None
+        return
+    time.sleep(SNMP_RELOAD_DELAY)
+
+    def _walk_one(target: Target) -> None:
+        """Step 8: walk with the passphrases. This is the real test that the new user works."""
+        col = collective_for_target(target, collectives)
+        ok = SNMPValidator().validate_snmp_walk(
+            target.walk_endpoints(),
+            col.get("snmp_user") or user,
+            col.get("snmp_auth") or snmp_auth,
+            col.get("snmp_priv") or snmp_priv,
+            engine_id=target.engine_id,
+            label=target.label(),
+        )
+        target.walk_ok = ok
+        if not ok:
+            # The batch's failure handler prints the one Failed line (E10).
+            raise RuntimeError("SNMP walk failed")
+        print_result(target, "SNMPv3 walk answered")
+
+    run_target_batch(
+        _ok(selected),
+        _walk_one,
+        WALK_CONCURRENCY,
+        lambda t, e: _fail(t, "SNMP walk failed", code="E10"),
+    )
 
 
 def _print_summary(
@@ -511,7 +539,7 @@ def _print_summary(
     if dry_run:
         print("Mode:     DRY_RUN (no changes applied)")
     if rouser_line:
-        print(f"Read-Only:{rouser_line}")
+        print(f"Read-Only: {rouser_line}")
     current_col: Optional[int] = None
     for target in selected:
         if target.collective != current_col:
@@ -525,6 +553,8 @@ def _print_summary(
         tail = f" {extra}" if extra else ""
         print(f"  [{state:<7}] {target.label():<32} {host:<22}{tail}")
     print("=" * SUMMARY_WIDTH)
+    # The table above lists every box, so only the counts are added here.
+    run_summary(selected, preview=dry_run, list_failed=False)
 
 
 def _build_run_report(
@@ -581,9 +611,9 @@ def _build_run_report(
         },
         "inventory_count": len(inventory),
         "selected_count": len(selected),
-        "ok_count": sum(1 for t in selected if t.status == "ok"),
-        "preview_count": sum(1 for t in selected if t.status == "preview"),
-        "failed_count": sum(1 for t in selected if t.status == "failed"),
+        "ok_count": sum(1 for t in selected if t.status == STATUS_OK),
+        "preview_count": sum(1 for t in selected if t.status == STATUS_PREVIEW),
+        "failed_count": sum(1 for t in selected if t.status == STATUS_FAILED),
         "targets": [],
     }
     for t in selected:
@@ -597,17 +627,25 @@ def _build_run_report(
             "auth_hash_len": len(t.auth_hash),
             "priv_hash_len": len(t.priv_hash),
             "auth_priv_hash_same": bool(t.auth_hash) and t.auth_hash == t.priv_hash,
-            "status": t.status,
-            "error": t.error,
+            # No label here: this report leaves hostnames out, and addresses in
+            # the failure text are replaced by their position.
+            **report_target_fields(t, label=False),
             "walk_ok": t.walk_ok,
         }
-        if dry_run:
+        if dry_run and t.status == STATUS_FAILED:
+            # A box that failed in the preview (no SSH address, refused host key, ...)
+            # is skipped by the live run, so the report must not list changes for it.
+            # error is the same operator text already shown above; it holds no secret.
+            # print(f"DEBUG report: {t.label()} planned_actions skipped ({t.error!r})")
+            entry["planned_actions"] = [f"skipped: {entry['error'] or 'failed in preview'}"]
+        elif dry_run:
             entry["planned_actions"] = [
                 f"engineIDType {ENGINE_ID_TYPE}",
                 f"deleteUser {user}",
                 f"createUser {user} {SNMP_AUTH_PROTOCOL}/{SNMP_PRIV_PROTOCOL} (localized)",
                 f"purge persistent usmUser {user}",
-                f"walk {t.walk_endpoints()}",
+                # Positions, not names: this report leaves hostnames out (the console has them).
+                f"walk {', '.join(f'address {i}' for i in range(1, len(t.walk_endpoints()) + 1)) or 'no address'}",
             ]
         report["targets"].append(entry)
     return report
@@ -620,4 +658,4 @@ def _emit_run_report(report: Dict[str, Any]) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_tool(main)

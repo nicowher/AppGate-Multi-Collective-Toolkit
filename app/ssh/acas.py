@@ -74,6 +74,7 @@ class AcasPrep(SSHSession):
             host,
             lambda c: self._sudo(c, f"systemctl is-active {unit}", check=False),
             error="could not recheck cz-configd",
+            fresh=True,
         )
         if (status or "").strip() != "active":
             raise ValueError(
@@ -181,6 +182,7 @@ fi
 echo STEP_IPTABLES_START
 for bin in {bins}; do
   if "$bin" -w -n -L {chain} >/dev/null 2>&1; then
+    # Same path in the harden script; both must change together.
     ruledir=/run/mct-sshbrute
     if [ -L "$ruledir" ]; then
       echo STEP_IPTABLES_FAIL symlink
@@ -248,6 +250,7 @@ if command -v cz-config >/dev/null 2>&1; then
 fi
 echo STEP_IPTABLES_RESTORE
 for bin in iptables ip6tables; do
+  # Same path in the unharden script; both must change together.
   ruledir=/run/mct-sshbrute
   rules="$ruledir/${{bin}}.rules"
   chain={chain}

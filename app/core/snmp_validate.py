@@ -16,7 +16,6 @@ Backends: Net-SNMP snmpwalk (passphrases in a 0600 snmp.conf, not argv) or pysnm
 SnmpSoft is detected and then skipped because it only accepts passwords on argv.
 """
 import asyncio
-import ipaddress
 import os
 import platform
 import shutil
@@ -27,11 +26,10 @@ import threading
 import time
 from typing import List, Optional, Sequence, Tuple, Union
 
-from core.utils import install_from_vendor, is_yes, print_error
+from core.utils import install_from_vendor, is_ip, is_yes, print_error
 from config import (
     DEBUG,
     DEFAULT_SNMP_PORT,
-    PIP_INSTALL_TIMEOUT,
     PKG_INSTALL_TIMEOUT,
     SNMP_AUTH_PROTOCOL,
     SNMP_PRIV_PROTOCOL,
@@ -73,7 +71,12 @@ class SNMPValidator:
         engine_id: Optional[str] = None,
         label: str = "",
     ) -> bool:
-        """Walk each address in order with the passphrases, and stop at the first success. A list means fallbacks; the order comes from Target.walk_endpoints."""
+        """Walk each address in order with the passphrases, and stop at the first success. A list means fallbacks; the order comes from Target.walk_endpoints.
+
+        Per-address progress prints only with DEBUG: the caller prints the one
+        result line for the box. On failure, _last_walk_error names the
+        addresses that did not answer.
+        """
         hosts: List[str] = [host] if isinstance(host, str) else [h for h in host if h]
         if not hosts:
             return False
@@ -87,12 +90,17 @@ class SNMPValidator:
         for i, addr in enumerate(hosts, 1):
             target = self._walk_target(addr)
             attempts = WALK_IP_ATTEMPTS if self._addr_is_ip(target) else WALK_FQDN_ATTEMPTS
-            print(f"      {tag} {i}/{total} {target}...", file=sys.stderr, flush=True)
+            # Per-address progress only with DEBUG: the caller prints one result line per box.
+            if DEBUG:
+                print(f"      {tag} {i}/{total} {target}...", file=sys.stderr, flush=True)
             if self._validate_snmp_walk_one(target, user, auth, priv, engine_id, attempts):
-                print(f"      {tag} {i} ok", file=sys.stderr, flush=True)
+                if DEBUG:
+                    print(f"      {tag} {i} ok", file=sys.stderr, flush=True)
                 return True
             failed.append(str(i))
-        print(f"      {tag} failed {' '.join(failed)}", file=sys.stderr, flush=True)
+        self._last_walk_error = self._last_walk_error or f"no answer on address {', '.join(failed)}"
+        if DEBUG:
+            print(f"      {tag} failed {' '.join(failed)}", file=sys.stderr, flush=True)
         return False
 
     @staticmethod
@@ -105,15 +113,8 @@ class SNMPValidator:
 
     @staticmethod
     def _addr_is_ip(value: str) -> bool:
-        """Attempt counts differ for names and IPs (WALK_FQDN_ATTEMPTS, WALK_IP_ATTEMPTS)."""
-        text = (value or "").strip()
-        if text.startswith("[") and text.endswith("]"):
-            text = text[1:-1]
-        try:
-            ipaddress.ip_address(text)
-            return True
-        except ValueError:
-            return False
+        """Attempt counts differ for names and IPs (WALK_FQDN_ATTEMPTS, WALK_IP_ATTEMPTS). Same test as core.utils.is_ip."""
+        return is_ip(value)
 
     def _validate_snmp_walk_one(
         self,
@@ -431,6 +432,7 @@ class SNMPValidator:
             return False
 
         async def _async_walk():
+            """pysnmp 7 is async only; this wraps one bounded walk (timeout and retries from config) so a dead UDP port cannot hang."""
             transport = await UdpTransportTarget.create(
                 (ip, DEFAULT_SNMP_PORT),
                 timeout=SNMPWALK_PROBE_TIMEOUT,

@@ -35,7 +35,6 @@ import time
 from typing import Optional, Sequence, Union
 
 from config import (
-    DEBUG,
     ENGINE_ID_TYPE,
     ETH_IFACE,
     SNMP_NAME_RE,
@@ -75,12 +74,17 @@ class SNMPEngineFetcher(SSHSession):
         )
 
     def purge_persistent_user(
-        self, host: Union[str, Sequence[str]], user: str, keep_hash: str = ""
+        self, host: Union[str, Sequence[str]], user: str, keep_hash: str = "", drop_others: bool = False
     ) -> None:
         """Force snmpd to honor the new createUser by clearing persistent USM.
 
         keep_hash: after start, wait until this hex appears in usmUser (proves
         the new localized key was written, not a stale row).
+        drop_others=True (menu 1 Replace): clear every user's persistent rows, not
+        only this user's. Replace drops the other users from snmpd.conf; their
+        saved rows (with localized keys) used to stay on disk and the users could
+        still authenticate. snmpd recreates only the configured user. All rows
+        are backed up first and put back if the new key never appears.
         """
         if not re.fullmatch(SNMP_NAME_RE, user):
             raise ValueError(f"Unsafe SNMP username for remote edit: {user!r}")
@@ -94,43 +98,59 @@ class SNMPEngineFetcher(SSHSession):
 
         def _purge(client: paramiko.SSHClient) -> bool:
             # Purges run in parallel. Each line names its box, or the lines cannot be told apart.
+            """Runs on the pooled session: stop snmpd, back up and delete the user's persistent rows, start snmpd, and restore the backup if the new key never appears."""
             tag = self._tag() or "snmpd"
             # Must stop first — running snmpd flushes USM back to disk on exit
             # and would resurrect the rows we are about to delete.
-            print(f"      {tag}: Stopping snmpd before editing persistent USM...", file=sys.stderr)
+            self._log(f"{tag}: Stopping snmpd before editing persistent USM...", noise=True)
             if not self._stop_snmpd(client):
                 return False
             paths = (SNMP_PERSISTENT_CONF, SNMP_PERSISTENT_CONF_ALT)
             # Keep this user's current rows so they can be put back if the new key
             # never appears. Without them a failed recreate leaves the box with no
             # SNMP user. The rows hold localized keys and are never printed.
+            # _sudo returns the word "timeout" when a read times out. That is not
+            # data: without a real backup nothing is deleted, snmpd is started
+            # again, and the box keeps its current user. Before, the word was kept
+            # as a row, the real rows were deleted, and a restore wrote "timeout"
+            # into the file.
+            if drop_others:
+                grep_rows = "-e '^[[:space:]]*usmUser' -e '^[[:space:]]*createUser'"
+                sed_rows = ("/^[[:space:]]*usmUser/d", "/^[[:space:]]*createUser/d")
+                left_rows = "'^[[:space:]]*usmUser'"
+            else:
+                grep_rows = f"-e 'usmUser.*\"{pat}\"' -e 'createUser[[:space:]]\\+{pat}\\b'"
+                sed_rows = (f"/usmUser.*\"{pat}\"/d", f"/createUser[[:space:]]\\+{pat}\\b/d")
+                left_rows = f"'usmUser.*\"{pat}\"'"
+            # print(f"DEBUG step7: purge scope={'all users' if drop_others else 'this user'}")
             backup = {}
             for path in paths:
                 rows = self._sudo(
                     client,
-                    f"grep -h -e 'usmUser.*\"{pat}\"' -e 'createUser[[:space:]]\\+{pat}\\b' {path} 2>/dev/null || true",
+                    f"grep -h {grep_rows} {path} 2>/dev/null || true",
                     check=False,
                 )
+                # print(f"DEBUG step7: backup read path={path} timed_out={rows == 'timeout'}")
+                if (rows or "").strip() == "timeout":
+                    print(
+                        f"      {tag}: could not read the current usmUser rows (SSH timeout); "
+                        "nothing was deleted. Starting snmpd again.",
+                        file=sys.stderr,
+                    )
+                    self._start_snmpd(client)
+                    return False
                 lines = [ln for ln in (rows or "").splitlines() if ln.strip() and not ln.startswith("[sudo]")]
                 if lines:
                     backup[path] = lines
             # print(f"DEBUG step7: backup files={list(backup)} rows={sum(len(v) for v in backup.values())}")
             for path in paths:
-                self._sudo(
-                    client,
-                    f"sed -i '/usmUser.*\"{pat}\"/d' {path} || true",
-                    check=False,
-                )
-                self._sudo(
-                    client,
-                    f"sed -i '/createUser[[:space:]]\\+{pat}\\b/d' {path} || true",
-                    check=False,
-                )
+                for expr in sed_rows:
+                    self._sudo(client, f"sed -i '{expr}' {path} || true", check=False)
             leftover = ""
             for _try in range(USM_SED_RETRIES):
                 leftover = self._sudo(
                     client,
-                    f"grep -h 'usmUser.*\"{pat}\"' {SNMP_PERSISTENT_CONF} "
+                    f"grep -h {left_rows} {SNMP_PERSISTENT_CONF} "
                     f"{SNMP_PERSISTENT_CONF_ALT} 2>/dev/null || true",
                     check=False,
                 )
@@ -141,11 +161,7 @@ class SNMPEngineFetcher(SSHSession):
                     file=sys.stderr,
                 )
                 for path in paths:
-                    self._sudo(
-                        client,
-                        f"sed -i '/usmUser.*\"{pat}\"/d' {path} || true",
-                        check=False,
-                    )
+                    self._sudo(client, f"sed -i '{sed_rows[0]}' {path} || true", check=False)
             if leftover.strip():
                 n_left = len([ln for ln in leftover.splitlines() if ln.strip()])
                 print(
@@ -155,10 +171,9 @@ class SNMPEngineFetcher(SSHSession):
                 # print(f"DEBUG step7: leftover usmUser redacted count={n_left}")
                 self._start_snmpd(client)
                 return False
-            print(
-                f"      {tag}: Removed persistent usmUser '{user}'. Starting snmpd "
-                "so createUser can recreate it...",
-                file=sys.stderr,
+            self._log(
+                f"{tag}: Removed persistent usmUser '{user}'. Starting snmpd so createUser can recreate it...",
+                noise=True,
             )
             if not self._start_snmpd(client):
                 return False
@@ -174,10 +189,7 @@ class SNMPEngineFetcher(SSHSession):
                 )
                 # print(f"DEBUG step7: recreate attempt={attempt} keep={keep[:8]} file={(created or '')[:80]!r}")
                 if keep in (created or "").lower():
-                    print(
-                        f"      {tag}: snmpd recreated usmUser '{user}' with the new key.",
-                        file=sys.stderr,
-                    )
+                    self._log(f"{tag}: snmpd recreated usmUser '{user}' with the new key.", noise=True)
                     return True
                 print(
                     f"      {tag}: Waiting for createUser to persist "
@@ -202,6 +214,9 @@ class SNMPEngineFetcher(SSHSession):
 
     def _restore_usm_rows(self, client: paramiko.SSHClient, tag: str, user: str, backup: dict) -> bool:
         """Put back the rows saved before the purge, so a failed recreate keeps the old user.
+
+        In Replace mode the backup holds every user's rows, but the messages
+        below still name only the configured user.
 
         snmpd is stopped first: a running snmpd rewrites the file on exit and would
         drop the rows again. The rows go to the remote shell on stdin, not on the
@@ -235,13 +250,13 @@ class SNMPEngineFetcher(SSHSession):
         """Live run restarts snmpd first so engineIDType 3 is active, then reads oldEngineID. Preview reads only."""
         tag = self._tag() or "snmpd"
         if restart_snmpd:
-            self._log(f"{tag}: restarting snmpd...")
+            self._log(f"{tag}: restarting snmpd...", noise=True)
             if not self._restart_snmpd(client):
                 self._log(f"{tag}: snmpd restart failed")
                 return False
             time.sleep(SNMP_RELOAD_DELAY)
         else:
-            self._log(f"{tag}: reading oldEngineID (no snmpd restart)")
+            self._log(f"{tag}: reading oldEngineID (no snmpd restart)", noise=True)
 
         raw = self._sudo(
             client,

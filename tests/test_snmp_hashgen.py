@@ -11,6 +11,7 @@ from core.snmp_hashgen import SNMPHashGenerator  # noqa: E402
 class HashgenTests(unittest.TestCase):
     """RFC 3414 localization must match known vectors and refuse weak input, because a wrong key fails silently on the box."""
     def setUp(self) -> None:
+        """A fresh generator per test, so no state carries between vectors."""
         self.gen = SNMPHashGenerator()
 
     def test_sha256_known_vectors(self) -> None:

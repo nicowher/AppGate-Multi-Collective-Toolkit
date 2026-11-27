@@ -87,6 +87,7 @@ class AllowSourcesMixin:
                 "allow-sources",
                 snapshot_label or str(appliance.get("name") or appliance_id),
                 original,
+                only=ALLOW_SOURCES_PUT_ALLOWED,
             )
         debug_log(f"allowSources: overwrite={overwrite} parents={list(nonempty)}")
         wrote = False

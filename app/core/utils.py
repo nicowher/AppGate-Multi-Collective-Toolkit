@@ -24,10 +24,13 @@ import ipaddress
 import json
 import os
 import re
+import socket
+import time
 import subprocess
 import sys
+import threading
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from getpass import getpass
 from typing import Any, Callable, Dict, Optional
 
@@ -39,7 +42,6 @@ from config import (
     REPORT_FILE_MODE,
     REPORTS_DIRNAME,
     VENDOR_DOWNLOAD_TIMEOUT,
-    VENDOR_PACKAGES,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
 )
@@ -57,17 +59,83 @@ def debug_log(msg: str) -> None:
 
 
 def print_error(code: str, message: str, *hints: str) -> None:
-    """Always-on (DEBUG off too). code like E02. hints are next steps."""
+    """Always-on (DEBUG off too). code is a key of core.errors.CODES; hints are next steps.
+
+    With no hint of its own, the registry's default next step is printed, so every
+    code tells the operator what to try. An unregistered code still prints (never
+    hide an error), and tests/test_error_codes.py fails on it.
+    """
     from core.color import fail
+    from core.errors import default_hint
 
     print(f"{fail('ERROR', stream=sys.stderr)} {code}: {message}", file=sys.stderr)
-    for hint in hints:
+    shown = [h for h in hints if h] or [default_hint(code)]
+    for hint in shown:
         if hint:
             print(f"      Next: {hint}", file=sys.stderr)
 
 
 class HaltError(ValueError):
-    """Already printed as ERROR E0x. Tool __main__ should exit without reprinting."""
+    """Already printed as ERROR E0x. Tool __main__ should exit without reprinting.
+
+    Easy to misuse: it is a ValueError, so an `except ValueError` around code
+    that can halt catches this stop and handles it again (a second, wrong error).
+    """
+
+
+def print_unexpected_error(exc: BaseException) -> None:
+    """An error no step expected: one plain line, and with DEBUG the traceback too.
+
+    The message alone rarely says which file or line failed. The traceback goes
+    through redact_preview, so a secret quoted in an exception text is hidden
+    the same way it is in error replies. Read DEBUG at call time (menu C).
+    """
+    import config as _config
+
+    print(f"\nError: {clean_for_terminal(redact_preview(str(exc), 500))}", file=sys.stderr)
+    if getattr(_config, "DEBUG", False):
+        import traceback
+
+        text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        print("      DEBUG traceback:", file=sys.stderr)
+        print(clean_for_terminal(redact_preview(text, 20000), keep_newlines=True), file=sys.stderr)
+
+
+def make_output_safe() -> None:
+    """Never crash on a character the console or log file cannot show.
+
+    With output redirected or piped on Windows, Python writes in the ANSI code
+    page (cp1252), and one character outside it (an appliance name, a Controller
+    reply) raised UnicodeEncodeError in the middle of a run. The encoding is kept;
+    such a character is written as a backslash escape instead.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError, OSError):
+            # Not a text stream that can be reconfigured (a test capture, a wrapper).
+            pass
+
+
+def run_tool(main_fn: Callable[[], None]) -> None:
+    """Run one tool started on its own (python tools/x.py), the same way for every tool.
+
+    One place for what every tool's __main__ used to repeat, with small
+    differences: safe output, Ctrl+C as a plain cancel, a halt already
+    printed, and an unexpected error printed with the DEBUG traceback. SystemExit
+    from the tool keeps its own code.
+    """
+    make_output_safe()
+    try:
+        main_fn()
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user", file=sys.stderr)
+        sys.exit(1)
+    except HaltError:
+        sys.exit(1)
+    except Exception as exc:  # noqa: BLE001 - the last stop before a raw traceback
+        print_unexpected_error(exc)
+        sys.exit(1)
 
 
 def halt(code: str, message: str, *hints: str) -> None:
@@ -91,6 +159,10 @@ def expand_exclude_tokens(raw: str) -> set:
             continue
         if any(ord(ch) < 32 or ord(ch) == 127 or unicodedata.category(ch) == "Cf" for ch in part):
             raise ValueError("Exclude token contains a control or format character.")
+        if part.isascii() and part.isdigit():
+            # Row and collective numbers compare as numbers, so 01 is row 1.
+            tokens.add(str(int(part)))
+            continue
         # print(f"DEBUG exclude: part={part!r}")
         if "-" in part:
             left, _, right = part.partition("-")
@@ -168,6 +240,67 @@ def format_scoped_ip(raw: str) -> str:
     return str(ip)
 
 
+def is_ip(value: str) -> bool:
+    """True for an IPv4 or IPv6 address, with or without [brackets] or a link-local %zone.
+
+    The one IP test for the toolkit. Separate copies disagreed on zones, so
+    fe80::1%eth0 was an address in one module and a hostname in another.
+    """
+    text = (value or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    try:
+        ipaddress.ip_address(text.split("%", 1)[0])
+        return True
+    except ValueError:
+        return False
+
+
+# Whole escape sequences (CSI and OSC) are removed before single control bytes,
+# so "[2J" is not left behind as text.
+_TERM_SEQ = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
+
+
+def clean_for_terminal(text: str, keep_newlines: bool = False) -> str:
+    """Remove escape sequences, control bytes, C1 controls and format characters (bidi, zero-width).
+
+    Every Controller-sourced string printed to the console goes through here:
+    names, addresses and health in the table, and API error bodies. One cleaner
+    keeps them from drifting apart. keep_newlines keeps tab and LF for multi-line
+    error text.
+    """
+    keep = ("\n", "\t") if keep_newlines else ()
+    return "".join(
+        ch for ch in _TERM_SEQ.sub("", text or "")
+        if ch in keep or not (ord(ch) < 32 or 0x7F <= ord(ch) < 0xA0 or unicodedata.category(ch) == "Cf")
+    )
+
+
+def resolve_with_timeout(host: str, port, timeout: float, family: int = 0, socktype: int = 0) -> Optional[list]:
+    """getaddrinfo with a time limit. None when the name does not resolve in time.
+
+    getaddrinfo cannot be cancelled, so it runs in a daemon thread: a lookup that
+    outlives the timeout finishes in the background and does not hold up the
+    toolkit's exit (an executor thread would be joined at interpreter exit).
+    """
+    box: Dict[str, Any] = {}
+
+    def _lookup() -> None:
+        """Runs in a daemon thread so a stuck resolver cannot block the caller past its timeout or delay exit."""
+        try:
+            box["result"] = socket.getaddrinfo(host, port, family, socktype)
+        except (OSError, ValueError, UnicodeError) as exc:
+            box["error"] = exc
+
+    worker = threading.Thread(target=_lookup, name="dns-lookup", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    # print(f"DEBUG dns: {host!r} done={not worker.is_alive()} ok={'result' in box}")
+    if worker.is_alive() or "result" not in box:
+        return None
+    return box["result"]
+
+
 def is_valid_host(value: str) -> bool:
     """True if value is IPv4, IPv6 (optional brackets), or an FQDN."""
     text = (value or "").strip()
@@ -180,6 +313,40 @@ def is_valid_host(value: str) -> bool:
         return True
     except ValueError:
         return bool(_FQDN_RE.fullmatch(text))
+
+
+def ntp_key_error(host: str, key_type: str, key_no: str, key: str) -> str:
+    """Why one NTP row's key settings would be refused, or "" when they are fine.
+
+    One rule set for the file load, the typed prompt and the PUT. Before, each
+    place had part of it, so a file row with an unknown or weak keyType, or a key
+    with no keyNo, was refused only during the live push, after earlier boxes
+    were changed (and they were rolled back).
+    - keyType must be a known type (SHA512, SHA384, SHA256, with or without a
+      dash; SHA2 means SHA256). MD5 and SHA1 are refused unless LAB_MODE is on.
+      SHA384 needs a v25 Controller; that is checked at PUT time, where the
+      Controller's API version is known.
+    - A key needs a keyType (unless LAB_MODE) and a keyNo, or chrony cannot use it.
+    The key value itself is never part of the message.
+    """
+    import config as _config  # read at call time so a menu C change applies
+
+    lab = bool(getattr(_config, "LAB_MODE", False))
+    key_type = (key_type or "").strip()
+    if key_type:
+        compact = key_type.replace("-", "").upper()
+        mapped = _config.NTP_KEY_TYPE_MAP.get(compact)
+        if mapped is None:
+            return f"NTP keyType {key_type!r} for {host} is not a known type (use SHA512, SHA384 or SHA256)"
+        if str(mapped).upper() in _config.NTP_WEAK_KEY_TYPES and not lab:
+            return f"NTP keyType {mapped} for {host} is not allowed (DISA/CNSA: use SHA512 or SHA384)"
+    if key:
+        if not key_type and not lab:
+            return f"NTP key for {host} has no keyType (use SHA512 or SHA384)"
+        if not (key_no or "").strip():
+            return f"NTP key for {host} has no keyNo; chrony needs the key number"
+    # print(f"DEBUG ntp key check: {host} type={key_type!r} keyNo={key_no!r} has_key={bool(key)}")
+    return ""
 
 
 # This file lives in app/core/; vendor/ and launchers stay under app/ and repo root.
@@ -489,6 +656,31 @@ def read_credentials_text(path: str) -> str:
     return raw.decode("utf-8-sig")
 
 
+def _require_private_credentials(path: str) -> None:
+    """Stop with E21 when other users can read or write credentials.json; LAB_MODE only warns.
+
+    It holds every API, SSH and SNMP secret in plain text, so a loose ACL or
+    mode used to be one warning while the far less sensitive CA file was a
+    hard stop.
+    """
+    import config as _config
+    from core.ca_pin import CaPinError, require_private_file
+
+    try:
+        require_private_file(path)
+    except (CaPinError, OSError) as exc:
+        if getattr(_config, "LAB_MODE", False):
+            print(f"WARNING: {exc} LAB_MODE is on, so the run continues.", file=sys.stderr)
+            return
+        halt(
+            "E21",
+            f"credentials.json permissions: {exc}",
+            "Linux/macOS: chmod 600 credentials.json.",
+            "Windows: icacls credentials.json /inheritance:r /grant:r <your user>:F "
+            "/grant:r SYSTEM:F /grant:r Administrators:F",
+        )
+
+
 def load_credentials(path: str) -> Dict[str, Any]:
     """Load optional credentials.json. A missing file is {}; an unreadable one stops with E21.
 
@@ -505,16 +697,11 @@ def load_credentials(path: str) -> Dict[str, Any]:
         data = json.loads(read_credentials_text(path))
         if not isinstance(data, dict):
             raise ValueError(f"the top level is a JSON {type(data).__name__}, not an object")
-        try:
-            mode = os.stat(path).st_mode & 0o077
-            if mode and os.name == "posix":
-                print(
-                    f"WARNING: {path} is group/world-readable (mode {mode:03o}). "
-                    "chmod 600 this file.",
-                    file=sys.stderr,
-                )
-        except OSError:
-            pass
+        # Easy to misuse: halt() raises HaltError, a ValueError, and the except
+        # below catches ValueError, so a permission stop here is caught again and
+        # reported a second time as an unreadable file with the wrong fix.
+        # print(f"DEBUG creds: permission check on {path}")
+        _require_private_credentials(path)
         # print(f"DEBUG creds: loaded keys={list(data)} from {path}")
         if DEBUG:
             print(f"      DEBUG creds: loaded {path} keys={sorted(data)}", file=sys.stderr)
@@ -606,7 +793,7 @@ def write_json_report(prefix: str, payload: Dict[str, Any]) -> None:
         _write_private(path, text + "\n")
         print(f"      Report written: {path}", file=sys.stderr)
     except OSError as exc:
-        print(f"      Could not write report file: {exc}", file=sys.stderr)
+        print_error("E23", f"Could not write report file: {exc}")
 
 
 _REDACT_KEY_SUBSTR = (
@@ -651,6 +838,7 @@ def redact_preview(text: str, limit: int = 300) -> str:
     secret that is not a quoted string value (a bare number) is not matched.
     """
     def _hide(match, quote):
+        """Replace the value only when the key names a secret, so other fields stay readable in the preview."""
         if _SECRET_WORD.search(match.group(2)):
             return match.group(1) + "<redacted>" + quote
         return match.group(0)
@@ -689,20 +877,137 @@ def begin_replaced_run() -> str:
         os.chmod(_replaced_run_dir, 0o700)
     except OSError:
         pass
+    # One line for the folder instead of one "Backup:" line per box.
+    print(f"      Pre-change copies go to {_replaced_run_dir}", file=sys.stderr)
     return _replaced_run_dir
 
 
-def write_replaced_snapshot(kind: str, label: str, body: Dict[str, Any]) -> None:
-    """Save pre-PUT GET (redacted) so a replace can be rolled back."""
+def _pick_paths(body: Dict[str, Any], paths: tuple) -> Dict[str, Any]:
+    """Only the given dot paths of an appliance document (plus id, name, version)."""
+    out: Dict[str, Any] = {k: body[k] for k in ("id", "name", "version") if k in body}
+
+    def _copy(src: Any, dst: Dict[str, Any], path: str) -> None:
+        """Copy one dot path. A key may itself contain a dot (snmpd.conf), so the
+        whole remaining path is tried as one key before splitting at a dot."""
+        if not isinstance(src, dict):
+            return
+        if path in src:
+            dst[path] = src[path]
+            return
+        head, _, rest = path.partition(".")
+        if rest and head in src:
+            _copy(src[head], dst.setdefault(head, {}), rest)
+            if not dst[head]:
+                del dst[head]
+
+    for path in paths:
+        _copy(body, out, path)
+    return out
+
+
+def write_replaced_snapshot(kind: str, label: str, body: Dict[str, Any], only: tuple = ()) -> None:
+    """Save the pre-change copy (redacted) of what a replace or overwrite is about to change.
+
+    only names the fields this change may touch (the same list the PUT guard
+    uses). The file then holds just those fields, not the whole appliance with
+    secret-looking keys blanked: a secret under an unexpected field name can no
+    longer end up on disk. Rollback uses the in-memory copy, not this file.
+    """
     folder = _replaced_run_dir or begin_replaced_run()
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", label)[:80] or "appliance"
     path = os.path.join(folder, f"{kind}-{safe}.json")
     try:
-        payload = json.dumps(redact_for_backup(body), indent=2) + "\n"
+        part = _pick_paths(body, only) if only else body
+        # print(f"DEBUG backup: {kind} keys={sorted(part)}")
+        payload = json.dumps(redact_for_backup(part), indent=2) + "\n"
         _write_private(path, payload)
-        print(f"      Backup: {path}", file=sys.stderr)
+        if DEBUG:
+            print(f"      Backup: {path}", file=sys.stderr)
     except OSError as exc:
-        print(f"      Could not write replace backup: {exc}", file=sys.stderr)
+        print_error("E23", f"Could not write replace backup: {exc}")
+
+
+# Per-thread buffer for the box a batch worker is running. None on the main thread.
+_BOX_TLS = threading.local()
+
+
+class _BoxBuffer(list):
+    """One box's held output. closed=True sends later writes straight to the real stream."""
+
+    closed = False
+
+
+class _ThreadRoutedStream:
+    """Stand-in for sys.stdout/sys.stderr while a batch runs.
+
+    A worker's writes go to its box's buffer; the main thread's writes (progress
+    counter, prompts) pass straight through. The buffer is printed as one block
+    when that box finishes, so lines from parallel boxes no longer interleave.
+    """
+
+    def __init__(self, real, name: str) -> None:
+        """Wrap one real stream; name says which one a buffered chunk returns to."""
+        self._real = real
+        self._name = name
+
+    def write(self, text: str) -> int:
+        """Buffer in a batch worker, write through elsewhere."""
+        buf = getattr(_BOX_TLS, "buf", None)
+        if buf is None or buf.closed:
+            return self._real.write(text)
+        buf.append((self._name, text))
+        return len(text)
+
+    def flush(self) -> None:
+        """A worker's flush waits for its block; the main thread flushes for real."""
+        buf = getattr(_BOX_TLS, "buf", None)
+        if buf is None or buf.closed:
+            self._real.flush()
+
+    def __getattr__(self, name: str):
+        """isatty, encoding and the rest come from the real stream (colors check isatty)."""
+        return getattr(self._real, name)
+
+
+def _flush_box(chunks: list, out, err) -> None:
+    """Print one finished box's lines together, after clearing a progress counter line."""
+    if not chunks:
+        return
+    out.flush()
+    try:
+        tty = err.isatty()
+    except (AttributeError, ValueError):
+        tty = False
+    if tty:
+        # Wipe a progress counter line ("SSH 2/5") first; a log file or pipe gets no padding.
+        err.write("\r" + " " * 40 + "\r")
+    for name, text in chunks:
+        stream = out if name == "out" else err
+        stream.write(text)
+        # Flush each piece so stdout and stderr lines keep their order in a pipe or log.
+        stream.flush()
+
+
+def stop_pool_early(pool: ThreadPoolExecutor, futures: Dict[Any, Any], *, wait_running: bool) -> list:
+    """Stop a pool that ended early (Ctrl+C, or an error while feeding it): the one rule for every pool.
+
+    Queued work is cancelled. Work already running either finishes before this
+    returns (wait_running=True: SSH changes, so their results reach the report)
+    or is left to end on its own timeout (False: host-key reads, which change
+    nothing and send no password). Returns the keys of the work that had
+    started. A second Ctrl+C while waiting stops the wait.
+    """
+    running = [key for fut, key in futures.items() if fut.running()]
+    pool.shutdown(wait=False, cancel_futures=True)
+    if wait_running:
+        for fut in list(futures):
+            if not fut.cancelled():
+                try:
+                    fut.exception()  # waits for this one
+                except CancelledError:
+                    pass
+    # print(f"DEBUG pool: early stop, running={len(running)} wait={wait_running}")
+    return running
 
 
 def run_target_batch(
@@ -712,26 +1017,110 @@ def run_target_batch(
     on_fail: Callable,
     progress: Callable = None,
 ) -> None:
-    """Run one worker per target in a pool. One failure does not stop the rest."""
-    if not targets:
+    """Run one worker per target in a pool. One failure does not stop the rest.
+
+    targets may be a list, or an iterator that yields boxes as they become
+    ready (ssh.client.iter_primed_targets): each box's worker starts as soon as
+    the box is yielded, not after the last one. If the batch ends early (Ctrl+C,
+    including at a later box's host-key prompt, or an error while settling a
+    box), queued boxes are cancelled, the boxes already being worked on are
+    named and finish before this returns, and their failures still go to
+    on_fail, so the report shows what was really changed.
+
+    Each worker's console output is held per box and printed as one block when
+    that box finishes (main thread), so parallel boxes do not interleave; the
+    real stdout/stderr are put back when the batch ends. on_fail and progress
+    run on the main thread, after the box's block.
+    """
+    sized = hasattr(targets, "__len__")
+    if sized and not targets:
         return
-    workers = max(1, min(concurrency, len(targets)))
+    workers = max(1, min(concurrency, len(targets)) if sized else concurrency)
     done = 0
-    n = len(targets)
+    n = len(targets) if sized else 0
+    real_out, real_err = sys.stdout, sys.stderr
+    # A nested batch keeps the outer stand-in, so the block still prints once.
+    install = not isinstance(real_err, _ThreadRoutedStream)
+    if install:
+        sys.stdout = _ThreadRoutedStream(real_out, "out")
+        sys.stderr = _ThreadRoutedStream(real_err, "err")
+    out_w = real_out._real if isinstance(real_out, _ThreadRoutedStream) else real_out
+    err_w = real_err._real if isinstance(real_err, _ThreadRoutedStream) else real_err
+    buffers: Dict[int, list] = {}
+    # Boxes still running, so their held lines can be shown if the batch ends early.
+    live: Dict[int, "_BoxBuffer"] = {}
+
+    def _run(target):
+        """Worker wrapper: collect this box's output; keep it even when the worker raises.
+
+        With DEBUG, the box's time in this step is added to its block, so a box
+        that waited on a timeout stands out.
+        """
+        buf = _BoxBuffer()
+        _BOX_TLS.buf = buf
+        live[id(target)] = buf
+        started = time.monotonic()
+        try:
+            return worker(target)
+        finally:
+            if DEBUG:
+                label = target.label() if hasattr(target, "label") else str(target)
+                _BOX_TLS.buf.append(("err", f"      DEBUG {label}: {time.monotonic() - started:.1f} s in this step\n"))
+            buffers[id(target)] = buf
+            live.pop(id(target), None)
+            _BOX_TLS.buf = None
+
     pool = ThreadPoolExecutor(max_workers=workers)
-    futures = {pool.submit(worker, t): t for t in targets}
+    futures = {}
+    handled = set()
+    finished = False
     try:
+        # Submitting inside the try: an iterator can prompt or be interrupted
+        # while it yields, and the streams must still be restored.
+        for t in targets:
+            futures[pool.submit(_run, t)] = t
+        n = len(futures)
         for future in as_completed(futures):
             target = futures[future]
+            handled.add(future)
             try:
                 future.result()
+                _flush_box(buffers.pop(id(target), []), out_w, err_w)
             except Exception as exc:
+                _flush_box(buffers.pop(id(target), []), out_w, err_w)
                 on_fail(target, exc)
             done += 1
             if progress:
                 progress(done, n)
-    except KeyboardInterrupt:
-        pool.shutdown(wait=False, cancel_futures=True)
-        raise
-    else:
-        pool.shutdown(wait=True, cancel_futures=True)
+        finished = True
+    finally:
+        try:
+            if finished:
+                pool.shutdown(wait=True, cancel_futures=True)
+            else:
+                # Ended early: name the boxes already being worked on and let
+                # them finish, so nothing keeps changing after this returns.
+                running = [futures[f] for f in futures if f.running()]
+                if running:
+                    names = ", ".join(t.label() if hasattr(t, "label") else str(t) for t in running)
+                    err_w.write(f"\n      Stopping: waiting for {len(running)} box(es) already started to finish: {names}\n")
+                    err_w.flush()
+                stop_pool_early(pool, futures, wait_running=True)
+                for fut, target in futures.items():
+                    if fut in handled or fut.cancelled() or not fut.done():
+                        continue
+                    exc = fut.exception()
+                    if exc is not None:
+                        on_fail(target, exc)
+        finally:
+            # Finished boxes not printed yet, then any box still running (a
+            # second Ctrl+C stopped the wait): its lines so far are shown, and
+            # anything it writes later goes straight to the console.
+            # print(f"DEBUG batch: flushing {len(buffers)} finished and {len(live)} running box(es)")
+            for chunks in list(buffers.values()):
+                _flush_box(chunks, out_w, err_w)
+            for buf in list(live.values()):
+                buf.closed = True
+                _flush_box(list(buf), out_w, err_w)
+            if install:
+                sys.stdout, sys.stderr = real_out, real_err

@@ -171,6 +171,7 @@ class SnmpMixin:
                 "snmp",
                 snapshot_label or str(appliance.get("name") or appliance_id or user),
                 appliance,
+                only=SNMP_PUT_ALLOWED,
             )
             lines = self._snmpd_lines_without_all_users(appliance)
         else:

@@ -15,8 +15,6 @@ import ipaddress
 import os
 import socket
 import sys
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FuturesTimeout
 
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _APP_DIR not in sys.path:
@@ -35,14 +33,15 @@ from config import (
     ALLOW_SOURCES_WIDE_V4,
     ALLOW_SOURCES_WIDE_V6,
     DEBUG,
-    DRY_RUN,
     SSH_PRIME_TIMEOUT,
     WRITE_RUN_REPORT,
     YES_ANSWERS,
     warn_insecure_transport,
 )
-from core.inventory import Target
+from core.inventory import STATUS_FAILED, STATUS_OK, STATUS_PREVIEW, STATUS_UNCHANGED, Target
+from core.ui import boxes, step_banner
 from core.prompts import (
+    require_collectives,
     CREDENTIALS_PATH,
     _parse_collectives,
     collective_for_target,
@@ -50,22 +49,26 @@ from core.prompts import (
     resolve_allowed_sources,
 )
 from core.run import (
+    preview_then_apply,
     ClientMap,
     login_collectives,
+    fail_box,
+    report_target_fields,
     rollback_prior,
     print_result,
     prompt_add_or_replace,
     select_appliances,
+    ssh_failure_code,
 )
 from core.utils import (
-    HaltError,
+    run_tool,
     begin_replaced_run,
     format_scoped_ip,
     normalize_allow_source,
     halt,
     load_credentials,
-    print_error,
     prompt_yes,
+    resolve_with_timeout,
     write_json_report,
 )
 
@@ -88,17 +91,14 @@ def _human_allow_error(exc: Exception) -> str:
 
 
 def _fail(target: Target, message: str) -> None:
-    """Fail-soft one box. Console is human; DEBUG prints the raw message."""
-    target.status = "failed"
+    """Fail-soft one box. Console is human; the report keeps the detail, DEBUG prints it too."""
     low = message.lower()
     if "http " in low or "422" in message or "allowsources" in low:
         human = _human_allow_error(Exception(message))
     else:
         human = message
-    target.error = human
-    print_result(target, human, ok=False)
-    if DEBUG:
-        print(f"      Details: {message}", file=sys.stderr)
+    # Per-box menu 6 failures are PUT refusals (E08); lockout stops the run as E20.
+    fail_box(target, human, message, ssh_failure_code(message) or "E08")
 
 
 def _normalize_source(entry: Any) -> Dict[str, Any]:
@@ -217,15 +217,8 @@ def _parent_label(parent: str) -> str:
 
 
 def _resolve_peer(host: str) -> list:
-    """getaddrinfo has no timeout of its own. A hung lookup must not block the lockout check."""
-    pool = ThreadPoolExecutor(max_workers=1)
-    try:
-        fut = pool.submit(socket.getaddrinfo, host, None, socket.AF_UNSPEC, socket.SOCK_DGRAM)
-        return fut.result(timeout=SSH_PRIME_TIMEOUT)
-    except (OSError, FuturesTimeout):
-        return []
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+    """Bounded name lookup (core.utils.resolve_with_timeout). A hung resolver must not block the lockout check."""
+    return resolve_with_timeout(host, None, SSH_PRIME_TIMEOUT, socket.AF_UNSPEC, socket.SOCK_DGRAM) or []
 
 
 def _outbound_ip(peer: str) -> str:
@@ -281,7 +274,8 @@ def _protected_items():
                 ipaddress.ip_address(scoped.split("%", 1)[0])
                 out.append(scoped)
         except ValueError:
-            halt("E20", f"ALLOW_SOURCES_PROTECTED entry is not an IP or CIDR: {text}")
+            # A config.py typo, not a lockout: E22 points at the setting to fix.
+            halt("E22", f"ALLOW_SOURCES_PROTECTED entry is not an IP or CIDR: {text}")
     return out
 
 
@@ -445,7 +439,7 @@ def _check_lockout(
         return
     blocked = []
     for target in selected:
-        if target.status == "failed":
+        if target.status == STATUS_FAILED:
             continue
         desired = plans.get(_plan_key(target)) or {}
         # Every route this computer may use to the box: the admin address and, when an
@@ -553,67 +547,72 @@ def _confirm_replace(
         raise SystemExit(0)
 
 
-def _apply(
-    selected: List[Target],
-    clients: ClientMap,
-    collectives: list,
-    *,
-    overwrite: bool,
-    dry_run: bool,
-    skip_guards: bool = False,
-) -> None:
-    """Preview (dry_run) or PUT. skip_guards=True after main() already confirmed."""
-    print("\n[4/4] Updating allowSources via Controller API...")
+def _plan_all(selected: List[Target], collectives: list) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
+    """Build every box's plan once, before the preview: the preview, the confirm and the live run all use it.
+
+    Runs before the step 4 banner, so its "excluded self" and bad-row lines
+    print above that banner.
+
+    Before, the plan was rebuilt three or four times per box (and its
+    "excluded self" line printed each time). A bad row fails only that box.
+    """
     plans: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     for target in selected:
-        if target.status == "failed":
+        if target.status == STATUS_FAILED:
             continue
         desired = _plan_one(target, collectives)
-        if target.status == "failed":
+        if target.status == STATUS_FAILED:
             continue
         if not desired:
             _fail(target, "no allowed_sources left after slot merge / exclude-self")
             continue
         plans[_plan_key(target)] = desired
-        if dry_run:
-            mode = "replace" if overwrite else "add"
-            target.status = "preview"
-            client = clients.get(int(target.collective))
-            if client is not None and not overwrite:
-                try:
-                    have = {
-                        (e.get("address"), int(e.get("netmask") or -1), e.get("nic") or "")
-                        for e in client.peek_allow_sources(target.appliance_id)
-                    }
-                    want = set()
-                    for rows in desired.values():
-                        for e in rows:
-                            want.add(
-                                (e.get("address"), int(e.get("netmask") or -1), e.get("nic") or "")
-                            )
-                    if want and want <= have:
-                        target.status = "unchanged"
-                        print_result(target, "already set")
-                        continue
-                except Exception:
-                    pass
-            _print_plan(target.label(), mode, desired)
-            if DEBUG:
-                print(
-                    f"      DEBUG allow: {target.label()} {mode} {desired!r}",
-                    file=sys.stderr,
-                )
-    if dry_run:
-        return
-    if overwrite and plans and not skip_guards:
-        _check_lockout(selected, plans)
-        _confirm_replace(selected, plans)
-    if overwrite and plans and not dry_run:
+    return plans
+
+
+def _preview(selected: List[Target], clients: ClientMap, plans, *, overwrite: bool) -> None:
+    """Step 4 preview: each box's plan, or "already set" when Add would change nothing; nothing sent."""
+    step_banner("[4/4]", "Update allowed sources via the Controller API", boxes(len(selected)))
+    mode = "replace" if overwrite else "add"
+    for target in selected:
+        desired = plans.get(_plan_key(target))
+        if target.status == STATUS_FAILED or not desired:
+            continue
+        target.status = STATUS_PREVIEW
+        client = clients.get(int(target.collective))
+        if client is not None and not overwrite:
+            try:
+                have = {
+                    (e.get("address"), int(e.get("netmask") or -1), e.get("nic") or "")
+                    for e in client.peek_allow_sources(target.appliance_id)
+                }
+                want = set()
+                for rows in desired.values():
+                    for e in rows:
+                        want.add((e.get("address"), int(e.get("netmask") or -1), e.get("nic") or ""))
+                if want and want <= have:
+                    target.status = STATUS_UNCHANGED
+                    print_result(target, "already set")
+                    continue
+            except Exception:
+                pass
+        _print_plan(target.label(), mode, desired)
+        if DEBUG:
+            print(f"      DEBUG allow: {target.label()} {mode} {desired!r}", file=sys.stderr)
+
+
+def _apply_live(confirmed: List[Target], clients: ClientMap, plans, *, overwrite: bool) -> None:
+    """Step 4 live: PUT each confirmed box's plan. A PUT failure rolls back earlier boxes and stops.
+
+    The lockout check and the replace and wide-prefix confirms already ran in
+    main's confirm, on these same plans.
+    """
+    step_banner("[4/4]", "Update allowed sources via the Controller API", boxes(len(confirmed)))
+    if overwrite and plans:
         begin_replaced_run()
     done = []
-    for target in selected:
-        if target.status == "failed":
-            continue
+    # print(f"DEBUG allow: live boxes={[t.label() for t in confirmed]}")
+    for target in confirmed:
         desired = plans.get(_plan_key(target))
         if not desired:
             continue
@@ -628,7 +627,7 @@ def _apply(
                 overwrite=overwrite,
                 snapshot_label=target.label(),
             )
-            target.status = "ok"
+            target.status = STATUS_OK
             done.append((target, client))
             print_result(target, _counts_line(counts))
             if DEBUG:
@@ -663,20 +662,20 @@ def _emit_report(
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "dry_run": dry_run,
         "overwrite": overwrite,
-        "ok_count": sum(1 for t in selected if t.status == "ok"),
-        "preview_count": sum(1 for t in selected if t.status == "preview"),
-        "failed_count": sum(1 for t in selected if t.status == "failed"),
+        "ok_count": sum(1 for t in selected if t.status == STATUS_OK),
+        "preview_count": sum(1 for t in selected if t.status == STATUS_PREVIEW),
+        "failed_count": sum(1 for t in selected if t.status == STATUS_FAILED),
         "collectives": [
             {"index": int(c["index"]), "fqdn": c.get("fqdn", ""), "agip": c.get("agip", "")}
             for c in collectives
         ],
         "targets": [
             {
-                "label": t.label(),
+                # self_ips are listed on purpose (the lockout check uses them);
+                # the error text still has its SSH addresses replaced.
+                **report_target_fields(t),
                 "functions": t.functions,
                 "self_ips": t.self_ips,
-                "status": t.status,
-                "error": t.error,
             }
             for t in selected
         ],
@@ -689,12 +688,7 @@ def main() -> None:
     warn_insecure_transport()
     creds = load_credentials(CREDENTIALS_PATH)
     collectives = _parse_collectives(creds)
-    if not collectives:
-        halt(
-            "E01",
-            "No collectives defined (collectives[] or agip)",
-            "Add collectives[].fqdn to credentials.json or enter when prompted.",
-        )
+    require_collectives(collectives)
     prepare_collectives(creds, collectives, need_ssh=False)
     missing = []
     for col in collectives:
@@ -703,85 +697,41 @@ def main() -> None:
         if not src:
             missing.append(col.get("fqdn") or col.get("agip") or str(col.get("index")))
     if missing:
-        print("Allowed sources for this Controller are missing:", file=sys.stderr)
-        for name in missing:
-            print(f"      {name}", file=sys.stderr)
-        print(
-            "      Add allowed_sources (all or per Controller) in credentials.json.",
-            file=sys.stderr,
-        )
-        raise HaltError("allowed sources missing")
+        halt("E19", "Allowed sources are missing for: " + ", ".join(missing))
     clients = login_collectives(collectives, step="[1/4]")
     selected = select_appliances(clients, step="[2/4]")
     overwrite = _prompt_merge_mode(clients, selected)
-    started_at = datetime.now(timezone.utc).isoformat()
-    _apply(selected, clients, collectives, overwrite=overwrite, dry_run=True)
-    _emit_report(
-        collectives, selected, overwrite=overwrite, dry_run=True, started_at=started_at
-    )
-    if DRY_RUN:
-        print("      DRY_RUN is set — preview only.", file=sys.stderr)
-    elif any(t.status == "preview" for t in selected):
-        go = False
+    plans = _plan_all(selected, collectives)
+
+    def _confirm(waiting) -> bool:
+        """Menu 6's own confirm: replace runs the lockout check and its two-step yes; then wide prefixes."""
+        mine = {k: v for k, v in plans.items() if k in {_plan_key(t) for t in waiting}}
         if overwrite:
-            plans = {
-                _plan_key(t): _plan_one(t, collectives)
-                for t in selected
-                if t.status == "preview"
-            }
-            # print(f"DEBUG plans: n={len(plans)}")
-            _check_lockout(selected, plans)
-            _confirm_replace(selected, plans)
-            go = True
+            # print(f"DEBUG plans: n={len(mine)}")
+            _check_lockout(selected, mine)
+            _confirm_replace(selected, mine)
         else:
-            apply = input("\n      Apply these changes now? [y/N]: ").strip().lower()
-            go = apply in YES_ANSWERS
-        if go:
-            wide_plans = {
-                _plan_key(t): _plan_one(t, collectives)
-                for t in selected
-                if t.status == "preview"
-            }
-            if not _confirm_wide_prefixes(wide_plans):
-                print("      Cancelled. Nothing was changed.")
-                go = False
-        if go:
-            for target in selected:
-                if target.status == "preview":
-                    target.status = "pending"
-                    target.error = ""
-            live_started = datetime.now(timezone.utc).isoformat()
-            try:
-                _apply(
-                    selected,
-                    clients,
-                    collectives,
-                    overwrite=overwrite,
-                    dry_run=False,
-                    skip_guards=True,
-                )
-            finally:
-                _emit_report(
-                    collectives,
-                    selected,
-                    overwrite=overwrite,
-                    dry_run=False,
-                    started_at=live_started,
-                )
-    if any(t.status == "failed" for t in selected):
+            answer = input(
+                f"\n      Apply these allowed-source changes to {boxes(len(waiting))} now? [y/N]: "
+            ).strip().lower()
+            if answer not in YES_ANSWERS:
+                return False
+        if not _confirm_wide_prefixes(mine):
+            print("      Cancelled. Nothing was changed.")
+            return False
+        return True
+
+    preview_then_apply(
+        selected,
+        preview=lambda: _preview(selected, clients, plans, overwrite=overwrite),
+        apply=lambda go: _apply_live(go, clients, plans, overwrite=overwrite),
+        report=lambda dry, at: _emit_report(collectives, selected, overwrite=overwrite, dry_run=dry, started_at=at),
+        prompt="",
+        confirm=_confirm,
+    )
+    if any(t.status == STATUS_FAILED for t in selected):
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user", file=sys.stderr)
-        raise
-    except HaltError:
-        sys.exit(1)
-    except SystemExit:
-        raise
-    except Exception as exc:
-        print(f"\nError: {exc}", file=sys.stderr)
-        sys.exit(1)
+    run_tool(main)

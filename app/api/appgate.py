@@ -39,21 +39,15 @@ from config import (
     APPGATE_API_VERSION,
     API_AUTH_FAIL_CODES,
     API_ERROR_BODY_PREVIEW,
+    APPLIANCE_PUT_REUSE_SEC,
+    DEBUG_BODY_PREVIEW,
     APPGATE_PROVIDER,
     DEBUG,
     LOGIN_BODY_PREVIEW,
     APPLIANCE_LIST_MAX,
     APPLIANCE_LIST_PAGE,
     APPLIANCE_STATUS_PATH,
-    ENGINE_ID_TYPE,
-    NTP_KEY_HEX_PREFIX,
-    ALLOW_SOURCES_PUT_ALLOWED,
     ALLOW_SOURCES_SLOT_PARENT,
-    NTP_KEY_TYPE_MAP,
-    NTP_WEAK_KEY_TYPES,
-    SNMP_AUTH_PROTOCOL,
-    SNMP_PRIV_PROTOCOL,
-    STRIP_V1V2_COMMUNITIES,
     insecure_api_enabled,
 )
 import copy
@@ -61,15 +55,15 @@ import ipaddress
 import atexit
 import json
 import re
+import socket
 import ssl
+import time
 import sys
-import unicodedata
 from typing import Any, Dict, List, Optional
 
 from core.ca_pin import CaPinError, require_ca_file
 from core.inventory import (
     Target,
-    _is_ip as _is_ip_text,
     appliance_admin_ip,
     appliance_functions,
     appliance_health,
@@ -78,7 +72,7 @@ from core.inventory import (
     is_selectable,
     status_self_ips,
 )
-from core.utils import print_error, redact_preview, write_replaced_snapshot
+from core.utils import clean_for_terminal, is_ip, print_error, redact_preview
 
 
 from .allow_sources import AllowSourcesMixin
@@ -86,16 +80,18 @@ from .errors import AppliancePutError
 from .ntp import NtpMixin
 from .snmp import SnmpMixin
 
-# Whole escape sequences first, then single control bytes. In the other order the
-# lone ESC matched first and "[2J" was left behind as text.
-_CTRL = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|[\x00-\x08\x0b-\x1f\x7f-\x9f]")
-
-
 def _strip_controls(text: str) -> str:
-    """A Controller error must not rewrite the operator terminal."""
-    # print(f"DEBUG strip: n={len(text or '')}")
-    return _CTRL.sub("", text or "")
+    """A Controller error must not rewrite the operator terminal. Multi-line text keeps its line breaks."""
+    return clean_for_terminal(text, keep_newlines=True)
 
+
+# Peer version per Controller address, for this process only (see _use_controller_api_version).
+_PEER_VERSION_SEEN: Dict[str, str] = {}
+# Controllers (agip, lowercased) whose no-range status retry returned no live
+# status this session; the retry is skipped for them on later menu runs.
+_STATUS_RETRY_USELESS: set = set()
+# Identity-provider names per Controller address, for this process only.
+_PROVIDERS_SEEN: Dict[str, list] = {}
 
 _CNSA_TLS_CIPHERS = "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
 _cnsa_session = None
@@ -150,6 +146,7 @@ class _CnsaAdapter(requests.adapters.HTTPAdapter):
     """Every HTTPS connection in this session uses the CNSA context for its own CA file."""
 
     def build_connection_pool_key_attributes(self, request, verify, cert=None):
+        """Give each request the context for its own CA file, so the pool key (and the trust) differ per Controller."""
         host_params, pool_kwargs = super().build_connection_pool_key_attributes(request, verify, cert)
         pool_kwargs["ssl_context"] = _cnsa_context_for(verify)
         return host_params, pool_kwargs
@@ -160,19 +157,76 @@ def _cnsa_tls_refused(exc: BaseException) -> bool:
     import config as _config
 
     text = str(exc).lower()
-    return bool(getattr(_config, "CNSA_STRICT", False)) and any(
+    return bool(getattr(_config, "CNSA_STRICT", True)) and any(
         word in text for word in ("handshake failure", "no shared cipher", "unsupported protocol",
                                   "wrong version number", "no ciphers available", "sslv3 alert",
                                   "key too small", "ca md too weak")
     )
 
 
+class _DebugHttp:
+    """DEBUG wrapper: one line per Controller request (method, path, status, time).
+
+    Only the URL path is printed: never the query values, body, headers or
+    token. Used for every call so a failed step shows exactly which request it
+    sent and what came back.
+    """
+
+    def __init__(self, inner) -> None:
+        """inner is the requests module or the CNSA session."""
+        self._inner = inner
+
+    def _call(self, method: str, url: str, **kwargs):
+        """Time one request and print its line, also when it raises."""
+        from urllib.parse import urlsplit
+
+        path = urlsplit(url).path
+        started = time.monotonic()
+        try:
+            response = getattr(self._inner, method)(url, **kwargs)
+        except Exception as exc:
+            ms = (time.monotonic() - started) * 1000
+            print(f"      DEBUG api {method.upper()} {path} -> {type(exc).__name__} ({ms:.0f} ms)", file=sys.stderr)
+            raise
+        ms = (time.monotonic() - started) * 1000
+        print(f"      DEBUG api {method.upper()} {path} -> {response.status_code} ({ms:.0f} ms)", file=sys.stderr)
+        return response
+
+    def get(self, url, **kwargs):
+        """GET through the wrapper."""
+        return self._call("get", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        """POST through the wrapper."""
+        return self._call("post", url, **kwargs)
+
+    def put(self, url, **kwargs):
+        """PUT through the wrapper."""
+        return self._call("put", url, **kwargs)
+
+    def delete(self, url, **kwargs):
+        """DELETE through the wrapper."""
+        return self._call("delete", url, **kwargs)
+
+
 def _http():
-    """requests itself, or a CNSA-only session when CNSA_STRICT is on. Read per call so menu C applies at once."""
+    """requests itself, or a CNSA-only session when CNSA_STRICT is on. Read per call so menu C applies at once.
+
+    With DEBUG, the choice is wrapped so every request prints one line.
+    """
+    import config as _config
+
+    inner = _http_inner()
+    return _DebugHttp(inner) if getattr(_config, "DEBUG", False) else inner
+
+
+def _http_inner():
+    """The plain transport: requests, or the CNSA-only session."""
     global _cnsa_session
     import config as _config
 
-    if not getattr(_config, "CNSA_STRICT", False):
+    # A config.py from before this setting gets the strict default too.
+    if not getattr(_config, "CNSA_STRICT", True):
         return requests
     if _cnsa_session is None:
         session = requests.Session()
@@ -184,9 +238,8 @@ def _http():
 
 
 def _strip_display(text: str) -> str:
-    """Remove control, escape and format characters (bidi marks, zero-width) from a name shown to the operator."""
-    # print(f"DEBUG display: in={len(text or '')}")
-    return "".join(ch for ch in _strip_controls(text) if unicodedata.category(ch) != "Cf").strip()
+    """A one-line name for the table, result lines and reports: no control, escape or format characters."""
+    return clean_for_terminal(text).strip()
 
 
 def _disable_tls_verify() -> None:
@@ -222,6 +275,18 @@ def _copy_saved_path(src: Dict[str, Any], dest: Dict[str, Any], path: str) -> No
         cur_d[leaf] = copy.deepcopy(cur_s[leaf])
     elif isinstance(cur_d, dict):
         cur_d.pop(leaf, None)
+
+
+def _status_lacks_details(items: Any) -> bool:
+    """True when a status reply has rows but none carries a details object.
+
+    A v25 Controller has returned status "n/a" with no stats for every box. That
+    reply has no health, so one documented retry (no range parameter) is worth
+    one call, and the operator is told if it stays that way. An empty list is not
+    "lacking": there is nothing to improve.
+    """
+    rows = [i for i in (items or []) if isinstance(i, dict)]
+    return bool(rows) and not any(isinstance(i.get("details"), dict) for i in rows)
 
 
 def _merge_self_ips(nic_ips: List[str], status: Dict[str, Any]) -> List[str]:
@@ -405,29 +470,60 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         for key in ("peerVersion", "peer_version"):
             raw = payload.get(key)
             if raw not in (None, ""):
-                return str(raw).split(".", 1)[0]
+                major = str(raw).strip().split(".", 1)[0]
+                # Only a plain number can go into the Accept header.
+                if major.isascii() and major.isdigit() and len(major) <= 4:
+                    return major
         product = str(payload.get("version") or "")
         if product.startswith("7"):
             return "25"
         return ""
 
-    def _set_peer_version(self, version: str) -> None:
-        """7.0 rejects a v24 Accept as a fake 403, so the header must match the probe."""
-        self.api_version = str(version).split(".", 1)[0]
+    def _set_peer_version(self, version: str, note: str = "") -> None:
+        """7.0 rejects a v24 Accept as a fake 403, so the header must match the probe.
+
+        A value that is not a plain number is ignored: it would build an Accept
+        header such as peer-vabc that no Controller answers.
+        """
+        major = str(version).strip().split(".", 1)[0]
+        if not (major.isascii() and major.isdigit() and len(major) <= 4):
+            # print(f"DEBUG version: ignored non-numeric peer version {version!r}")
+            return
+        self.api_version = major
         self.headers["Accept"] = f"application/vnd.appgate.peer-v{self.api_version}+json"
         self._version_learned = True
-        print(f"      API version {self.api_version}", file=sys.stderr)
+        if self.agip:
+            _PEER_VERSION_SEEN[self.agip.lower()] = self.api_version
+        print(f"      API version {self.api_version}{note}", file=sys.stderr)
 
     def _version_in_text(self, text: str) -> str:
-        """406/403 bodies name the Accept the Controller will speak. Do not guess one."""
-        match = re.search(r"peer-v(\d+)", text or "")
-        return match.group(1) if match else ""
+        """406/403 bodies name the Accept the Controller will speak. Do not guess one.
+
+        A body can list several versions; the highest is the one the Controller
+        speaks best, so it is used (the first one listed is often the oldest).
+        Numbers beyond 4 digits are not a peer version and are ignored.
+        """
+        names = [int(n) for n in re.findall(r"peer-v(\d{1,4})(?!\d)", text or "")]
+        # print(f"DEBUG version text: names={names!r}")
+        return str(max(names)) if names else ""
 
     def _use_controller_api_version(self) -> None:
-        """GET /admin/version has no auth. Try the header this client already speaks, then json."""
+        """GET /admin/version has no auth. A version already learned this session is reused.
+
+        AppGate documents application/json for this endpoint, so it is tried first,
+        then the vendor header this client speaks. Some Controllers answer 406 and
+        name the peer version in the body; the whole body is searched for it. The
+        result is kept per Controller for this process only, so later menus make
+        no version request at all.
+        """
+        cached = _PEER_VERSION_SEEN.get(self.agip.lower())
+        if cached:
+            # print(f"DEBUG version: reuse {cached} for {self.agip}")
+            self._set_peer_version(cached, note=" (learned earlier this session)")
+            return
         accepts = (
-            self.headers.get("Accept") or "application/json",
             "application/json",
+            self.headers.get("Accept") or "application/json",
             "*/*",
         )
         seen = []
@@ -449,14 +545,18 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 if DEBUG:
                     print(f"      DEBUG version GET failed accept={accept!r} err={exc}", file=sys.stderr)
                 continue
-            body = (response.text or "")[:LOGIN_BODY_PREVIEW]
+            full_body = response.text or ""
+            body = full_body[:LOGIN_BODY_PREVIEW]
             if DEBUG:
+                # The snippet shows why a 406 came back; it is redacted and has no secrets.
+                snippet = _strip_controls(redact_preview(full_body, DEBUG_BODY_PREVIEW)) if response.status_code != 200 else ""
                 print(
-                    f"      DEBUG version GET status={response.status_code} accept={accept!r}",
+                    f"      DEBUG version GET status={response.status_code} accept={accept!r}"
+                    + (f" body={snippet!r}" if snippet else ""),
                     file=sys.stderr,
                 )
             # print(f"DEBUG version probe: status={response.status_code} accept={accept}")
-            named = self._version_in_text(body)
+            named = self._version_in_text(full_body)
             if named:
                 self._set_peer_version(named)
                 return
@@ -484,7 +584,14 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             return 24
 
     def _identity_provider_names(self) -> list:
-        """Provider display names are public. A mismatch is a 403, not a bad password."""
+        """Provider display names are public. A mismatch is a 403, not a bad password.
+
+        Kept per Controller for the session, like the peer version, so later
+        menus do not ask again.
+        """
+        cached = _PROVIDERS_SEEN.get(self.agip.lower())
+        if cached:
+            return list(cached)
         try:
             response = _http().get(
                 f"{self.base_url}/identity-providers/names",
@@ -519,6 +626,8 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     name = str(item.get("name") or item.get("displayName") or "").strip()
                     if name:
                         names.append(name)
+        if names:
+            _PROVIDERS_SEEN[self.agip.lower()] = list(names)
         return names
 
     @staticmethod
@@ -565,7 +674,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     if pinned and not exc.fatal:
                         self._ca_bundle = pinned
                     else:
-                        print(f"ERROR E06: {exc}", file=sys.stderr)
+                        print_error("E06", str(exc))
                         last_connect_error = exc
                         if exc.fatal:
                             break
@@ -578,6 +687,26 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                     f"      DEBUG provider {provider_name!r} not in {names!r}",
                     file=sys.stderr,
                 )
+            import config as _config
+
+            tls_info = None
+            if getattr(_config, "CNSA_STRICT", True):
+                # Before the password goes out: a certificate key below CNSA 2.0
+                # stops this Controller. A probe that cannot connect is left to
+                # the login itself, which reports the real network error.
+                try:
+                    tls_info = self._peer_tls(host)
+                    problem = self._cert_key_problem(tls_info)
+                except Exception as exc:  # noqa: BLE001
+                    problem = ""
+                    # print(f"DEBUG tls {host}: certificate probe failed ({type(exc).__name__})")
+                if problem:
+                    print_error(
+                        "E18",
+                        f"{host}: {problem}. CNSA_STRICT is on, so no password was sent.",
+                    )
+                    last_connect_error = RuntimeError(f"{host}: {problem}")
+                    continue
             payload = self._login_payload(username, password, provider_name)
             self._login_retried = False
             try:
@@ -598,10 +727,10 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             except requests.exceptions.SSLError as exc:
                 last_connect_error = exc
                 if _cnsa_tls_refused(exc):
-                    print(
-                        f"      {host} does not offer CNSA-grade TLS (TLS 1.2, ECDHE AES-256-GCM, P-384, "
+                    print_error(
+                        "E18",
+                        f"{host} does not offer CNSA-grade TLS (TLS 1.2, ECDHE AES-256-GCM, P-384, "
                         "RSA keys of 3072 bits or more). CNSA_STRICT is on.",
-                        file=sys.stderr,
                     )
                 else:
                     print(
@@ -685,10 +814,83 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 self._logout_registered = True
             if host != self.fqdn and self.fqdn:
                 print(f"      Using IP fallback {host} (FQDN {self.fqdn} unreachable)", file=sys.stderr)
+            if DEBUG:
+                self._debug_tls(host, tls_info)
             return token
         raise RuntimeError(
             f"Could not reach Controller {self.fqdn or self.fallback_ip}: {last_connect_error}"
         )
+
+    def _peer_tls(self, host: str) -> Dict[str, Any]:
+        """One extra TLS handshake to read what the Controller negotiates and its certificate key.
+
+        requests hides its socket, so the strict check and the DEBUG line use
+        this probe, with the same kind of context the session uses (CNSA when
+        CNSA_STRICT is on). It sends no request, no password and no token; the
+        certificate is public data. Raises on a connect or handshake error.
+        """
+        import config as _config
+
+        if getattr(_config, "CNSA_STRICT", True):
+            ctx = _cnsa_context_for(self._verify())
+        else:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        with socket.create_connection((host, APPGATE_ADMIN_PORT), timeout=API_TIMEOUT) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host) as tls:
+                version, cipher = tls.version(), (tls.cipher() or ("?",))[0]
+                der = tls.getpeercert(binary_form=True)
+        info: Dict[str, Any] = {"version": version, "cipher": cipher, "kind": "?", "size": "", "sig": "?"}
+        if der:
+            from cryptography import x509
+            from cryptography.hazmat.primitives.asymmetric import ec, rsa
+
+            cert = x509.load_der_x509_certificate(der)
+            pub = cert.public_key()
+            if isinstance(pub, ec.EllipticCurvePublicKey):
+                info.update(kind="EC", size=pub.curve.name)
+            elif isinstance(pub, rsa.RSAPublicKey):
+                info.update(kind="RSA", size=pub.key_size)
+            else:
+                info.update(kind=type(pub).__name__)
+            info["sig"] = cert.signature_hash_algorithm.name if cert.signature_hash_algorithm else "?"
+        return info
+
+    @staticmethod
+    def _cert_key_problem(info: Dict[str, Any]) -> str:
+        """Why a Controller certificate key is below CNSA 2.0 (P-384 / RSA-3072), or "".
+
+        The strict TLS context already refuses an RSA key below 3072 bits
+        (security level 3) and a P-256 key (no P-256 signature algorithm), at
+        the handshake. This is a second check on the key itself, so a later
+        change to the context cannot quietly accept a weak certificate. Level 4
+        is not an option: it would also refuse RSA 4096.
+        """
+        kind, size = info.get("kind"), info.get("size")
+        if kind == "EC":
+            return "" if size in ("secp384r1", "secp521r1") else f"EC {size} certificate key (CNSA needs P-384 or P-521)"
+        if kind == "RSA":
+            return "" if isinstance(size, int) and size >= 3072 else f"RSA {size} certificate key (CNSA needs 3072 bits or more)"
+        return f"{kind} certificate key (CNSA needs P-384, P-521 or RSA-3072+)"
+
+    def _debug_tls(self, host: str, info: Optional[Dict[str, Any]] = None) -> None:
+        """DEBUG: the TLS the Controller negotiates (version, cipher, certificate key), for strict-mode checks.
+
+        info is the strict-mode certificate check's result when there was one,
+        so no second handshake is made for this line.
+        """
+        try:
+            if info is None:
+                info = self._peer_tls(host)
+            size = f" {info['size']}" if info.get("size") != "" else ""
+            print(
+                f"      DEBUG tls {host}: {info['version']} {info['cipher']}; "
+                f"certificate key {info['kind']}{size}, signed {info['sig']}",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail the login
+            print(f"      DEBUG tls {host}: probe failed ({type(exc).__name__})", file=sys.stderr)
 
     def logout(self) -> None:
         """Drop the bearer token on the Controller. A logout failure must not turn a finished job into a failure."""
@@ -752,17 +954,24 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
 
         raise RuntimeError(f"Login failed (HTTP {response.status_code})")
 
-    def _paged_get(self, path: str) -> list:
-        """GET a 6.7 collection. range is a query param; total is in JSON 'range' (0-49/123)."""
-        items: list = []
-        start = 0
+    def _paged_get(
+        self, path: str, start: int = 0, seed: Optional[list] = None, ranged: bool = True
+    ) -> list:
+        """GET a 6.7 collection. range is a query param; total is in JSON 'range' (0-49/123).
+
+        Always the vendor Accept header: the spec allows no other on collections.
+        ranged=False sends one GET with no range parameter (the spec default is all
+        objects) and returns that one reply; used for the status retry.
+        """
+        # seed/start continue from a page the caller already has, so it is not fetched twice.
+        items: list = list(seed or [])
         page = APPLIANCE_LIST_PAGE
         while True:
             end = start + page - 1
             response = _http().get(
                 f"{self.base_url}{path}",
                 headers=self.headers,
-                params={"range": f"{start}-{end}"},
+                params={"range": f"{start}-{end}"} if ranged else None,
                 verify=self._verify(),
                 timeout=API_TIMEOUT,
                 allow_redirects=False,
@@ -786,6 +995,8 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             # print(f"DEBUG paged_get: path={path} start={start} n={len(chunk)}")
             if not chunk:
                 break
+            if not ranged:
+                return (items + chunk)[:APPLIANCE_LIST_MAX]
             if items and chunk and items[0] == chunk[0]:
                 break
             items.extend(chunk)
@@ -837,7 +1048,8 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             except ValueError:
                 total = 0
             if total > len(chunk):
-                return self._paged_get("/appliances")
+                # print(f"DEBUG appliances: first page n={len(chunk)} total={total}")
+                return self._paged_get("/appliances", start=len(chunk), seed=chunk)
         return chunk
 
     def get_appliance_status(self) -> Dict[str, Dict[str, Any]]:
@@ -846,7 +1058,57 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         # print(f"DEBUG step2: GET {APPLIANCE_STATUS_PATH} host={self.agip}")
         if DEBUG:
             print(f"      DEBUG step2: GET {APPLIANCE_STATUS_PATH} on {self.agip}", file=sys.stderr)
+        # AppGate's spec allows only the vendor Accept here (application/json is for
+        # /admin/version only, and these Controllers refuse it), so no other
+        # Accept is tried.
         items = self._paged_get(APPLIANCE_STATUS_PATH)
+        retried = False
+        ctrl = (self.agip or "").lower()
+        if _status_lacks_details(items) and ctrl not in _STATUS_RETRY_USELESS:
+            # A v25 Controller has answered with status "n/a" and no live stats
+            # (no cpu, no details) for every box. The spec says a plain GET makes
+            # the Controller query each active appliance, so ask once more with
+            # no range parameter, exactly as documented. If that is no better,
+            # the first reply is kept and the operator is told below.
+            # print(f"DEBUG step2: status rows lack details; one retry with no range on {self.agip}")
+            retried = True
+            try:
+                retry = self._paged_get(APPLIANCE_STATUS_PATH, ranged=False)
+            except (requests.exceptions.RequestException, RuntimeError) as exc:
+                retry = None
+                if DEBUG:
+                    resp = getattr(exc, "response", None)
+                    code = getattr(resp, "status_code", "-")
+                    body = _strip_controls(redact_preview(getattr(resp, "text", "") or "", DEBUG_BODY_PREVIEW))
+                    print(f"      DEBUG step2: status retry failed: {type(exc).__name__} HTTP {code} body={body!r}", file=sys.stderr)
+            if retry and not _status_lacks_details(retry):
+                items = retry
+            else:
+                # The status call queries every appliance and can be slow, so a
+                # retry that gave nothing better is not repeated this session.
+                _STATUS_RETRY_USELESS.add(ctrl)
+        if DEBUG:
+            # Field names and status words only, never other values.
+            rows = [i for i in items if isinstance(i, dict)]
+            first = rows[0] if rows else {}
+            details = first.get("details") if isinstance(first.get("details"), dict) else {}
+            print(
+                f"      DEBUG step2: peer v{self.api_version} status items={len(items)} retried={retried} "
+                f"has cpu={'cpu' in first} has details={bool(details)} "
+                f"status values={sorted({str(r.get('status')) for r in rows})[:6]} "
+                f"details keys={sorted(details)[:20]}",
+                file=sys.stderr,
+            )
+        if _status_lacks_details(items):
+            # Not a toolkit failure: the Controller itself returned no live status.
+            # Say so once, because the health column and APPLIANCE_SKIP_STATUS
+            # depend on it and an operator would otherwise trust the blank column.
+            print(
+                f"      Note: {self.agip} returned no live status for its appliances (status n/a, no stats). "
+                "Health shows a dash and offline boxes cannot be skipped for this collective. "
+                "Check the appliance status in this Controller's Admin UI.",
+                file=sys.stderr,
+            )
         out: Dict[str, Dict[str, Any]] = {}
         for item in items:
             if not isinstance(item, dict):
@@ -896,6 +1158,14 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
                 continue
             if target is not None:
                 targets.append(target)
+        if DEBUG:
+            # Per-collective summary for comparing a v24 and a v25 Controller in one run.
+            print(
+                f"      DEBUG collective {collective}: peer v{self.api_version} login id={self._login_id_field} "
+                f"appliances={len(raw)} selectable={len(targets)} "
+                f"health={sorted({t.health for t in targets})}",
+                file=sys.stderr,
+            )
         return targets
 
     def _appliance_target(
@@ -923,6 +1193,17 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             )
             return None
         health = appliance_health(appliance, status_by_id.get(aid, {}))
+        if DEBUG:
+            item = status_by_id.get(aid, {})
+            det = item.get("details") if isinstance(item.get("details"), dict) else {}
+            where = [f"{k}" for k in ("status", "state") if isinstance(item.get(k), str) and item.get(k)]
+            where += [f"details.{k}" for k in ("status", "state") if isinstance(det.get(k), str) and det.get(k)]
+            # Which fields carried a health string for this box (the value is the health shown).
+            print(
+                f"      DEBUG health v{self.api_version} {name}: {health!r} from fields {where or ['none']}"
+                f"{'' if item else ' (no status item for this id)'}",
+                file=sys.stderr,
+            )
         if not is_selectable(health, APPLIANCE_SKIP_STATUS):
             print(
                 f"      skip {name}: not healthy (status={health!r})",
@@ -933,8 +1214,8 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         # Admin hostname first, then admin IP. The other NIC IPs stay in ssh_ips as fallbacks.
         ssh_host = appliance_ssh_host(appliance)
         admin_ip = appliance_admin_ip(appliance)
-        ssh_ip = admin_ip or (ssh_host if _is_ip_text(ssh_host) else (ssh_ips[0] if ssh_ips else ""))
-        if ssh_host and not _is_ip_text(ssh_host):
+        ssh_ip = admin_ip or (ssh_host if is_ip(ssh_host) else (ssh_ips[0] if ssh_ips else ""))
+        if ssh_host and not is_ip(ssh_host):
             ssh_fqdn = ssh_host
         # print(f"DEBUG list_targets: {name} admin={ssh_fqdn!r} admin_ip={admin_ip!r} ips={ssh_ips!r}")
         if not ssh_fqdn and not ssh_ip:
@@ -954,11 +1235,25 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             self_ips=_merge_self_ips(ssh_ips, status_by_id.get(aid, {})),
         )
 
-    def _get_appliance(self, appliance_id: Optional[str] = None) -> Dict[str, Any]:
-        """GET one appliance and remember its ETag or version. The later PUT sends it as If-Match so a parallel edit is not overwritten."""
+    def _get_appliance(self, appliance_id: Optional[str] = None, *, fresh: bool = False) -> Dict[str, Any]:
+        """GET one appliance and remember its ETag or version. The later PUT sends it as If-Match so a parallel edit is not overwritten.
+
+        The reply of this run's own PUT to the same appliance, if it is younger
+        than APPLIANCE_PUT_REUSE_SEC, is used once instead of a new GET (the PUT
+        reply is the full updated appliance). fresh=True always GETs: a rollback
+        must start from what the Controller holds now.
+        """
         aid = appliance_id
         if not aid:
             raise RuntimeError("Appliance ID is not set.")
+        cached = None if fresh else self._take_put_reply(str(aid))
+        if cached is not None:
+            payload, token = cached
+            self._appliance_match[str(aid)] = token
+            # print(f"DEBUG appliance {aid}: reusing the PUT reply instead of a GET")
+            if DEBUG:
+                print(f"      DEBUG api GET /admin/appliances/{aid} skipped (reused this run's PUT reply)", file=sys.stderr)
+            return payload
         response = _http().get(
             f"{self.base_url}/appliances/{aid}",
             headers=self.headers,
@@ -974,6 +1269,44 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         _log_unknown_appliance_keys(payload, f"GET /appliances/{aid}")
         return payload
 
+    def _take_put_reply(self, aid: str):
+        """(appliance, If-Match token) from a recent PUT reply of this appliance, used once; or None."""
+        replies = getattr(self, "_put_replies", None) or {}
+        entry = replies.pop(aid, None)
+        if not entry or APPLIANCE_PUT_REUSE_SEC <= 0:
+            return None
+        saved_at, payload, token = entry
+        if time.monotonic() - saved_at > APPLIANCE_PUT_REUSE_SEC:
+            return None
+        return copy.deepcopy(payload), token
+
+    def _keep_put_reply(self, aid: str, response: requests.Response) -> None:
+        """Keep a successful PUT reply for the next step, only when it is this appliance with a version.
+
+        Without an id match or a version/ETag the reply cannot stand in for a
+        GET (the next PUT would have no If-Match), so a GET happens as before.
+        """
+        if not hasattr(self, "_put_replies"):
+            self._put_replies = {}
+        self._put_replies.pop(aid, None)
+        if APPLIANCE_PUT_REUSE_SEC <= 0:
+            return
+        try:
+            payload = response.json()
+        except ValueError:
+            return
+        if not isinstance(payload, dict) or str(payload.get("id") or "") != aid:
+            return
+        token = (response.headers.get("ETag") or "").strip()
+        if not token:
+            for key in ("version", "updated"):
+                val = payload.get(key)
+                if val not in (None, ""):
+                    token = str(val)
+                    break
+        if token:
+            self._put_replies[aid] = (time.monotonic(), payload, token)
+
     def note_rollback(self, aid: str, original: Dict[str, Any], allowed: tuple, what: str) -> None:
         """Keep the pre-PUT document in memory. The on-disk snapshot is redacted and cannot be PUT back."""
         self._rollback[str(aid)] = (copy.deepcopy(original), tuple(allowed), what)
@@ -984,7 +1317,7 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
         if not saved:
             raise AppliancePutError(f"No pre-PUT copy for {aid}")
         original, allowed, what = saved
-        fresh = self._get_appliance(aid)
+        fresh = self._get_appliance(aid, fresh=True)
         body_src = copy.deepcopy(fresh)
         for path in allowed:
             _copy_saved_path(original, body_src, path)
@@ -1074,6 +1407,18 @@ class AppGateClient(SnmpMixin, NtpMixin, AllowSourcesMixin):
             timeout=API_TIMEOUT,
             allow_redirects=False,
         )
+        if put_response.status_code == 200:
+            self._keep_put_reply(str(aid), put_response)
+        else:
+            # A refused PUT may mean the copy is stale: the next step GETs again.
+            getattr(self, "_put_replies", {}).pop(str(aid), None)
+        if DEBUG and put_response.status_code == 200:
+            # One line per successful appliance PUT, so v24 and v25 Controllers can be compared.
+            match_kind = "ETag" if token.startswith(('"', "W/")) else "version"
+            print(
+                f"      DEBUG PUT ok peer v{self.api_version} {what} appliance={aid} If-Match={match_kind}",
+                file=sys.stderr,
+            )
         if put_response.status_code != 200:
             if DEBUG:
                 print(f"      DEBUG {what} PUT HTTP {put_response.status_code}", file=sys.stderr)

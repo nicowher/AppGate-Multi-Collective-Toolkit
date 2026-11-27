@@ -59,20 +59,25 @@ def ok(text: str = "OK", stream=None) -> str:
 
 
 def fail(text: str = "Failed", stream=None) -> str:
+    """Red bold status word only, so a log scrape still matches the plain text."""
     return paint(text, BOLD, RED, stream=stream)
 
 
 def warn(text: str, stream=None) -> str:
+    """Yellow for warnings, so they stand out from progress lines without hiding the text."""
     return paint(text, BOLD, YELLOW, stream=stream)
 
 
 def heading(text: str, stream=None) -> str:
+    """Bold title and [n/N] step banners, so an operator can find where a long run is or stopped."""
     return paint(text, BOLD, CYAN, stream=stream)
 
 
 def step(text: str, stream=None) -> str:
+    """Menu choice keys (1), 2), ...) in color so the key to press stands out from its label."""
     return paint(text, CYAN, stream=stream)
 
 
 def dim(text: str, stream=None) -> str:
+    """Dim menu descriptions, so the choice name reads first and the hint second."""
     return paint(text, DIM, stream=stream)

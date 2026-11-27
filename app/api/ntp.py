@@ -3,16 +3,32 @@ from __future__ import annotations
 
 import copy
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from config import (
     DEBUG,
-    LAB_MODE,
+    NTP_HEX_KEY_TYPES,
     NTP_KEY_HEX_PREFIX,
+    NTP_SHA384_MIN_PEER,
     NTP_KEY_TYPE_MAP,
     NTP_WEAK_KEY_TYPES,
 )
-from core.utils import write_replaced_snapshot
+from core.utils import ntp_key_error, write_replaced_snapshot
+
+
+def _cnsa_strict() -> bool:
+    """CNSA_STRICT at call time (menu C can change it); on when an older config.py lacks it."""
+    import config as _config
+
+    return bool(getattr(_config, "CNSA_STRICT", True))
+
+
+def _peer_major(client: Any) -> int:
+    """The Controller's peer API version as a number, 0 when unknown."""
+    try:
+        return int(str(getattr(client, "api_version", "") or "0"))
+    except ValueError:
+        return 0
 
 NTP_PUT_ALLOWED = ("ntp", "ntpServers", "ntpServer")
 
@@ -21,23 +37,26 @@ class NtpMixin:
     """Menu 5 NTP reads and PUTs. Mixed into AppGateClient so it reuses that client's token, CA pin and If-Match handling."""
     @staticmethod
     def _ntp_key_for_api(entry: Dict[str, Any]) -> Dict[str, Any]:
-        """6.7 GET shape: ntp.servers[].hostname, optional keyType/keyNo/key (SHA256 → HEX:)."""
+        """6.7 GET shape: ntp.servers[].hostname, optional keyType/keyNo/key (SHA256/384/512 keys get HEX:)."""
         host = str(entry.get("hostname") or "").strip()
         out: Dict[str, Any] = {"hostname": host}
         key_type = str(entry.get("keyType") or "").strip()
         key_no = entry.get("keyNo")
         key = str(entry.get("key") or "").strip()
+        # Same rule as the load and the prompt, checked again in case a caller
+        # builds rows another way. Normally the load has already refused a bad row.
+        problem = ntp_key_error(host, key_type, "" if key_no in (None, "") else str(key_no), key)
+        if problem:
+            raise ValueError(problem)
         if key_type:
             compact = key_type.replace("-", "").upper()
             mapped = NTP_KEY_TYPE_MAP.get(compact, key_type)
             if str(mapped).upper() in NTP_WEAK_KEY_TYPES:
-                msg = (
-                    f"NTP keyType {mapped} is not DISA SNMP STIG / CNSA 1.0 (use SHA256). "
-                    f"hostname={host}"
-                )
-                if not LAB_MODE:
-                    raise ValueError(msg)
-                print(f"      WARNING: {msg}", file=sys.stderr)
+                # Only reached in LAB_MODE: ntp_key_error refuses these otherwise.
+                print(f"      WARNING: NTP keyType {mapped} is not DISA/CNSA (use SHA512 or SHA384). hostname={host}", file=sys.stderr)
+            elif mapped == "SHA256" and _cnsa_strict():
+                # Allowed by DISA, but below CNSA 2.0: say so, do not refuse (existing keys keep working).
+                print(f"      WARNING: NTP keyType SHA256 for {host} is below CNSA 2.0; SHA384 or SHA512 is preferred.", file=sys.stderr)
             out["keyType"] = mapped
         if key_no not in ("", None):
             try:
@@ -45,13 +64,9 @@ class NtpMixin:
             except (TypeError, ValueError):
                 out["keyNo"] = key_no
         if key:
-            if not key_type and not LAB_MODE:
-                raise ValueError(
-                    f"NTP key set but keyType empty for {host}; DISA requires SHA256"
-                )
             compact = (out.get("keyType") or key_type).replace("-", "").upper()
             prefix = NTP_KEY_HEX_PREFIX
-            if compact == "SHA256" and not key.upper().startswith(prefix.upper()):
+            if NTP_KEY_TYPE_MAP.get(compact, compact) in NTP_HEX_KEY_TYPES and not key.upper().startswith(prefix.upper()):
                 key = prefix + key
             out["key"] = key
         return out
@@ -123,6 +138,14 @@ class NtpMixin:
         snapshot_label: str = "",
     ) -> List[Dict[str, Any]]:
         """PUT appliance.ntp so cz-configd applies (survives reboot)."""
+        for s in servers:
+            kt = str((s or {}).get("keyType") or "").replace("-", "").upper()
+            if NTP_KEY_TYPE_MAP.get(kt) == "SHA384" and _peer_major(self) < NTP_SHA384_MIN_PEER:
+                # The v24 API has no SHA384 NTP key type; the Controller would refuse the PUT.
+                raise ValueError(
+                    f"NTP keyType SHA384 for {s.get('hostname')} needs a v{NTP_SHA384_MIN_PEER} Controller "
+                    f"(this one is v{self.api_version}); use SHA512"
+                )
         appliance = self._get_appliance(appliance_id)
         original = copy.deepcopy(appliance)
         self.note_rollback(appliance_id, original, NTP_PUT_ALLOWED, "NTP servers")
@@ -133,6 +156,7 @@ class NtpMixin:
                 "ntp",
                 snapshot_label or str(original.get("name") or appliance_id),
                 original,
+                only=NTP_PUT_ALLOWED,
             )
             merged = desired
         else:

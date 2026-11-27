@@ -145,13 +145,14 @@ SKIP_CREDENTIAL_WALK = False
 # True: do not require certs/<host>.pem and do not verify the Controller cert.
 # A release zip (app/vendor/RELEASE) ignores this and still requires the file.
 INSECURE_API = False
-# CNSA-grade crypto only, for SSH and the Controller API. Off by default: a box or
-# Controller that cannot meet it fails to connect, with a reason. SSH then allows
+# CNSA-grade crypto only, for SSH and the Controller API. On by default: live runs
+# against both v24 and v25 collectives connected under it. A box or Controller that
+# cannot meet it fails to connect, with a reason; set False only for such a box. SSH allows
 # aes256-ctr/aes256-gcm, hmac-sha2-512, P-384/P-521 or DH group16+ key exchange,
 # P-384/P-521 or rsa-sha2-512 host keys (RSA 3072 bits or more). The API uses
 # TLS 1.2 with ECDHE AES-256-GCM-SHA384 on P-384. AppGate documents SSH ciphers as
 # aes*-ctr only, so aes256-ctr is what an appliance will normally negotiate.
-CNSA_STRICT = False
+CNSA_STRICT = True
 # Folder of hand-placed Controller CA PEMs. File name is the dialed host.
 CA_DIRNAME = "certs"
 # Menu 6 replace: abort (E20) if this workstation would not match new SSH allowSources.
@@ -173,6 +174,16 @@ USM_RECREATE_WAITS = 5
 # Truncate API/SSH/walk error bodies so we never dump a full token-bearing payload.
 LOGIN_BODY_PREVIEW = 300
 API_ERROR_BODY_PREVIEW = 500
+# Seconds a successful appliance PUT reply (the full updated appliance, per the
+# AppGate API) may stand in for the next GET of that appliance in this run. It
+# saves a GET per later step (menu 1 pins, pushes and strips the key on the same
+# box). Longer reuse widens the window in which another admin's edit could be
+# overwritten. Off (0, always GET) until a live test shows the Controller refuses
+# a stale If-Match with 409 or 412; the AppGate API does not document it. Then a
+# short value such as 30 is reasonable.
+APPLIANCE_PUT_REUSE_SEC = 0
+# DEBUG-only reply snippets (version probe, status retry): short, and redacted first.
+DEBUG_BODY_PREVIEW = 160
 SSH_LOG_PREVIEW = 300
 WALK_ERROR_PREVIEW = 500
 # Summary banner width (step 8 human table).
@@ -313,8 +324,6 @@ APPGATE_API_VERSION = "24"
 APPGATE_ADMIN_PORT = 8443
 APPGATE_ADMIN_PREFIX = "/admin"
 APPGATE_PROVIDER = "local"
-# Not used for login. The live id is certs/.machine-id, created on first run.
-APPGATE_MACHINE_ID = "f0031c00-0522-43b3-a642-ae23cfd1bc22"
 # Do not fall back to IP on these (credentials/ACL, not a bad FQDN).
 API_AUTH_FAIL_CODES = (401, 403)
 
@@ -403,11 +412,21 @@ NTP_CUSTOMIZATION_UNIT = "cz-customization.service"
 NTP_VERIFY_DELAY = 3
 # 6.7 ntp.servers[].key: SHA256 values without this prefix get it prepended.
 NTP_KEY_HEX_PREFIX = "HEX:"
-# DISA: reject these NTP MAC algorithms when LAB_MODE=False. SHA256 NTP keys are still allowed.
+# DISA: reject these NTP MAC algorithms when LAB_MODE=False. SHA256 and stronger are allowed.
 NTP_WEAK_KEY_TYPES = ("MD5", "SHA1")
+# AppGate keyType values the toolkit accepts, by spelling (dashes removed, upper case).
+# The AppGate API lists SHA512 on peer v24 and v25, and SHA384 on v25 only; "SHA" is
+# SHA-1. CNSA 2.0 wants SHA384 or SHA512, so CNSA_STRICT warns on SHA256.
 NTP_KEY_TYPE_MAP = {
+    "SHA512": "SHA512",
+    "SHA384": "SHA384",
     "SHA256": "SHA256",
     "SHA2": "SHA256",
     "SHA1": "SHA1",
+    "SHA": "SHA1",
     "MD5": "MD5",
 }
+# NTP key types that get the HEX: prefix on the key (chrony reads the key as hex).
+NTP_HEX_KEY_TYPES = ("SHA256", "SHA384", "SHA512")
+# Lowest peer API version whose NTP keyType list includes SHA384.
+NTP_SHA384_MIN_PEER = 25

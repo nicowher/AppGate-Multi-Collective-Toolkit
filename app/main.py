@@ -107,8 +107,8 @@ def _prompt_menu_choice() -> str:
     print(f"  {step('2)')} ACAS scan prep        {dim('(unharden / harden)')}")
     print(f"  {step('3)')} SNMP Walk             {dim('(validate only)')}")
     print(f"  {step('4)')} Update cz SSH password")
-    print(f"  {step('5)')} NTP servers            {dim('(Controller API)')}")
-    print(f"  {step('6)')} Allowed sources        {dim('(who can reach this box)')}")
+    print(f"  {step('5)')} NTP servers           {dim('(Controller API)')}")
+    print(f"  {step('6)')} Allowed sources       {dim('(who can reach this box)')}")
     print(f"  {step('C)')} Configure             {dim('(DEBUG, LAB_MODE, timeouts)')}")
     if not IS_RELEASE:
         print(f"  {step('D)')} Download deps         {dim('(prefetch vendor wheels)')}")
@@ -121,6 +121,78 @@ def _prompt_menu_choice() -> str:
         if choice:
             return choice
         print(fail("Invalid choice."))
+
+
+def _dispatch_tool(choice: str) -> int:
+    """Import and run one tool. Imports stay lazy so menu D works before paramiko is installed."""
+    if choice == "1":
+        from tools.snmp_credentials import main as creds_main
+        creds_main()
+        return 0
+    if choice == "2":
+        from tools.acas import main as acas_main
+        acas_main()
+        return 0
+    if choice == "3":
+        from tools.snmp_walk import main as walk_main
+        walk_main()
+        return 0
+    if choice == "4":
+        from tools.cz_password import main as czpw_main
+        czpw_main()
+        return 0
+    if choice == "5":
+        from tools.ntp import main as ntp_main
+        ntp_main()
+        return 0
+    if choice == "6":
+        from tools.allowed_sources import main as allow_main
+        allow_main()
+        return 0
+    if choice == "c":
+        from tools.settings import main as settings_main
+        return 0 if settings_main() else -1
+    if choice == "d":
+        if IS_RELEASE:
+            return 1
+        from tools.download_deps import main as deps_main
+        deps_main()
+        return 0
+    if choice == "u":
+        if IS_RELEASE:
+            return 1
+        from tools.download_deps import upgrade_main
+        upgrade_main()
+        return 0
+    return 1
+
+
+def _debug_run_header() -> None:
+    """DEBUG: the effective settings and library versions, the first thing to check on an odd run.
+
+    Versions come from package metadata, not imports, so menu D still works
+    before paramiko is installed. No credentials or secrets are printed.
+    """
+    import platform
+    import ssl
+
+    import config as _config
+    from importlib import metadata
+
+    names = (
+        "CNSA_STRICT", "LAB_MODE", "INSECURE_API", "DRY_RUN", "SSH_STRICT_HOST_KEY",
+        "SSH_PORT", "SSH_TIMEOUT", "SSH_AUTH_TIMEOUT", "SSH_PRIME_TIMEOUT", "SSH_CONCURRENCY",
+        "WALK_CONCURRENCY", "API_TIMEOUT", "SSH_KNOWN_HOSTS", "WRITE_RUN_REPORT",
+    )
+    settings = ", ".join(f"{n}={getattr(_config, n, '?')!r}" for n in names)
+    versions = [f"python {platform.python_version()}", ssl.OPENSSL_VERSION]
+    for dist in ("paramiko", "requests", "cryptography", "pysnmp", "urllib3"):
+        try:
+            versions.append(f"{dist} {metadata.version(dist)}")
+        except metadata.PackageNotFoundError:
+            versions.append(f"{dist} not installed")
+    print(f"      DEBUG settings: {settings}", file=sys.stderr)
+    print(f"      DEBUG versions: {', '.join(versions)} ({platform.platform()})", file=sys.stderr)
 
 
 def _run_selected_tool(choice: str, rest: List[str]) -> int:
@@ -144,46 +216,14 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
         # print(f"DEBUG cli: choice={choice} argv={sys.argv!r}")
         if DEBUG:
             print(f"      DEBUG cli: choice={choice} rest={rest!r}", file=sys.stderr)
-        if choice == "1":
-            from tools.snmp_credentials import main as creds_main
-            creds_main()
-            return 0
-        if choice == "2":
-            from tools.acas import main as acas_main
-            acas_main()
-            return 0
-        if choice == "3":
-            from tools.snmp_walk import main as walk_main
-            walk_main()
-            return 0
-        if choice == "4":
-            from tools.cz_password import main as czpw_main
-            czpw_main()
-            return 0
-        if choice == "5":
-            from tools.ntp import main as ntp_main
-            ntp_main()
-            return 0
-        if choice == "6":
-            from tools.allowed_sources import main as allow_main
-            allow_main()
-            return 0
-        if choice == "c":
-            from tools.settings import main as settings_main
-            return 0 if settings_main() else -1
-        if choice == "d":
-            if IS_RELEASE:
-                return 1
-            from tools.download_deps import main as deps_main
-            deps_main()
-            return 0
-        if choice == "u":
-            if IS_RELEASE:
-                return 1
-            from tools.download_deps import upgrade_main
-            upgrade_main()
-            return 0
-        return 1
+            _debug_run_header()
+        if choice in ("1", "2", "4", "5"):
+            # One SSH login per box for the whole run (see ssh_session_pool).
+            from ssh.client import ssh_session_pool
+
+            with ssh_session_pool():
+                return _dispatch_tool(choice)
+        return _dispatch_tool(choice)
     except KeyboardInterrupt:
         if _ask_cancel_job():
             print("\nOperation cancelled by user", file=sys.stderr)
@@ -191,6 +231,14 @@ def _run_selected_tool(choice: str, rest: List[str]) -> int:
         print("      Restarting this tool...", file=sys.stderr)
         return -2
     except HaltError:
+        return 1
+    except Exception as exc:  # noqa: BLE001 - the menu must survive one tool's bug
+        # Before, an unexpected error here ended the whole toolkit with a raw
+        # traceback. Now it prints like a tool run on its own, and DEBUG adds the
+        # redacted traceback; the menu then offers to continue.
+        from core.utils import print_unexpected_error
+
+        print_unexpected_error(exc)
         return 1
     except SystemExit as exc:
         code = exc.code
@@ -216,6 +264,12 @@ def cli(argv: Optional[List[str]] = None) -> None:
     toolkit with a message. No later prompt can be answered, so it is a cancel, and
     any yes/no that was waiting stays No.
     """
+    # Output redirected or piped on Windows is cp1252; an unusual character must
+    # not stop a run (core.utils.make_output_safe).
+    # print(f"DEBUG cli: stdout={sys.stdout.encoding} stderr={sys.stderr.encoding}")
+    from core.utils import make_output_safe
+
+    make_output_safe()
     try:
         _cli(argv)
     except EOFError:

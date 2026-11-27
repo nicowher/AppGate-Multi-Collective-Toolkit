@@ -74,7 +74,8 @@ class SNMPHashGenerator:
         auth_hash = self._localize(auth, engine_id, algo)
         # AES-256 wants 32 bytes. SHA-384/512 Kul is longer; the extra bytes are not a key.
         priv_hash = self._localize(priv, engine_id, algo)[:64]
-        print("      Hashed passwords in-process (RFC 3414).", file=sys.stderr)
+        # Said once per box before; the step result line says it now.
+        # print("      DEBUG hashgen: localized in-process (RFC 3414).", file=sys.stderr)
         data = {
             "user": user,
             "engine": engine_id,
@@ -118,11 +119,13 @@ def _engine_id_bytes(engine_id: str) -> bytes:
     if hex_id.lower().startswith("0x"):
         hex_id = hex_id[2:]
     if not hex_id or len(hex_id) % 2:
-        raise ValueError(f"Invalid SNMP engine ID (empty or odd-length hex): {engine_id!r}")
+        # The value is left out: engine IDs stay off the console and out of reports unless DEBUG.
+        # print(f"DEBUG hashgen: bad engine ID length={len(hex_id)}")
+        raise ValueError(f"Invalid SNMP engine ID (empty or odd-length hex, {len(hex_id)} characters)")
     try:
         raw = bytes.fromhex(hex_id)
     except ValueError as exc:
-        raise ValueError(f"Invalid SNMP engine ID hex: {engine_id!r}") from exc
+        raise ValueError(f"Invalid SNMP engine ID (not hex, {len(hex_id)} characters)") from exc
     if not (ENGINE_ID_MIN_OCTETS <= len(raw) <= ENGINE_ID_MAX_OCTETS):
         raise ValueError(
             f"SNMP engine ID length {len(raw)} octets is outside RFC 3411 "

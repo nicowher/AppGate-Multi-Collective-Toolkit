@@ -18,14 +18,12 @@ Health from GET /appliances/status (6.7 labels). error is still configurable;
 offline/not active/warning are skipped so we do not push to unreachable boxes.
 """
 import ipaddress
-import re
 import sys
-import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.utils import format_scoped_ip
+from core.utils import clean_for_terminal, format_scoped_ip, is_ip
 from config import (
     APPLIANCE_FUNCTION_NAMES,
     HEALTH_STATUS_KEYS,
@@ -38,6 +36,57 @@ from core.utils import expand_exclude_tokens
 # Working SSH address per appliance for this process only. Never written to disk:
 # a NIC that answered yesterday may be gone, and the next launch should search again.
 _SESSION_SSH_HOST: Dict[str, str] = {}
+
+
+def mark_label_collisions(targets: List["Target"]) -> None:
+    """Make every label unique within its collective, before anything keys on it.
+
+    A shortened label can match another box (gw1 and gw1_example_com both show
+    as 1.gw1), and exclude, report labels and backup file names use the label.
+    Colliding boxes keep their full name; if even that matches, a short id
+    prefix is added.
+    """
+    groups: Dict[str, List["Target"]] = {}
+    for t in targets:
+        groups.setdefault(t.label().lower(), []).append(t)
+    for same in groups.values():
+        if len(same) > 1:
+            for t in same:
+                t.label_full = True
+    seen: Dict[str, List["Target"]] = {}
+    for t in targets:
+        seen.setdefault(t.label().lower(), []).append(t)
+    for same in seen.values():
+        if len(same) > 1:
+            for t in same:
+                t.label_suffix = "#" + (t.appliance_id or "")[:8]
+    # print(f"DEBUG labels: {sum(1 for t in targets if t.label_full)} kept full names")
+
+
+def _short_name(name: str, collective_fqdn: str) -> str:
+    """Drop a trailing copy of the collective's domain from an appliance name, for display.
+
+    Easy to misuse: two appliances whose names differ only by that suffix
+    (gw1 and gw1_example_com) get the same label, so a label is not unique and
+    must not be used as a key on its own (exclude, backup file names).
+    """
+    # print(f"DEBUG label: shorten {name!r} under {collective_fqdn!r}")
+    domain = (collective_fqdn or "").split(".", 1)[1] if "." in (collective_fqdn or "") else ""
+    if not domain or is_ip(collective_fqdn or ""):
+        return name
+    for suffix in ("." + domain, "_" + domain.replace(".", "_")):
+        if len(name) > len(suffix) and name.lower().endswith(suffix.lower()):
+            return name[: -len(suffix)]
+    return name
+
+
+# Box status values. One spelling everywhere: a typo in a bare string compared
+# silently false, and the run flow, the counts line and the reports all key on these.
+STATUS_PENDING = "pending"      # selected, not started (also: confirmed for the live run)
+STATUS_PREVIEW = "preview"      # the preview says this box would change
+STATUS_UNCHANGED = "unchanged"  # the preview says this box is already set
+STATUS_OK = "ok"                # the live step finished on this box
+STATUS_FAILED = "failed"        # this box failed; later steps skip it
 
 
 @dataclass
@@ -56,7 +105,7 @@ class Target:
     engine_id: str = ""
     auth_hash: str = ""
     priv_hash: str = ""
-    status: str = "pending"
+    status: str = STATUS_PENDING
     error: str = ""
     walk_ok: Optional[bool] = None
     ssh_password_override: Optional[str] = None
@@ -64,13 +113,27 @@ class Target:
     self_ips: List[str] = field(default_factory=list)
     # Technical reason behind error, for reports. No secrets (step names, error kind).
     detail: str = ""
+    # Set by mark_label_collisions when the short label would match another box
+    # in this collective: the full name (and, if needed, an id prefix) is shown.
+    label_full: bool = False
+    label_suffix: str = ""
+    # Error code (core.errors) of a failed box, shown on its Failed line and in reports.
+    code: str = ""
 
     def label(self) -> str:
-        """Human handle: 1.ctrl-a (collective index + hostname)."""
+        """Human handle: 1.ctrl-a (collective index + hostname).
+
+        An appliance name that ends in the collective's own domain (ctrl-a_example_com
+        or ctrl-a.example.com under ctrl.example.com) loses that suffix: it repeats
+        what the address column already shows and made every table wider. The full
+        name still works at the exclude prompt.
+        """
         host = self.hostname or self.ssh_fqdn or self.ssh_ip or self.appliance_id
-        return f"{self.collective}.{host}"
+        name = host if self.label_full else _short_name(host, self.collective_fqdn)
+        return f"{self.collective}.{name}{self.label_suffix}"
 
     def __repr__(self) -> str:
+        """Label, status and engine-ID length only: a repr in a traceback must not print hashes or addresses in full."""
         return (
             f"Target({self.label()!r}, status={self.status!r}, "
             f"engine_len={len(self.engine_id)})"
@@ -184,11 +247,35 @@ def _first_status_string(obj: Any, depth: int = 0) -> str:
     return ""
 
 
+def _status_item_health(item: Dict[str, Any]) -> str:
+    """Health from one /appliances/status item, in the order the API defines it.
+
+    AppGate's v24/v25 model has a top-level status and state, and the same two
+    under details. A Controller can fill only details.status, so it is read
+    before the internal state fields. Before this, a v25 box showed "n/a" and
+    APPLIANCE_SKIP_STATUS could not skip an unhealthy one.
+    """
+    details = item.get("details") if isinstance(item.get("details"), dict) else {}
+    # Order comes from HEALTH_STATUS_KEYS, each key at the top level and then under
+    # details, so editing the setting changes this path too.
+    for key in HEALTH_STATUS_KEYS:
+        for src in (item, details):
+            value = src.get(key)
+            if isinstance(value, str) and value.strip():
+                # print(f"DEBUG health: {key}={value!r} from {'details' if src is details else 'item'}")
+                return value.strip()
+    return ""
+
+
 def appliance_health(appliance: Dict[str, Any], stats: Dict[str, Any]) -> str:
     """Map GET /appliances/status to Admin UI labels (6.7).
 
     Docs: Healthy, Busy, Warning, Error, Offline, Not Active.
     """
+    if isinstance(stats, dict):
+        found = _status_item_health(stats)
+        if found:
+            return _normalize_health_label(found)
     for source in (stats, appliance):
         if not isinstance(source, dict):
             continue
@@ -230,17 +317,6 @@ def _normalize_health_label(raw: str) -> str:
 def _canon_ip(raw: str) -> str:
     """Compare peer and NIC addresses as the same IP. A link-local zone stays, or two scopes look like one address."""
     return format_scoped_ip(raw)
-
-
-def _is_ip(value: str) -> bool:
-    """True for IPv4 or IPv6, with brackets or a link-local zone. A hostname or empty text is False, so a name is never treated as an address."""
-    text = format_scoped_ip(value)
-    host = text.split("%", 1)[0]
-    try:
-        ipaddress.ip_address(host)
-        return True
-    except ValueError:
-        return False
 
 
 def _ip_rank(ip: str) -> int:
@@ -301,7 +377,7 @@ def appliance_ssh_host(appliance: Dict[str, Any]) -> str:
     admin = appliance.get("adminInterface") or {}
     if isinstance(admin, dict):
         host = (admin.get("hostname") or "").strip()
-        if host and "." in host and not _is_ip(host):
+        if host and "." in host and not is_ip(host):
             return host
         for ip in _block_ips(admin):
             if ip:
@@ -317,7 +393,7 @@ def appliance_admin_ip(appliance: Dict[str, Any]) -> str:
         return ""
     for ip in _block_ips(admin):
         text = format_scoped_ip(ip)
-        if text and _is_ip(text):
+        if text and is_ip(text):
             return text
     return ""
 
@@ -340,15 +416,17 @@ def appliance_hosts(appliance: Dict[str, Any]) -> Tuple[str, List[str]]:
     ips: List[str] = []
 
     def add_ip(raw: str) -> None:
+        """Keep one canonical copy of each IP, so the address search does not probe the same NIC twice."""
         ip = format_scoped_ip(raw)
-        if ip and _is_ip(ip) and ip not in ips:
+        if ip and is_ip(ip) and ip not in ips:
             ips.append(ip)
 
     def add_name(raw: str) -> None:
+        """Keep each hostname once, in the order found, so the preferred SSH name is tried first."""
         host = (raw or "").strip()
         if not host:
             return
-        if _is_ip(host):
+        if is_ip(host):
             add_ip(host)
             return
         if host not in names:
@@ -406,17 +484,9 @@ def status_self_ips(status: Any) -> List[str]:
     return found
 
 
-_ANSI_SEQ = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
-
-
 def _display(text: str) -> str:
-    """Drop control and format characters (escape sequences, bidi marks) before printing Controller text."""
-    # Whole ESC [ ... sequences first, so "[31m" is not left behind as text.
-    text = _ANSI_SEQ.sub("", text or "")
-    return "".join(
-        ch for ch in text
-        if ord(ch) >= 32 and ord(ch) != 127 and not (0x80 <= ord(ch) < 0xA0) and unicodedata.category(ch) != "Cf"
-    )
+    """Controller text for the inventory table, cleaned the same way as every other console string."""
+    return clean_for_terminal(text)
 
 
 def prompt_exclusions(targets: List[Target]) -> List[Target]:
@@ -435,7 +505,9 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
     for i, t in enumerate(targets, 1):
         funcs = ",".join(t.functions) or "-"
         addr = _display(t.ssh_fqdn or t.ssh_ip or "-")
-        health = "—" if (t.health or "").strip().lower() in ("n/a", "na", "unknown", "") else t.health
+        # Health comes from the Controller too, so it is cleaned like the name and address.
+        # print(f"DEBUG table: health={t.health!r}")
+        health = "—" if (t.health or "").strip().lower() in ("n/a", "na", "unknown", "") else _display(t.health)
         rows.append((str(i), str(t.collective), t.hostname[:INVENTORY_NAME_WIDTH], addr, funcs, health))
     heads = ("#", "Collective", "Hostname", "SSH address", "Functions", "Health")
     widths = [max([len(h)] + [len(r[c]) for r in rows]) for c, h in enumerate(heads)]
@@ -443,6 +515,7 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
     # print(f"DEBUG table: widths={widths!r}")
 
     def _line(cells) -> str:
+        """Pad each cell to the header widths so rows and header line up; a long address is cut with an ellipsis instead of shifting the health column."""
         out = [cells[0].rjust(widths[0])]
         for c in range(1, 5):
             text = cells[c]
@@ -458,6 +531,7 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
     host_counts = Counter(t.hostname.lower() for t in targets)
 
     def _row_keys(i: int, t: Target) -> set:
+        """Every name an operator might type for this row (number, label, FQDN, IP, id), so exclude accepts any of them."""
         keys = {
             str(i),
             t.label().lower(),
@@ -465,6 +539,9 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
             t.ssh_ip.lower(),
             t.appliance_id.lower(),
         }
+        # The full appliance name as N.name, because the label may show a shorter one.
+        if t.hostname:
+            keys.add(f"{t.collective}.{t.hostname}".lower())
         # A hostname two collectives share is not a key; it must be typed as N.hostname.
         if host_counts[t.hostname.lower()] == 1:
             keys.add(t.hostname.lower())
@@ -477,6 +554,7 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
         raw = input(
             "\n      Exclude (e.g. 1,3 or 1-10,12-20 or 1.hostname; Enter for all): "
         ).strip()
+        # print(f"DEBUG exclude: raw={raw!r}")
         if not raw:
             return list(targets)
         try:
@@ -484,6 +562,10 @@ def prompt_exclusions(targets: List[Target]) -> List[Target]:
         except ValueError as exc:
             # print("DEBUG exclude: incomplete range")
             print(f"      {exc}", file=sys.stderr)
+            continue
+        if not tokens:
+            # Only commas or spaces: not the same as Enter, so ask rather than run on every box.
+            print("      Nothing to exclude was entered. Press Enter to keep all, or list rows.", file=sys.stderr)
             continue
         # Each comma part must hit at least one row. A range counts if any number in
         # it does (1-100 on 4 rows still means rows 1-4). Otherwise a typo, a number

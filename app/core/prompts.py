@@ -20,15 +20,21 @@ from config import (
     CREDENTIALS_FILENAME,
     DEBUG,
     LAB_MODE,
-    NTP_WEAK_KEY_TYPES,
     SNMP_MIN_PASSPHRASE_LEN,
     SNMP_NAME_RE,
     STIG_PASSWORD_MIN_LEN,
-    YES_ANSWERS,
 )
 from getpass import getpass
 
-from core.utils import REPO_ROOT, expand_exclude_tokens, halt, is_valid_host, prompt_until_valid, prompt_yes
+from core.utils import (
+    REPO_ROOT,
+    expand_exclude_tokens,
+    halt,
+    is_valid_host,
+    ntp_key_error,
+    prompt_until_valid,
+    prompt_yes,
+)
 
 CREDENTIALS_PATH = os.path.join(REPO_ROOT, CREDENTIALS_FILENAME)
 
@@ -142,6 +148,16 @@ def _reject_controls(label: str, text: str) -> str:
     return text
 
 
+# chrony key IDs are unsigned 32-bit and 0 is not a usable key.
+NTP_KEY_NO_MAX = 4294967295
+
+
+def ntp_key_no_ok(text: str) -> bool:
+    """keyNo must be 1-4294967295. 0, a negative or a huge number would be refused by the Controller after the PUT."""
+    value = (text or "").strip()
+    return value.isascii() and value.isdigit() and 1 <= int(value) <= NTP_KEY_NO_MAX
+
+
 def _parse_ntp_servers(value: Any) -> List[Dict[str, str]]:
     """A bad row must stop the load with a halt. A traceback hides the row the operator has to fix."""
     try:
@@ -157,10 +173,12 @@ def _parse_ntp_servers(value: Any) -> List[Dict[str, str]]:
 def _parse_ntp_servers_checked(value: Any) -> List[Dict[str, str]]:
     """Raise on a bad row or a non-array so the caller can halt. Ignoring an object would look like no servers were set.
 
-    Only control characters are refused here. A hostname that is not an IP or FQDN
-    passes this check and is sent to the Controller. The IP-or-FQDN check runs only
-    later, at the chronyc verify step.
+    The hostname must be an IP or FQDN and keyNo 1-4294967295. key and keyType
+    must be text (a JSON list or number is refused, not turned into its printed
+    form), and the key settings pass ntp_key_error, so a row the push would refuse
+    stops the load here, before any box is changed.
     """
+    # print(f"DEBUG ntp key fields: types={[(type(i.get('key')).__name__, type(i.get('keyType')).__name__) for i in value if isinstance(i, dict)] if isinstance(value, list) else []}")
     # print(f"DEBUG ntp rows: n={len(value) if isinstance(value, list) else type(value).__name__}")
     if value is None:
         return []
@@ -184,17 +202,23 @@ def _parse_ntp_servers_checked(value: Any) -> List[Dict[str, str]]:
         if not is_valid_host(host):
             raise ValueError(f"NTP hostname is not an IP or FQDN: {host!r}")
         kn = item.get("keyNo")
+        # print(f"DEBUG ntp keyNo: {host} keyNo={kn!r}")
         if isinstance(kn, (bool, float, list, dict)):
             raise ValueError(f"NTP keyNo for {host} must be a whole number or text")
         key_no = "" if kn is None else _reject_controls("keyNo", str(kn).strip())
-        out.append(
-            {
-                "hostname": host,
-                "keyType": _reject_controls("keyType", str(item.get("keyType") or "").strip()),
-                "keyNo": key_no,
-                "key": _reject_controls("key", str(item.get("key") or "").strip()),
-            }
-        )
+        if key_no and not ntp_key_no_ok(key_no):
+            raise ValueError(f"NTP keyNo for {host} must be 1-{NTP_KEY_NO_MAX}")
+        if key_no:
+            key_no = str(int(key_no))  # 007 is key 7
+        for field in ("keyType", "key"):
+            if item.get(field) is not None and not isinstance(item.get(field), str):
+                raise ValueError(f"NTP {field} for {host} must be text")
+        key_type = _reject_controls("keyType", (item.get("keyType") or "").strip())
+        key = _reject_controls("key", (item.get("key") or "").strip())
+        problem = ntp_key_error(host, key_type, key_no, key)
+        if problem:
+            raise ValueError(problem)
+        out.append({"hostname": host, "keyType": key_type, "keyNo": key_no, "key": key})
     return out
 
 
@@ -237,11 +261,18 @@ def ensure_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
             # Checked before the PUT. The chronyc verify step used to be the first check.
             print("      Enter an IP address or an FQDN (e.g. ntp.example.com).", file=sys.stderr)
             continue
-        key_type = input("      keyType (e.g. SHA256, empty if none): ").strip()
-        if key_type.replace("-", "").upper() in NTP_WEAK_KEY_TYPES and not LAB_MODE:
-            print("      DISA/CNSA: MD5/SHA1 NTP keys are rejected. Use SHA256.", file=sys.stderr)
+        key_type = input("      keyType (SHA512, SHA384 or SHA256; empty if none): ").strip()
+        type_problem = ntp_key_error(host, key_type, "", "")
+        if type_problem:
+            # Asked before keyNo and the key, so a bad type is not typed past.
+            print(f"      {type_problem}.", file=sys.stderr)
             continue
         key_no = input("      keyNo (empty if none): ").strip()
+        if key_no and not ntp_key_no_ok(key_no):
+            print(f"      keyNo must be a whole number from 1 to {NTP_KEY_NO_MAX}.", file=sys.stderr)
+            continue
+        if key_no:
+            key_no = str(int(key_no))
         key = ""
         if key_type:
             if not sys.stdin.isatty():
@@ -251,6 +282,10 @@ def ensure_ntp_servers(col: dict, creds: dict) -> List[Dict[str, str]]:
             if key != confirm:
                 print("      Keys did not match. Try again.", file=sys.stderr)
                 continue
+        row_problem = ntp_key_error(host, key_type, key_no, key)
+        if row_problem:
+            print(f"      {row_problem}. Enter this server again.", file=sys.stderr)
+            continue
         servers.append(
             {
                 "hostname": host,
@@ -308,6 +343,7 @@ def _parse_collectives(creds: dict) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
 
     def _add(i: int, row: Dict[str, Any]) -> None:
+        """Validate one collective row and ask for a missing FQDN, so a bad row stops here instead of failing at login."""
         fqdn = _require(
             row,
             "fqdn",
@@ -419,6 +455,7 @@ def _exclude_collectives(cols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return cols
 
     def _keys(col: Dict[str, Any]) -> set:
+        """Every name an operator might type for this collective (index, FQDN, IP), so exclude accepts any of them."""
         keys = {
             str(col.get("index") or "").lower(),
             (col.get("fqdn") or "").lower(),
@@ -440,6 +477,9 @@ def _exclude_collectives(cols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         except ValueError as exc:
             print(f"      {exc}", file=sys.stderr)
             continue
+        if not tokens:
+            print("      Nothing to exclude was entered. Press Enter to keep all, or list collectives.", file=sys.stderr)
+            continue
         unmatched = [
             part.strip() for part in raw.split(",")
             if part.strip() and not (expand_exclude_tokens(part) & all_keys)
@@ -454,6 +494,16 @@ def _exclude_collectives(cols: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         kept.append(col)
     return kept
+
+
+def require_collectives(collectives: List[Dict[str, Any]]) -> None:
+    """Stop with E01 when credentials.json and the prompts gave no Controller.
+
+    Every tool needs at least one; this used to be the same halt copied into
+    six tools, and the copies' hints had started to differ.
+    """
+    if not collectives:
+        halt("E01", "No collectives defined (collectives[] or agip)")
 
 
 def collective_for_target(target: Any, collectives: List[Dict[str, Any]]) -> Dict[str, Any]:

@@ -169,8 +169,31 @@ def _windows_write_sids() -> set:
     return {own, b"S-1-5-18", b"S-1-5-32-544"}
 
 
-def _reject_loose_windows(path: str, *, directory: bool = False) -> None:
-    """Read the DACL in-process. SIDs, not names, and no PowerShell."""
+def require_private_file(path: str) -> None:
+    """Refuse a secrets file (credentials.json) that other users can read or write.
+
+    The same ACL check the Controller CA files get, but stricter: the CA file is
+    public and only writers matter; this file holds every password, so readers
+    matter too. Only this user, Administrators and SYSTEM may have access on
+    Windows; group/other bits must be clear on POSIX. Raises CaPinError.
+    """
+    if os.name == "posix":
+        mode = os.stat(path).st_mode & 0o077
+        if mode:
+            raise CaPinError(
+                f"{path} can be read or written by other users (mode {mode:03o}).",
+                fatal=True,
+            )
+        return
+    _reject_loose_windows(path, readers=True)
+
+
+def _reject_loose_windows(path: str, *, directory: bool = False, readers: bool = False) -> None:
+    """Read the DACL in-process. SIDs, not names, and no PowerShell.
+
+    readers=True also refuses read access for anyone but this user,
+    Administrators and SYSTEM (a secrets file); otherwise only writers count.
+    """
     import ctypes
     from ctypes import wintypes
 
@@ -219,8 +242,12 @@ def _reject_loose_windows(path: str, *, directory: bool = False) -> None:
     allowed = _windows_write_sids()
     if directory:
         write_bits |= 0x40
+    if readers:
+        # FILE_READ_DATA and GENERIC_READ: who can read the secrets, not only change them.
+        write_bits |= 0x01 | 0x80000000
 
     def refuse(reason: str) -> None:
+        """Any unreadable ACL fails closed: a CA file whose writers cannot be checked could have been swapped."""
         raise CaPinError(
             f"Could not verify permissions on {path}. Refusing to use it. {reason}",
             fatal=True,
@@ -292,8 +319,10 @@ def _reject_loose_windows(path: str, *, directory: bool = False) -> None:
             finally:
                 kernel.LocalFree(ctypes.cast(sid_str, ctypes.c_void_p))
             if mask & write_bits and sid not in allowed:
+                # print(f"DEBUG acl: {path} other SID {sid!r} mask=0x{mask:08x}")
                 raise CaPinError(
-                    f"{path} is writable by other users. Restrict the ACL before login.",
+                    f"{path} is {'readable or writable' if readers else 'writable'} by other users. "
+                    "Restrict the ACL before login.",
                     fatal=True,
                 )
     finally:

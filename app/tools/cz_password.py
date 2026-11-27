@@ -16,64 +16,67 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import List, Optional
 
-from core.run import ClientMap, login_collectives, print_result, select_appliances
+from core.run import (
+    preview_then_apply,
+    login_collectives,
+    print_result,
+    fail_box,
+    report_target_fields,
+    select_appliances,
+    ssh_failure_code,
+    ssh_failure_reason,
+)
 from config import (
     CZ_PASSWORD_VERIFY_DELAY,
     DEBUG,
-    DRY_RUN,
     SSH_CONCURRENCY,
     WRITE_RUN_REPORT,
-    YES_ANSWERS,
     warn_insecure_transport,
 )
-from core.inventory import Target
+from core.inventory import STATUS_FAILED, STATUS_OK, STATUS_PREVIEW, Target
+from core.ui import boxes, step_banner
 from core.prompts import (
+    require_collectives,
     CREDENTIALS_PATH,
     _parse_collectives,
     collective_for_target,
     prepare_collectives,
 )
-from core.utils import HaltError, halt, load_credentials, print_error, read_credentials_text, write_json_report
-from ssh.client import prime_target_host_keys, run_ssh_batch, ssh_password_for
+from core.utils import load_credentials, print_error, read_credentials_text, run_tool, write_json_report
+from ssh.client import iter_primed_targets, run_ssh_batch, ssh_password_for
 from ssh.password import CzPassword
 
 def _fail(target: Target, message: str) -> None:
-    """Mark one box failed with a plain-language reason. DEBUG adds the detail."""
-    target.status = "failed"
+    """Mark one box failed with a plain-language reason. The report keeps the detail."""
     low = message.lower()
-    if "auth" in low:
-        human = "SSH login failed. Check username and password."
+    human = ssh_failure_reason(message)
+    if human:
+        pass
     elif "verify" in low:
         human = "Password may be set, but login with the new password failed. Wait and retry."
     else:
-        human = "Could not change the appliance SSH password. Check the report."
-    target.error = human
-    print_result(target, human, ok=False)
-    if DEBUG:
-        print(f"      Details: {message}", file=sys.stderr)
+        human = "Could not change the appliance SSH password. The report has the reason."
+    fail_box(target, human, message, ssh_failure_code(message) or "E13")
 
 
-def _apply(
-    selected: List[Target],
-    collectives: list,
-    *,
-    dry_run: bool,
-) -> None:
-    """Step 3: preview, or set and verify the new password per box. A box with no working address is skipped."""
-    print(f"\n[3/3] Set cz password via SSH (up to {SSH_CONCURRENCY} at a time)...")
-    if dry_run:
-        for target in selected:
-            print(
-                f"      {target.label()}: would set password then SSH login-verify"
-            )
-            target.status = "preview"
-        return
+def _preview(selected: List[Target]) -> None:
+    """Step 3 preview: one Plan line per box, nothing sent."""
+    step_banner("[3/3]", "Set the cz SSH password", f"{boxes(len(selected))}, up to {SSH_CONCURRENCY} at a time")
+    for target in selected:
+        if target.status == STATUS_FAILED:
+            continue
+        print_result(target, "set the password, then log in with it to verify", word="Plan")
+        target.status = STATUS_PREVIEW
 
-    prime_target_host_keys(selected, collectives)
+
+def _apply_live(confirmed: List[Target], collectives: list) -> None:
+    """Step 3 live: set and verify the new password on each confirmed box, each starting as soon as its SSH address is settled."""
+    step_banner("[3/3]", "Set the cz SSH password", f"{boxes(len(confirmed))}, up to {SSH_CONCURRENCY} at a time")
 
     def _one(target: Target) -> None:
+        """One box in a worker thread: refuse a new password equal to the old, set it, and record a plain failure instead of raising."""
         col = collective_for_target(target, collectives)
         # print(f"DEBUG czpw: {target.label()} user={col.get('ssh_username')}")
         if (col.get("ssh_password_new") or "") == ssh_password_for(target, col):
@@ -97,12 +100,12 @@ def _apply(
                 "Wait and retry menu 4, or SSH manually with ssh_password_new.",
             )
             raise RuntimeError("login verify FAILED")
-        target.status = "ok"
-        print_result(target, "password updated")
+        target.status = STATUS_OK
+        print_result(target, "password changed; login with it verified")
 
-    # A box with no answering address or a refused host key already failed above. Do not SSH to it.
-    ready = [t for t in selected if t.status != "failed"]
-    run_ssh_batch(ready, _one, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
+    # Boxes are handed over as their address is settled; a box with no answering
+    # address or a refused host key is never yielded, so it gets no SSH.
+    run_ssh_batch(iter_primed_targets(confirmed, collectives), _one, SSH_CONCURRENCY, lambda t, e: _fail(t, str(e)))
 
 
 def _emit_report(
@@ -129,17 +132,15 @@ def _emit_report(
             }
             for c in collectives
         ],
-        "ok_count": sum(1 for t in selected if t.status == "ok"),
-        "preview_count": sum(1 for t in selected if t.status == "preview"),
-        "failed_count": sum(1 for t in selected if t.status == "failed"),
+        "ok_count": sum(1 for t in selected if t.status == STATUS_OK),
+        "preview_count": sum(1 for t in selected if t.status == STATUS_PREVIEW),
+        "failed_count": sum(1 for t in selected if t.status == STATUS_FAILED),
         "targets": [
             {
-                "label": t.label(),
+                **report_target_fields(t, hide_addresses=False),
                 "ssh_fqdn": t.ssh_fqdn,
                 "ssh_ip": t.ssh_ip,
-                "status": t.status,
-                "error": t.error,
-                "login_ok": t.status == "ok",
+                "login_ok": t.status == STATUS_OK,
             }
             for t in selected
         ],
@@ -165,9 +166,9 @@ def _save_passwords(
     Controller listed as unhealthy or not activated are not in the inventory, so
     they are not counted here.
     """
-    # print(f"DEBUG czpw save: applied={[t.label() for t in selected if t.status == 'ok']}")
-    applied = [t for t in selected if t.status == "ok"]
-    if not applied or any(t.status == "failed" for t in selected):
+    # print(f"DEBUG czpw save: applied={[t.label() for t in selected if t.status == STATUS_OK]}")
+    applied = [t for t in selected if t.status == STATUS_OK]
+    if not applied or any(t.status == STATUS_FAILED for t in selected):
         print(
             "      credentials.json left unchanged. Not every box took the new password.",
             file=sys.stderr,
@@ -296,12 +297,7 @@ def main() -> None:
     warn_insecure_transport()
     creds = load_credentials(CREDENTIALS_PATH)
     collectives = _parse_collectives(creds)
-    if not collectives:
-        halt(
-            "E01",
-            "No collectives defined (collectives[] or agip)",
-            "Add collectives[].fqdn to credentials.json or enter when prompted.",
-        )
+    require_collectives(collectives)
     prepare_collectives(creds, collectives, need_new_password=True)
     if DEBUG:
         print(
@@ -313,40 +309,23 @@ def main() -> None:
     # The full list is needed to tell whether every box of a collective changed.
     inventory: List[Target] = []
     selected = select_appliances(clients, step="[2/3]", inventory_out=inventory)
-    started_at = datetime.now(timezone.utc).isoformat()
-    _apply(selected, collectives, dry_run=True)
-    _emit_report(collectives, selected, dry_run=True, started_at=started_at)
-    if DRY_RUN:
-        print("      DRY_RUN is set — preview only.", file=sys.stderr)
-    elif any(t.status == "preview" for t in selected):
-        apply = input("\n      Apply to these appliances now? [y/N]: ").strip().lower()
-        if apply in YES_ANSWERS:
-            for target in selected:
-                if target.status == "preview":
-                    target.status = "pending"
-                    target.error = ""
-            live_started = datetime.now(timezone.utc).isoformat()
-            try:
-                _apply(selected, collectives, dry_run=False)
-            finally:
-                _emit_report(
-                    collectives, selected, dry_run=False, started_at=live_started
-                )
+    preview_then_apply(
+        selected,
+        preview=lambda: _preview(selected),
+        apply=lambda go: _apply_live(go, collectives),
+        report=lambda dry, at: _emit_report(collectives, selected, dry_run=dry, started_at=at),
+        prompt="Change the SSH password on {boxes} now?",
+    )
 
-    if any(t.status == "ok" for t in selected):
+    # Easy to miss: this runs only when the flow returns normally. After Ctrl+C or
+    # an error in the live run, boxes that finished already use the new password,
+    # but credentials.json is not updated for them.
+    # print(f"DEBUG czpw: save step, ok={[t.label() for t in selected if t.status == STATUS_OK]}")
+    if any(t.status == STATUS_OK for t in selected):
         _save_passwords(creds, collectives, selected, inventory)
-    if any(t.status == "failed" for t in selected):
+    if any(t.status == STATUS_FAILED for t in selected):
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nOperation cancelled by user", file=sys.stderr)
-        sys.exit(1)
-    except HaltError:
-        sys.exit(1)
-    except Exception as exc:
-        print(f"\nError: {exc}", file=sys.stderr)
-        sys.exit(1)
+    run_tool(main)
