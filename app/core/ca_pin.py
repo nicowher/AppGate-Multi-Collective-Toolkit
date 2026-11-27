@@ -12,11 +12,11 @@ import re
 import ssl
 
 from config import CA_DIRNAME
+from core.fileperm import FilePermError, reject_loose
 from core.utils import REPO_ROOT
 
 _seen_safe = {}
 _converted_pems = []
-_ACE_COUNT_CAP = 128
 
 
 class CaPinError(RuntimeError):
@@ -70,17 +70,15 @@ def _ensure_dir(path: str) -> None:
 
 
 def _reject_loose(path: str, *, directory: bool = False) -> None:
-    """Check the PEM and certs/. Delete-child on the folder replaces the file even if the file ACL is tight."""
-    if os.name == "posix":
-        mode = os.stat(path).st_mode
-        if mode & 0o022:
-            kind = "directory" if directory else "file"
-            raise CaPinError(
-                f"{path} is a group or world writable {kind}. Restrict it before login.",
-                fatal=True,
-            )
-        return
-    _reject_loose_windows(path, directory=directory)
+    """Check a CA file or certs/ folder for other writers (core.fileperm).
+
+    The CA path keeps its own error, fatal, so the FQDN/IP fallback stops as
+    before instead of trying the next address with a CA file nobody can trust.
+    """
+    try:
+        reject_loose(path, directory=directory)
+    except FilePermError as exc:
+        raise CaPinError(str(exc), fatal=True) from exc
 
 
 def _require_ca(path: str, pem: str) -> None:
@@ -124,209 +122,6 @@ def _require_ca(path: str, pem: str) -> None:
             raise CaPinError(f"{path} CA EC key is below P-384.", fatal=True)
     else:
         raise CaPinError(f"{path} CA key must be RSA-3072 or ECDSA P-384 or stronger.", fatal=True)
-
-
-def _windows_write_sids() -> set:
-    """Only this user, Administrators, and SYSTEM may write the trust anchor."""
-    import ctypes
-    from ctypes import wintypes
-
-    advapi = ctypes.windll.advapi32
-    kernel = ctypes.windll.kernel32
-    advapi.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
-    advapi.OpenProcessToken.restype = wintypes.BOOL
-    advapi.GetTokenInformation.argtypes = [
-        wintypes.HANDLE,
-        wintypes.DWORD,
-        ctypes.c_void_p,
-        wintypes.DWORD,
-        ctypes.POINTER(wintypes.DWORD),
-    ]
-    advapi.GetTokenInformation.restype = wintypes.BOOL
-    advapi.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
-    advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
-    token = wintypes.HANDLE()
-    if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
-        raise CaPinError("Could not read the current user token.", fatal=True)
-    try:
-        needed = wintypes.DWORD(0)
-        advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
-        buf = ctypes.create_string_buffer(needed.value or 64)
-        if not advapi.GetTokenInformation(token, 1, buf, len(buf), ctypes.byref(needed)):
-            raise CaPinError("Could not read the current user SID.", fatal=True)
-        sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
-        sid_str = ctypes.c_wchar_p()
-        if not advapi.ConvertSidToStringSidW(sid_ptr, ctypes.byref(sid_str)) or not sid_str:
-            raise CaPinError("Could not format the current user SID.", fatal=True)
-        try:
-            own = (sid_str.value or "").encode("ascii")
-        finally:
-            kernel.LocalFree(ctypes.cast(sid_str, ctypes.c_void_p))
-    finally:
-        kernel.CloseHandle(token)
-    if not own:
-        raise CaPinError("Current user SID was empty.", fatal=True)
-    return {own, b"S-1-5-18", b"S-1-5-32-544"}
-
-
-def require_private_file(path: str) -> None:
-    """Refuse a secrets file (credentials.json) that other users can read or write.
-
-    The same ACL check the Controller CA files get, but stricter: the CA file is
-    public and only writers matter; this file holds every password, so readers
-    matter too. Only this user, Administrators and SYSTEM may have access on
-    Windows; group/other bits must be clear on POSIX. Raises CaPinError.
-    """
-    if os.name == "posix":
-        mode = os.stat(path).st_mode & 0o077
-        if mode:
-            raise CaPinError(
-                f"{path} can be read or written by other users (mode {mode:03o}).",
-                fatal=True,
-            )
-        return
-    _reject_loose_windows(path, readers=True)
-
-
-def _reject_loose_windows(path: str, *, directory: bool = False, readers: bool = False) -> None:
-    """Read the DACL in-process. SIDs, not names, and no PowerShell.
-
-    readers=True also refuses read access for anyone but this user,
-    Administrators and SYSTEM (a secrets file); otherwise only writers count.
-    """
-    import ctypes
-    from ctypes import wintypes
-
-    advapi = ctypes.windll.advapi32
-    kernel = ctypes.windll.kernel32
-    advapi.GetNamedSecurityInfoW.argtypes = [
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
-        wintypes.DWORD,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_void_p),
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_void_p),
-    ]
-    advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
-    advapi.GetAclInformation.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        wintypes.DWORD,
-        wintypes.DWORD,
-    ]
-    advapi.GetAce.argtypes = [
-        ctypes.c_void_p,
-        wintypes.DWORD,
-        ctypes.POINTER(ctypes.c_void_p),
-    ]
-    advapi.ConvertSidToStringSidW.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_wchar_p),
-    ]
-    advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
-    SE_FILE_OBJECT = 1
-    DACL_SECURITY_INFORMATION = 0x4
-    ACCESS_ALLOWED_ACE_TYPE = 0
-    ACCESS_DENIED_ACE_TYPE = 1
-    ACCESS_ALLOWED_OBJECT_ACE_TYPE = 5
-    ACCESS_DENIED_OBJECT_ACE_TYPE = 6
-    ACE_OBJECT_TYPE_PRESENT = 0x1
-    ACE_INHERITED_OBJECT_TYPE_PRESENT = 0x2
-    # GENERIC_ALL and MAXIMUM_ALLOWED are write even when the specific bits are unset.
-    write_bits = (
-        0x02 | 0x04 | 0x10 | 0x100 | 0x10000 | 0x40000 | 0x80000
-        | 0x02000000 | 0x10000000 | 0x40000000
-    )
-    allowed = _windows_write_sids()
-    if directory:
-        write_bits |= 0x40
-    if readers:
-        # FILE_READ_DATA and GENERIC_READ: who can read the secrets, not only change them.
-        write_bits |= 0x01 | 0x80000000
-
-    def refuse(reason: str) -> None:
-        """Any unreadable ACL fails closed: a CA file whose writers cannot be checked could have been swapped."""
-        raise CaPinError(
-            f"Could not verify permissions on {path}. Refusing to use it. {reason}",
-            fatal=True,
-        )
-
-    sd = ctypes.c_void_p()
-    dacl = ctypes.c_void_p()
-    status = advapi.GetNamedSecurityInfoW(
-        path,
-        SE_FILE_OBJECT,
-        DACL_SECURITY_INFORMATION,
-        None,
-        None,
-        ctypes.byref(dacl),
-        None,
-        ctypes.byref(sd),
-    )
-    if status != 0 or not sd:
-        refuse(f"GetNamedSecurityInfo returned {status}.")
-    try:
-        if not dacl:
-            raise CaPinError(
-                f"{path} has no DACL, so any user can write it. Restrict the ACL before login.",
-                fatal=True,
-            )
-        class ACL_SIZE(ctypes.Structure):
-            """ctypes ACL_SIZE_INFORMATION for GetAclInformation. The ACE count bounds the walk in the Windows permission check."""
-            _fields_ = [
-                ("AceCount", wintypes.DWORD),
-                ("AclBytesInUse", wintypes.DWORD),
-                ("AclBytesFree", wintypes.DWORD),
-            ]
-
-        info = ACL_SIZE()
-        if not advapi.GetAclInformation(dacl, ctypes.byref(info), ctypes.sizeof(info), 2):
-            refuse("GetAclInformation failed.")
-        if info.AceCount > _ACE_COUNT_CAP:
-            refuse(f"ACL has {info.AceCount} ACEs.")
-        for index in range(info.AceCount):
-            ace = ctypes.c_void_p()
-            if not advapi.GetAce(dacl, index, ctypes.byref(ace)) or not ace:
-                refuse(f"GetAce failed at {index}.")
-            header = ctypes.cast(ace, ctypes.POINTER(ctypes.c_ubyte))
-            ace_type = header[0]
-            ace_size = header[2] | (header[3] << 8)
-            if ace_type in (ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE):
-                continue
-            mask = ctypes.cast(ace, ctypes.POINTER(wintypes.DWORD))[1]
-            if ace_type == ACCESS_ALLOWED_ACE_TYPE:
-                sid_off = 8
-            elif ace_type == ACCESS_ALLOWED_OBJECT_ACE_TYPE:
-                flags = ctypes.cast(ace, ctypes.POINTER(wintypes.DWORD))[2]
-                sid_off = 12
-                if flags & ACE_OBJECT_TYPE_PRESENT:
-                    sid_off += 16
-                if flags & ACE_INHERITED_OBJECT_TYPE_PRESENT:
-                    sid_off += 16
-            else:
-                refuse(f"Unhandled ACE type {ace_type} at {index}.")
-                continue
-            if sid_off + 8 > ace_size:
-                refuse(f"ACE {index} is shorter than its SID.")
-            sid_ptr = ctypes.c_void_p(ace.value + sid_off)
-            sid_str = ctypes.c_wchar_p()
-            if not advapi.ConvertSidToStringSidW(sid_ptr, ctypes.byref(sid_str)) or not sid_str:
-                refuse(f"Could not read ACE SID at {index}.")
-            try:
-                sid = (sid_str.value or "").encode("ascii")
-            finally:
-                kernel.LocalFree(ctypes.cast(sid_str, ctypes.c_void_p))
-            if mask & write_bits and sid not in allowed:
-                # print(f"DEBUG acl: {path} other SID {sid!r} mask=0x{mask:08x}")
-                raise CaPinError(
-                    f"{path} is {'readable or writable' if readers else 'writable'} by other users. "
-                    "Restrict the ACL before login.",
-                    fatal=True,
-                )
-    finally:
-        kernel.LocalFree(sd)
 
 
 def _parse_pem(path: str, text: str) -> None:

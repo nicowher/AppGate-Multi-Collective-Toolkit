@@ -6,6 +6,7 @@ import re
 from typing import Any, Dict, Optional
 
 from config import (
+    SNMP_PUT_ALLOWED,
     ENGINE_ID_TYPE,
     SNMP_AUTH_PROTOCOL,
     SNMP_NAME_RE,
@@ -18,8 +19,6 @@ from .errors import AppliancePutError
 
 _HASH_RE = re.compile(r"^[0-9a-fA-F]+$")
 _ROUSER_RE = re.compile(r"^rouser\s+[A-Za-z0-9_.-]+\s+priv$")
-
-SNMP_PUT_ALLOWED = ("snmpServer.snmpd.conf", "snmpServer.enabled")
 
 
 class SnmpMixin:

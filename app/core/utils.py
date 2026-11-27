@@ -34,6 +34,7 @@ from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from getpass import getpass
 from typing import Any, Callable, Dict, Optional
 
+from core.fileperm import FilePermError, require_private_file
 from config import (
     APPLIANCE_LIST_MAX,
     DEBUG,
@@ -75,11 +76,12 @@ def print_error(code: str, message: str, *hints: str) -> None:
             print(f"      Next: {hint}", file=sys.stderr)
 
 
-class HaltError(ValueError):
+class HaltError(Exception):
     """Already printed as ERROR E0x. Tool __main__ should exit without reprinting.
 
-    Easy to misuse: it is a ValueError, so an `except ValueError` around code
-    that can halt catches this stop and handles it again (a second, wrong error).
+    Deliberately not a ValueError: input-parsing code catches ValueError, and a
+    stop raised inside such a block used to be caught and reported a second
+    time with the wrong message. Catch HaltError by name.
     """
 
 
@@ -664,11 +666,10 @@ def _require_private_credentials(path: str) -> None:
     hard stop.
     """
     import config as _config
-    from core.ca_pin import CaPinError, require_private_file
 
     try:
         require_private_file(path)
-    except (CaPinError, OSError) as exc:
+    except (FilePermError, OSError) as exc:
         if getattr(_config, "LAB_MODE", False):
             print(f"WARNING: {exc} LAB_MODE is on, so the run continues.", file=sys.stderr)
             return
@@ -697,9 +698,7 @@ def load_credentials(path: str) -> Dict[str, Any]:
         data = json.loads(read_credentials_text(path))
         if not isinstance(data, dict):
             raise ValueError(f"the top level is a JSON {type(data).__name__}, not an object")
-        # Easy to misuse: halt() raises HaltError, a ValueError, and the except
-        # below catches ValueError, so a permission stop here is caught again and
-        # reported a second time as an unreadable file with the wrong fix.
+        # A permission stop (HaltError) passes the except below untouched.
         # print(f"DEBUG creds: permission check on {path}")
         _require_private_credentials(path)
         # print(f"DEBUG creds: loaded keys={list(data)} from {path}")

@@ -6,6 +6,7 @@ import sys
 from typing import Any, Dict, List
 
 from config import (
+    NTP_PUT_ALLOWED,
     DEBUG,
     NTP_HEX_KEY_TYPES,
     NTP_KEY_HEX_PREFIX,
@@ -29,8 +30,6 @@ def _peer_major(client: Any) -> int:
         return int(str(getattr(client, "api_version", "") or "0"))
     except ValueError:
         return 0
-
-NTP_PUT_ALLOWED = ("ntp", "ntpServers", "ntpServer")
 
 
 class NtpMixin:

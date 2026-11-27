@@ -252,8 +252,6 @@ if insecure_api_enabled():
     _disable_tls_verify()
 
 
-SNMP_PUT_ALLOWED = ("snmpServer.snmpd.conf", "snmpServer.enabled")
-NTP_PUT_ALLOWED = ("ntp", "ntpServers", "ntpServer")
 ALLOW_SOURCES_PARENTS = tuple(sorted(set(ALLOW_SOURCES_SLOT_PARENT.values())))
 
 

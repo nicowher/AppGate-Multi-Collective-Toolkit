@@ -309,20 +309,21 @@ def main() -> None:
     # The full list is needed to tell whether every box of a collective changed.
     inventory: List[Target] = []
     selected = select_appliances(clients, step="[2/3]", inventory_out=inventory)
-    preview_then_apply(
-        selected,
-        preview=lambda: _preview(selected),
-        apply=lambda go: _apply_live(go, collectives),
-        report=lambda dry, at: _emit_report(collectives, selected, dry_run=dry, started_at=at),
-        prompt="Change the SSH password on {boxes} now?",
-    )
-
-    # Easy to miss: this runs only when the flow returns normally. After Ctrl+C or
-    # an error in the live run, boxes that finished already use the new password,
-    # but credentials.json is not updated for them.
-    # print(f"DEBUG czpw: save step, ok={[t.label() for t in selected if t.status == STATUS_OK]}")
-    if any(t.status == STATUS_OK for t in selected):
-        _save_passwords(creds, collectives, selected, inventory)
+    try:
+        preview_then_apply(
+            selected,
+            preview=lambda: _preview(selected),
+            apply=lambda go: _apply_live(go, collectives),
+            report=lambda dry, at: _emit_report(collectives, selected, dry_run=dry, started_at=at),
+            prompt="Change the SSH password on {boxes} now?",
+        )
+    finally:
+        # Also after Ctrl+C or an error: boxes that finished already use the new
+        # password, and the next run must log in with it. The whole-collective
+        # rule in _save_passwords still applies.
+        # print(f"DEBUG czpw: save step, ok={[t.label() for t in selected if t.status == STATUS_OK]}")
+        if any(t.status == STATUS_OK for t in selected):
+            _save_passwords(creds, collectives, selected, inventory)
     if any(t.status == STATUS_FAILED for t in selected):
         sys.exit(1)
 

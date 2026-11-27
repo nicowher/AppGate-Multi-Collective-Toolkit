@@ -300,6 +300,10 @@ ALLOW_SOURCES_SLOT_PARENT = {
     "ping": "ping",
     "snmp": "snmpServer",
 }
+# Fields each change may touch: the PUT guard, the rollback restore and the
+# pre-change backup all read these, so they are defined once.
+SNMP_PUT_ALLOWED = ("snmpServer.snmpd.conf", "snmpServer.enabled")
+NTP_PUT_ALLOWED = ("ntp", "ntpServers", "ntpServer")
 ALLOW_SOURCES_PUT_ALLOWED = tuple(
     f"{p}.allowSources" for p in sorted(set(ALLOW_SOURCES_SLOT_PARENT.values()))
 )

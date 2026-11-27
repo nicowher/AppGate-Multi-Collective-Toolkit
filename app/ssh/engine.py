@@ -200,7 +200,7 @@ class SNMPEngineFetcher(SSHSession):
                 f"      {tag}: createUser has not written the new key yet; leaving the API line in place.",
                 file=sys.stderr,
             )
-            self._restore_usm_rows(client, tag, user, backup)
+            self._restore_usm_rows(client, tag, user, backup, all_users=drop_others)
             return False
 
         ok = self._with_ssh_endpoints(
@@ -212,11 +212,11 @@ class SNMPEngineFetcher(SSHSession):
             raise RuntimeError(f"Could not purge persistent SNMP user '{user}' via SSH")
         time.sleep(SNMP_RELOAD_DELAY)
 
-    def _restore_usm_rows(self, client: paramiko.SSHClient, tag: str, user: str, backup: dict) -> bool:
+    def _restore_usm_rows(self, client: paramiko.SSHClient, tag: str, user: str, backup: dict, all_users: bool = False) -> bool:
         """Put back the rows saved before the purge, so a failed recreate keeps the old user.
 
-        In Replace mode the backup holds every user's rows, but the messages
-        below still name only the configured user.
+        In Replace mode (all_users) the backup holds every user's rows, and the
+        messages say so.
 
         snmpd is stopped first: a running snmpd rewrites the file on exit and would
         drop the rows again. The rows go to the remote shell on stdin, not on the
@@ -239,9 +239,11 @@ class SNMPEngineFetcher(SSHSession):
             ok = ok and rc == 0
         started = self._start_snmpd(client)
         if ok and started:
-            print(f"      {tag}: put back the previous usmUser rows for '{user}'; the box keeps its old SNMP key.", file=sys.stderr)
+            who = "all users" if all_users else f"'{user}'"
+            print(f"      {tag}: put back the previous usmUser rows for {who}; the box keeps its old SNMP keys.", file=sys.stderr)
             return True
-        print(f"      {tag}: could not restore the previous usmUser rows for '{user}'; check SNMP on this box.", file=sys.stderr)
+        who = "all users" if all_users else f"'{user}'"
+        print(f"      {tag}: could not restore the previous usmUser rows for {who}; check SNMP on this box.", file=sys.stderr)
         return False
 
     def _configure_and_read_engine_id(

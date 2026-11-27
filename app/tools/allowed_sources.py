@@ -550,8 +550,7 @@ def _confirm_replace(
 def _plan_all(selected: List[Target], collectives: list) -> Dict[str, Dict[str, List[Dict[str, Any]]]]:
     """Build every box's plan once, before the preview: the preview, the confirm and the live run all use it.
 
-    Runs before the step 4 banner, so its "excluded self" and bad-row lines
-    print above that banner.
+    Called by the preview right after the step 4 banner.
 
     Before, the plan was rebuilt three or four times per box (and its
     "excluded self" line printed each time). A bad row fails only that box.
@@ -570,9 +569,14 @@ def _plan_all(selected: List[Target], collectives: list) -> Dict[str, Dict[str, 
     return plans
 
 
-def _preview(selected: List[Target], clients: ClientMap, plans, *, overwrite: bool) -> None:
-    """Step 4 preview: each box's plan, or "already set" when Add would change nothing; nothing sent."""
+def _preview(selected: List[Target], clients: ClientMap, collectives: list, plans, *, overwrite: bool) -> None:
+    """Step 4 preview: build each box's plan once (into plans), then show it or "already set"; nothing sent.
+
+    The plans are built after the banner, so their "excluded self" and bad-row
+    lines print under step 4; the confirm and the live run reuse them.
+    """
     step_banner("[4/4]", "Update allowed sources via the Controller API", boxes(len(selected)))
+    plans.update(_plan_all(selected, collectives))
     mode = "replace" if overwrite else "add"
     for target in selected:
         desired = plans.get(_plan_key(target))
@@ -701,7 +705,7 @@ def main() -> None:
     clients = login_collectives(collectives, step="[1/4]")
     selected = select_appliances(clients, step="[2/4]")
     overwrite = _prompt_merge_mode(clients, selected)
-    plans = _plan_all(selected, collectives)
+    plans: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}  # filled by the preview
 
     def _confirm(waiting) -> bool:
         """Menu 6's own confirm: replace runs the lockout check and its two-step yes; then wide prefixes."""
@@ -723,7 +727,7 @@ def main() -> None:
 
     preview_then_apply(
         selected,
-        preview=lambda: _preview(selected, clients, plans, overwrite=overwrite),
+        preview=lambda: _preview(selected, clients, collectives, plans, overwrite=overwrite),
         apply=lambda go: _apply_live(go, clients, plans, overwrite=overwrite),
         report=lambda dry, at: _emit_report(collectives, selected, overwrite=overwrite, dry_run=dry, started_at=at),
         prompt="",
